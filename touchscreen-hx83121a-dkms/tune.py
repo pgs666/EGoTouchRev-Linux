@@ -34,15 +34,20 @@ SLIDERS = [
     # CMF
     ("cmf_exclusion",      "CMF exclusion",          50,  800, 10),
     ("cmf_max_correction", "CMF max correction",     50, 1500, 10),
+    # Edge compensation
+    ("edge_boost_pct",     "Edge boost %",             0,  200,  5),
+    ("edge_push_q8",       "Edge push (Q8.8)",         0,  384,  8),
+    ("edge_blend_q8",      "Edge blend (Q8.8)",       64, 1024, 16),
     # Tracking
     ("track_lost_frames",  "Track lost frames",       1,   10,  1),
     ("debounce_base",      "Debounce base",           0,    8,  1),
 ]
 
 TOGGLES = [
-    ("cmf_enabled",   "CMF"),
-    ("iir_enabled",   "IIR"),
-    ("palm_enabled",  "Palm rejection"),
+    ("cmf_enabled",        "CMF"),
+    ("iir_enabled",        "IIR"),
+    ("palm_enabled",       "Palm rejection"),
+    ("edge_comp_enabled",  "Edge compensation"),
 ]
 
 # Parameters with large or irregular ranges — edited via Entry boxes

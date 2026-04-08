@@ -49,6 +49,10 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	algo->palm_area_threshold    = 50;
 	algo->palm_signal_threshold  = 80000;
 	algo->palm_density_low       = 400;
+	algo->edge_comp_enabled = true;
+	algo->edge_boost_pct   = 50;   /* 50% signal boost on border pixels  */
+	algo->edge_push_q8     = 128;  /* push up to 0.5 grid cells outward  */
+	algo->edge_blend_q8    = 512;  /* blend over 2 grid cells from edge  */
 	algo->track_dist2_max   = HIMAX_TRACK_MATCH_DIST2;
 	algo->track_lost_frames = HIMAX_TRACK_LOST_FRAMES;
 	algo->debounce_base     = HIMAX_NEW_TOUCH_DEBOUNCE;
@@ -73,6 +77,67 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw)
 
 	/* pixel [0][0] is always invalid on this panel layout */
 	algo->frame[0][0] = 0;
+}
+
+/* ======================================================================== */
+/* Phase 1A½ — edge signal boost                                            */
+/*                                                                           */
+/* Compensate reduced capacitive sensitivity at sensor borders by scaling   */
+/* border pixels upward.  Row 0/last and col 0/last get the full boost;    */
+/* row 1/last-1 and col 1/last-1 get half.  Corner pixels (on two borders) */
+/* are boosted once from each axis (multiplicative).                         */
+/* ======================================================================== */
+
+static void hx_edge_boost(struct hx_algo *algo)
+{
+	int r, c;
+	s32 pct = algo->edge_boost_pct;
+	s32 half_pct = pct / 2;
+
+	if (!algo->edge_comp_enabled || pct <= 0)
+		return;
+
+	/* Boost border rows: row 0 and row HX_ROWS-1 (full), row 1 and HX_ROWS-2 (half) */
+	for (c = 0; c < HX_COLS; c++) {
+		s32 v;
+
+		/* Top edge */
+		v = algo->frame[0][c];
+		if (v > 0)
+			algo->frame[0][c] = clamp_t(s32, v + v * pct / 100, 0, SHRT_MAX);
+		v = algo->frame[1][c];
+		if (v > 0)
+			algo->frame[1][c] = clamp_t(s32, v + v * half_pct / 100, 0, SHRT_MAX);
+
+		/* Bottom edge */
+		v = algo->frame[HX_ROWS - 1][c];
+		if (v > 0)
+			algo->frame[HX_ROWS - 1][c] = clamp_t(s32, v + v * pct / 100, 0, SHRT_MAX);
+		v = algo->frame[HX_ROWS - 2][c];
+		if (v > 0)
+			algo->frame[HX_ROWS - 2][c] = clamp_t(s32, v + v * half_pct / 100, 0, SHRT_MAX);
+	}
+
+	/* Boost border columns: col 0 and col HX_COLS-1 (full), col 1 and HX_COLS-2 (half) */
+	for (r = 0; r < HX_ROWS; r++) {
+		s32 v;
+
+		/* Left edge */
+		v = algo->frame[r][0];
+		if (v > 0)
+			algo->frame[r][0] = clamp_t(s32, v + v * pct / 100, 0, SHRT_MAX);
+		v = algo->frame[r][1];
+		if (v > 0)
+			algo->frame[r][1] = clamp_t(s32, v + v * half_pct / 100, 0, SHRT_MAX);
+
+		/* Right edge */
+		v = algo->frame[r][HX_COLS - 1];
+		if (v > 0)
+			algo->frame[r][HX_COLS - 1] = clamp_t(s32, v + v * pct / 100, 0, SHRT_MAX);
+		v = algo->frame[r][HX_COLS - 2];
+		if (v > 0)
+			algo->frame[r][HX_COLS - 2] = clamp_t(s32, v + v * half_pct / 100, 0, SHRT_MAX);
+	}
 }
 
 /* ======================================================================== */
@@ -208,6 +273,8 @@ void hx_preprocess_frame(struct hx_algo *algo, const u16 *raw)
 
 	if (algo->cmf_enabled)
 		hx_apply_cmf(algo);
+
+	hx_edge_boost(algo);
 
 	hx_apply_iir(algo);
 }
@@ -546,12 +613,17 @@ void hx_detect_peaks(struct hx_algo *algo)
 		algo->peak_count = dst;
 	}
 
-	/* --- Zone minimum-area filter: area < 2 → reject --- */
+	/* --- Zone minimum-area filter: area < 2 → reject (except edge peaks) --- */
 	{
 		u8 dst = 0, i;
 
 		for (i = 0; i < algo->peak_count; i++) {
-			if (algo->peaks[i].zone_area >= 2)
+			bool on_edge = (algo->peaks[i].r == 0 ||
+					algo->peaks[i].r == HX_ROWS - 1 ||
+					algo->peaks[i].c == 0 ||
+					algo->peaks[i].c == HX_COLS - 1);
+
+			if (algo->peaks[i].zone_area >= 2 || on_edge)
 				algo->peaks[dst++] = algo->peaks[i];
 		}
 		algo->peak_count = dst;
@@ -754,6 +826,52 @@ static void hx_local_centroid(struct hx_algo *algo, int pi,
 		       pk->c == 0 || pk->c == HX_COLS - 1);
 }
 
+/*
+ * Edge compensation: push centroid outward toward the physical sensor
+ * boundary.  The sensor extends ~0.5 cells beyond the last grid node,
+ * but the weighted centroid is biased inward because there's no data
+ * outside the grid.  This function linearly pushes edge contacts
+ * outward, with maximum push at the boundary itself, fading to zero
+ * at edge_blend_q8 distance from the edge.
+ */
+static void hx_edge_compensate(struct hx_algo *algo, struct hx_contact *ct)
+{
+	s32 push_max = algo->edge_push_q8;
+	s32 blend    = algo->edge_blend_q8;
+	s32 dist, push;
+
+	if (!algo->edge_comp_enabled || push_max <= 0 || blend <= 0)
+		return;
+
+	/* Left boundary: distance = ct->x (Q8.8, 0 = grid col 0 center) */
+	dist = ct->x;
+	if (dist < blend) {
+		push = push_max * (blend - dist) / blend;
+		ct->x = max_t(s32, ct->x - push, 0);
+	}
+
+	/* Right boundary: distance from last col center */
+	dist = (HX_COLS - 1) * 256 + 128 - ct->x;
+	if (dist < blend) {
+		push = push_max * (blend - dist) / blend;
+		ct->x = min_t(s32, ct->x + push, (HX_COLS - 1) * 256 + 256);
+	}
+
+	/* Top boundary */
+	dist = ct->y;
+	if (dist < blend) {
+		push = push_max * (blend - dist) / blend;
+		ct->y = max_t(s32, ct->y - push, 0);
+	}
+
+	/* Bottom boundary */
+	dist = (HX_ROWS - 1) * 256 + 128 - ct->y;
+	if (dist < blend) {
+		push = push_max * (blend - dist) / blend;
+		ct->y = min_t(s32, ct->y + push, (HX_ROWS - 1) * 256 + 256);
+	}
+}
+
 void hx_expand_and_resolve(struct hx_algo *algo,
 			    struct input_mt_pos *pos, int *cnt)
 {
@@ -771,6 +889,10 @@ void hx_expand_and_resolve(struct hx_algo *algo,
 		clean = hx_expand_single_peak(algo, i, ct);
 		if (!clean)
 			hx_local_centroid(algo, i, ct);
+
+		/* Push edge centroids outward toward physical sensor boundary */
+		if (ct->is_edge)
+			hx_edge_compensate(algo, ct);
 
 		algo->contact_count++;
 	}

@@ -144,6 +144,11 @@ struct hx_algo {
 	u8   palm_area_threshold;  /* area >= this → palm                  */
 	s32  palm_signal_threshold;/* signal_sum >= this → palm            */
 	s16  palm_density_low;     /* signal/area < this → palm            */
+	/* Edge compensation */
+	bool edge_comp_enabled;    /* edge compensation on/off             */
+	s16  edge_boost_pct;       /* signal boost for border pixels (%)   */
+	s16  edge_push_q8;         /* max outward push in Q8.8 (128=0.5)  */
+	s16  edge_blend_q8;        /* blend range in Q8.8 (512=2 cells)   */
 	/* Tracking */
 	s32  track_dist2_max;      /* max squared distance for match       */
 	u8   track_lost_frames;    /* missed frames before slot release    */

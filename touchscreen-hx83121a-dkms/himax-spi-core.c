@@ -965,6 +965,11 @@ HX_ALGO_ATTR_BOOL_RW(palm_enabled);
 HX_ALGO_ATTR_U8_RW(palm_area_threshold);
 HX_ALGO_ATTR_S32_RW(palm_signal_threshold);
 HX_ALGO_ATTR_S16_RW(palm_density_low);
+/* Edge compensation */
+HX_ALGO_ATTR_BOOL_RW(edge_comp_enabled);
+HX_ALGO_ATTR_S16_RW(edge_boost_pct);
+HX_ALGO_ATTR_S16_RW(edge_push_q8);
+HX_ALGO_ATTR_S16_RW(edge_blend_q8);
 /* Tracking */
 HX_ALGO_ATTR_S32_RW(track_dist2_max);
 HX_ALGO_ATTR_U8_RW(track_lost_frames);
@@ -986,6 +991,10 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_palm_area_threshold.attr,
 	&dev_attr_palm_signal_threshold.attr,
 	&dev_attr_palm_density_low.attr,
+	&dev_attr_edge_comp_enabled.attr,
+	&dev_attr_edge_boost_pct.attr,
+	&dev_attr_edge_push_q8.attr,
+	&dev_attr_edge_blend_q8.attr,
 	&dev_attr_track_dist2_max.attr,
 	&dev_attr_track_lost_frames.attr,
 	&dev_attr_debounce_base.attr,
