@@ -9,7 +9,6 @@
 
 /* TODO: DT parse: vdd_dig & avdd_analog */
 
-#include<linux/sort.h>
 #include<linux/dev_printk.h>
 
 #include <linux/delay.h>
@@ -26,6 +25,8 @@
 
 #include <drm/drm_panel.h>
 
+#include "hx-algo.h"
+
 #define HIMAX_BUS_RETRY					3
 /* SPI bus read header length */
 #define HIMAX_BUS_R_HLEN				3U
@@ -35,13 +36,6 @@
 #define HIMAX_REG_SZ					4U
 #define HIMAX_MAX_RX					60U
 #define HIMAX_MAX_TX					40U
-#define HIMAX_MAX_TOUCH					10
-#define HX_ROWS						HIMAX_MAX_TX
-#define HX_COLS						HIMAX_MAX_RX
-#define HX_PIXELS					(HX_ROWS * HX_COLS)
-#define HX_MAX_ZONES					20
-#define HX_MAX_PEAKS					20
-#define HX_ZONE_PX_MAX					300
 #define HIMAX_HX83121A_SAFE_MODE_PASSWORD		0x9527
 /* FIXME: this is for hx83120j, ~4928 for hx83121a 40 * 60 * 2 + 128 */
 #define HIMAX_HX83121A_STACK_SIZE			128U
@@ -113,88 +107,6 @@ union himax_dword_data {
 	u32 dword;
 	u16 word[2];
 	u8 byte[4];
-};
-
-struct hx_peak {
-	u8 r;
-	u8 c;
-	s16 z;
-	s32 nbr_sum;
-	u16 zone_area;
-};
-
-struct hx_contact {
-	s32 x;
-	s32 y;
-	u16 area;
-	s32 signal_sum;
-	bool is_edge;
-};
-
-struct hx_track {
-	bool active;
-	s32 x;
-	s32 y;
-	s32 vx;
-	s32 vy;
-	s32 signal_sum;
-	u8 age;
-	u8 missed;
-	u8 debounce;
-};
-
-struct hx_macro_zone {
-	u16 pixels[HX_ZONE_PX_MAX];
-	u16 area;
-	s32 signal_sum;
-	u8 min_r;
-	u8 max_r;
-	u8 min_c;
-	u8 max_c;
-};
-
-struct hx_algo {
-	s16 frame[HX_ROWS][HX_COLS];
-	s16 iir_history[HX_ROWS][HX_COLS];
-	bool iir_initialized;
-
-	u8 visited[HX_PIXELS];
-	u8 zone_map[HX_PIXELS];
-	u16 bfs_queue[HX_PIXELS];
-
-	struct hx_macro_zone zones[HX_MAX_ZONES];
-	u8 zone_count;
-
-	struct hx_peak peaks[HX_MAX_PEAKS];
-	u8 peak_count;
-
-	struct hx_contact contacts[HIMAX_MAX_TOUCH];
-	u8 contact_count;
-
-	struct hx_track tracks[HIMAX_MAX_TOUCH];
-	bool touch_active;
-	u8 touch_start_frames;
-
-	bool cmf_enabled;
-	s16 cmf_exclusion;
-	s16 cmf_max_correction;
-	bool iir_enabled;
-	u16 iir_decay_weight;
-	u16 iir_decay_step;
-	s16 iir_noise_floor;
-	s16 iir_gate_floor;
-	u8 iir_gate_ratio_q8;
-	bool gauss_enabled;
-	u8 gauss_center_weight;
-	s16 macro_threshold;
-	s16 peak_threshold;
-	bool palm_enabled;
-	u8 palm_area_threshold;
-	s32 palm_signal_threshold;
-	s16 palm_density_low;
-	s32 track_dist2_max;
-	u8 track_lost_frames;
-	u8 debounce_base;
 };
 
 struct himax_ts_data {
@@ -929,6 +841,166 @@ out_unlock:
 
 static DEVICE_ATTR_WO(inplace_reset);
 
+/* ---- sysfs: algo parameter group ---- */
+
+#define HX_ALGO_ATTR_BOOL_RW(_name)					\
+static ssize_t _name##_show(struct device *dev,				\
+			    struct device_attribute *attr, char *buf)	\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	return sysfs_emit(buf, "%d\n", ts->algo->_name ? 1 : 0);	\
+}									\
+static ssize_t _name##_store(struct device *dev,			\
+			     struct device_attribute *attr,		\
+			     const char *buf, size_t count)		\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	bool val;							\
+	int ret = kstrtobool(buf, &val);				\
+	if (ret)							\
+		return ret;						\
+	ts->algo->_name = val;						\
+	return count;							\
+}									\
+static DEVICE_ATTR_RW(_name)
+
+#define HX_ALGO_ATTR_S16_RW(_name)					\
+static ssize_t _name##_show(struct device *dev,				\
+			    struct device_attribute *attr, char *buf)	\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	return sysfs_emit(buf, "%d\n", (int)ts->algo->_name);		\
+}									\
+static ssize_t _name##_store(struct device *dev,			\
+			     struct device_attribute *attr,		\
+			     const char *buf, size_t count)		\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	s16 val;							\
+	int ret = kstrtos16(buf, 0, &val);				\
+	if (ret)							\
+		return ret;						\
+	ts->algo->_name = val;						\
+	return count;							\
+}									\
+static DEVICE_ATTR_RW(_name)
+
+#define HX_ALGO_ATTR_U16_RW(_name)					\
+static ssize_t _name##_show(struct device *dev,				\
+			    struct device_attribute *attr, char *buf)	\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	return sysfs_emit(buf, "%u\n", (unsigned)ts->algo->_name);	\
+}									\
+static ssize_t _name##_store(struct device *dev,			\
+			     struct device_attribute *attr,		\
+			     const char *buf, size_t count)		\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	u16 val;							\
+	int ret = kstrtou16(buf, 0, &val);				\
+	if (ret)							\
+		return ret;						\
+	ts->algo->_name = val;						\
+	return count;							\
+}									\
+static DEVICE_ATTR_RW(_name)
+
+#define HX_ALGO_ATTR_U8_RW(_name)					\
+static ssize_t _name##_show(struct device *dev,				\
+			    struct device_attribute *attr, char *buf)	\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	return sysfs_emit(buf, "%u\n", (unsigned)ts->algo->_name);	\
+}									\
+static ssize_t _name##_store(struct device *dev,			\
+			     struct device_attribute *attr,		\
+			     const char *buf, size_t count)		\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	u8 val;							\
+	int ret = kstrtou8(buf, 0, &val);				\
+	if (ret)							\
+		return ret;						\
+	ts->algo->_name = val;						\
+	return count;							\
+}									\
+static DEVICE_ATTR_RW(_name)
+
+#define HX_ALGO_ATTR_S32_RW(_name)					\
+static ssize_t _name##_show(struct device *dev,				\
+			    struct device_attribute *attr, char *buf)	\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	return sysfs_emit(buf, "%d\n", ts->algo->_name);		\
+}									\
+static ssize_t _name##_store(struct device *dev,			\
+			     struct device_attribute *attr,		\
+			     const char *buf, size_t count)		\
+{									\
+	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
+	s32 val;							\
+	int ret = kstrtos32(buf, 0, &val);				\
+	if (ret)							\
+		return ret;						\
+	ts->algo->_name = val;						\
+	return count;							\
+}									\
+static DEVICE_ATTR_RW(_name)
+
+/* Preprocessing */
+HX_ALGO_ATTR_BOOL_RW(cmf_enabled);
+HX_ALGO_ATTR_S16_RW(cmf_exclusion);
+HX_ALGO_ATTR_S16_RW(cmf_max_correction);
+HX_ALGO_ATTR_BOOL_RW(iir_enabled);
+HX_ALGO_ATTR_U16_RW(iir_decay_weight);
+HX_ALGO_ATTR_U16_RW(iir_decay_step);
+HX_ALGO_ATTR_S16_RW(iir_noise_floor);
+HX_ALGO_ATTR_S16_RW(iir_gate_floor);
+HX_ALGO_ATTR_U8_RW(iir_gate_ratio_q8);
+HX_ALGO_ATTR_BOOL_RW(gauss_enabled);
+HX_ALGO_ATTR_U8_RW(gauss_center_weight);
+/* Detection */
+HX_ALGO_ATTR_S16_RW(macro_threshold);
+HX_ALGO_ATTR_S16_RW(peak_threshold);
+HX_ALGO_ATTR_BOOL_RW(palm_enabled);
+HX_ALGO_ATTR_U8_RW(palm_area_threshold);
+HX_ALGO_ATTR_S32_RW(palm_signal_threshold);
+HX_ALGO_ATTR_S16_RW(palm_density_low);
+/* Tracking */
+HX_ALGO_ATTR_S32_RW(track_dist2_max);
+HX_ALGO_ATTR_U8_RW(track_lost_frames);
+HX_ALGO_ATTR_U8_RW(debounce_base);
+
+static struct attribute *hx_algo_attrs[] = {
+	&dev_attr_cmf_enabled.attr,
+	&dev_attr_cmf_exclusion.attr,
+	&dev_attr_cmf_max_correction.attr,
+	&dev_attr_iir_enabled.attr,
+	&dev_attr_iir_decay_weight.attr,
+	&dev_attr_iir_decay_step.attr,
+	&dev_attr_iir_noise_floor.attr,
+	&dev_attr_iir_gate_floor.attr,
+	&dev_attr_iir_gate_ratio_q8.attr,
+	&dev_attr_gauss_enabled.attr,
+	&dev_attr_gauss_center_weight.attr,
+	&dev_attr_macro_threshold.attr,
+	&dev_attr_peak_threshold.attr,
+	&dev_attr_palm_enabled.attr,
+	&dev_attr_palm_area_threshold.attr,
+	&dev_attr_palm_signal_threshold.attr,
+	&dev_attr_palm_density_low.attr,
+	&dev_attr_track_dist2_max.attr,
+	&dev_attr_track_lost_frames.attr,
+	&dev_attr_debounce_base.attr,
+	NULL,
+};
+
+static const struct attribute_group hx_algo_attr_group = {
+	.name = "algo",
+	.attrs = hx_algo_attrs,
+};
+
 static const struct drm_panel_follower_funcs himax_panel_follower_funcs = {
 	.panel_prepared = himax_panel_prepared,
 	.panel_unpreparing = himax_panel_unpreparing,
@@ -961,543 +1033,7 @@ static int hx83121a_gaokun_read_event_stack(struct himax_ts_data *ts)
 	return 0;
 }
 
-#define HX_BASELINE	0x7ffe
-#define HIMAX_PEAK_QUALITY_MIN	0x300
 #define HIMAX_TOUCH_START_DEBOUNCE	2
-#define HIMAX_NEW_TOUCH_DEBOUNCE	2
-/*
- * Maximum squared XY distance allowed when matching a new detection to an
- * existing slot. A smaller value reduces close-finger slot swaps, but if it is
- * too small, fast motion can break tracking and create brief lift/re-touch
- * behavior.
- */
-#define HIMAX_TRACK_MATCH_DIST2	(420 * 420)
-/*
- * Number of consecutive frames we keep a slot alive after its peak disappears.
- * Raising this masks short detection dropouts, while lowering it makes slot
- * release more eager.
- */
-#define HIMAX_TRACK_LOST_FRAMES	3
-/*
- * Minimum separation in the raw RX/TX grid before two local peaks are treated
- * as distinct touches. Raising this merges nearby fingers more aggressively;
- * lowering it helps close-finger separation but can create duplicates.
- */
-#define HIMAX_TOUCH_SEPARATION_GRID	2
-
-static void hx_algo_init_defaults(struct hx_algo *algo)
-{
-	algo->cmf_enabled = true;
-	algo->cmf_exclusion = 250;
-	algo->cmf_max_correction = 500;
-	algo->iir_enabled = true;
-	algo->iir_decay_weight = 200;
-	algo->iir_decay_step = 80;
-	algo->iir_noise_floor = 5;
-	algo->iir_gate_floor = 200;
-	algo->iir_gate_ratio_q8 = 26;
-	algo->gauss_enabled = false;
-	algo->gauss_center_weight = 20;
-	algo->macro_threshold = 800;
-	algo->peak_threshold = 800;
-	algo->palm_enabled = true;
-	algo->palm_area_threshold = 50;
-	algo->palm_signal_threshold = 80000;
-	algo->palm_density_low = 400;
-	algo->track_dist2_max = HIMAX_TRACK_MATCH_DIST2;
-	algo->track_lost_frames = HIMAX_TRACK_LOST_FRAMES;
-	algo->debounce_base = HIMAX_NEW_TOUCH_DEBOUNCE;
-}
-
-static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw)
-{
-	int r;
-	int c;
-
-	for (r = 0; r < HX_ROWS; r++) {
-		for (c = 0; c < HX_COLS; c++) {
-			int idx = r * HX_COLS + c;
-			s32 sample = (s32)le16_to_cpup(raw + idx) - HX_BASELINE;
-
-			algo->frame[r][c] = clamp_t(s32, sample, SHRT_MIN, SHRT_MAX);
-		}
-	}
-
-	/* raw[0] is always invalid on this panel layout. */
-	algo->frame[0][0] = 0;
-}
-
-static void hx_apply_cmf(struct hx_algo *algo)
-{
-	int r;
-	int c;
-
-	for (r = 0; r < HX_ROWS; r++) {
-		s32 sum = 0;
-		s32 count = 0;
-		s32 offset;
-
-		for (c = 0; c < HX_COLS; c++) {
-			s16 v = algo->frame[r][c];
-
-			if (abs((int)v) < algo->cmf_exclusion) {
-				sum += v;
-				count++;
-			}
-		}
-
-		if (!count)
-			continue;
-
-		offset = sum / count;
-		offset = clamp_t(s32, offset,
-				 -algo->cmf_max_correction,
-				 algo->cmf_max_correction);
-		for (c = 0; c < HX_COLS; c++) {
-			s32 corrected = (s32)algo->frame[r][c] - offset;
-
-			algo->frame[r][c] = clamp_t(s32, corrected, SHRT_MIN, SHRT_MAX);
-		}
-	}
-
-	for (c = 0; c < HX_COLS; c++) {
-		s32 sum = 0;
-		s32 count = 0;
-		s32 offset;
-
-		for (r = 0; r < HX_ROWS; r++) {
-			s16 v = algo->frame[r][c];
-
-			if (abs((int)v) < algo->cmf_exclusion) {
-				sum += v;
-				count++;
-			}
-		}
-
-		if (!count)
-			continue;
-
-		offset = sum / count;
-		offset = clamp_t(s32, offset,
-				 -algo->cmf_max_correction,
-				 algo->cmf_max_correction);
-		for (r = 0; r < HX_ROWS; r++) {
-			s32 corrected = (s32)algo->frame[r][c] - offset;
-
-			algo->frame[r][c] = clamp_t(s32, corrected, SHRT_MIN, SHRT_MAX);
-		}
-	}
-}
-
-static void hx_apply_iir(struct hx_algo *algo)
-{
-	int r;
-	int c;
-	s32 frame_max = 0;
-	s32 dyn_threshold;
-	u16 decay_weight;
-	u16 decay_step;
-
-	if (!algo->iir_enabled) {
-		memcpy(algo->iir_history, algo->frame, sizeof(algo->frame));
-		algo->iir_initialized = true;
-		return;
-	}
-
-	if (!algo->iir_initialized) {
-		memcpy(algo->iir_history, algo->frame, sizeof(algo->frame));
-		algo->iir_initialized = true;
-		return;
-	}
-
-	for (r = 0; r < HX_ROWS; r++) {
-		for (c = 0; c < HX_COLS; c++)
-			frame_max = max(frame_max, abs((int)algo->frame[r][c]));
-	}
-
-	dyn_threshold = max((frame_max * algo->iir_gate_ratio_q8) >> 8,
-			    (s32)algo->iir_gate_floor);
-	decay_weight = min_t(u16, algo->iir_decay_weight, 256);
-	decay_step = algo->iir_decay_step;
-
-	for (r = 0; r < HX_ROWS; r++) {
-		for (c = 0; c < HX_COLS; c++) {
-			s32 cur = algo->frame[r][c];
-			s32 output;
-
-			if (cur >= dyn_threshold) {
-				output = cur;
-			} else {
-				s32 hist = algo->iir_history[r][c];
-				s32 mixed = decay_weight * cur +
-					    (256 - decay_weight) * hist;
-
-				output = mixed >> 8;
-				output = max(0, output - (s32)decay_step);
-				if (output < algo->iir_noise_floor)
-					output = 0;
-			}
-
-			algo->frame[r][c] = clamp_t(s32, output, SHRT_MIN, SHRT_MAX);
-			algo->iir_history[r][c] = algo->frame[r][c];
-		}
-	}
-}
-
-static void hx_preprocess_frame(struct hx_algo *algo, const u16 *raw)
-{
-	hx_prepare_frame_baseline(algo, raw);
-
-	if (algo->cmf_enabled)
-		hx_apply_cmf(algo);
-
-	hx_apply_iir(algo);
-}
-
-/* TODO: 可以创建一个 sysfs 用于和用户空间 IO, 分析, 处理, 数据 等等 */
-static void __maybe_unused dump_frame(const struct hx_algo *algo)
-{
-	/* Debug helper kept for bring-up and signal quality checks. */
-	if (!IS_ENABLED(CONFIG_DYNAMIC_DEBUG))
-		return;
-
-	char buf[1024];
-
-	pr_warn("Frame start\n");
-	for (int i = 0, offset; i < HX_PIXELS; i++) {
-		if (i % HX_COLS == 0) {
-			if (i)
-				pr_info("%s\n", buf);
-
-			offset = sprintf(buf, "%04x:", i);
-		}
-		offset += sprintf(buf + offset, " %04x", (u16)max_t(s16, 0,
-				       algo->frame[i / HX_COLS][i % HX_COLS]));
-	}
-}
-
-static inline s16 hx_frame_at(const struct hx_algo *algo, int tx, int rx)
-{
-	s16 val;
-
-	if (tx < 0 || tx >= HX_ROWS || rx < 0 || rx >= HX_COLS)
-		return 0;
-
-	val = algo->frame[tx][rx];
-	return val > 0 ? val : 0;
-}
-
-static bool is_local_peak(const struct hx_algo *algo, int tx, int rx)
-{
-	s16 vc = hx_frame_at(algo, tx, rx);
-	s16 vl;
-	s16 vr;
-	s16 vu;
-	s16 vd;
-	s32 quality;
-
-	if (vc < algo->peak_threshold)
-		return false;
-
-	vl = hx_frame_at(algo, tx, rx - 1);
-	vr = hx_frame_at(algo, tx, rx + 1);
-	vu = hx_frame_at(algo, tx - 1, rx);
-	vd = hx_frame_at(algo, tx + 1, rx);
-
-	if (vc < vl || vc < vr || vc < vu || vc < vd)
-		return false;
-
-	/* Flat areas are usually baseline noise, not a finger peak. */
-	if (vc == vl && vc == vr && vc == vu && vc == vd)
-		return false;
-
-	quality = vc + max(vl, vr) + max(vu, vd);
-	if (quality < HIMAX_PEAK_QUALITY_MIN)
-		return false;
-
-	/* Keep only local maxima to avoid one finger expanding into many points. */
-	return true;
-}
-
-#define OFST 4
-static bool himax_far_enough(const struct input_mt_pos *a,
-			     const struct input_mt_pos *b,
-			     int min_delta)
-{
-	int dx = abs(a->x - b->x);
-	int dy = abs(a->y - b->y);
-
-	return dx >= min_delta || dy >= min_delta;
-}
-
-static void raw2rxtx(struct himax_ts_data *ts, struct input_mt_pos *pos, int *cnt)
-{
-	struct hx_algo *algo = ts->algo;
-	int i, j, k;
-	int near_idx;
-	int weakest_idx;
-	s16 strength[HIMAX_MAX_TOUCH] = { 0 };
-	s16 val;
-
-	*cnt = 0;
-	for (i = 0; i < HX_ROWS; ++i) {
-		for (j = 0; j < HX_COLS; ++j) {
-			struct input_mt_pos cand = {
-				.x = j,
-				.y = i,
-			};
-
-			if (!is_local_peak(algo, i, j))
-				continue;
-
-			val = hx_frame_at(algo, i, j);
-			near_idx = -1;
-			for (k = 0; k < *cnt; k++) {
-				if (!himax_far_enough(&cand, &pos[k], HIMAX_TOUCH_SEPARATION_GRID)) {
-					near_idx = k;
-					break;
-				}
-			}
-
-			/* Keep strongest one in a small neighborhood to avoid ghost duplicates. */
-			if (near_idx >= 0) {
-				if (val > strength[near_idx]) {
-					strength[near_idx] = val;
-					pos[near_idx] = cand;
-				}
-				continue;
-			}
-
-			if (*cnt < HIMAX_MAX_TOUCH) {
-				pos[*cnt] = cand;
-				strength[*cnt] = val;
-				(*cnt)++;
-				continue;
-			}
-
-			/* Replace the weakest tracked peak if current one is stronger. */
-			weakest_idx = 0;
-			for (k = 1; k < HIMAX_MAX_TOUCH; k++) {
-				if (strength[k] < strength[weakest_idx])
-					weakest_idx = k;
-			}
-
-			if (val > strength[weakest_idx]) {
-				strength[weakest_idx] = val;
-				pos[weakest_idx] = cand;
-			}
-		}
-	}
-}
-
-static void rxtx2xy(struct himax_ts_data *ts, struct input_mt_pos *pos, int cnt)
-{
-	struct hx_algo *algo = ts->algo;
-	int i, tx, rx;
-	s16 vl, vr, vc, vu, vd;
-	s64 tmp_x;
-	s64 tmp_y;
-	s64 num;
-	s64 den;
-
-	/*
-	 * 四点权重拟合. 这里以 左 中 右 三点为例, 更进一步我们再以 中 右 为例,
-	 * 假设当前在中间, 则向右偏移 val_右/(val_中 + val_右) * (两邻点水平间距)
-	 * 同理处理左移, 上移, 下移.
-	 * TODO: 参考更多点的权值.
-	 */
-	for (i = 0; i < cnt; ++i) {
-		tx = pos[i].y;
-		rx = pos[i].x;
-		vc = hx_frame_at(algo, tx, rx);
-		vl = hx_frame_at(algo, tx, rx - 1);
-		vr = hx_frame_at(algo, tx, rx + 1);
-		vu = hx_frame_at(algo, tx - 1, rx);
-		vd = hx_frame_at(algo, tx + 1, rx);
-
-		tmp_x = (vc + vr) * (vc + vl);
-		if (tmp_x <= 0)
-			continue;
-
-		num = (2 * rx + 1) * tmp_x + 2 * vc * (vr - vl);
-		den = 3 * tmp_x;
-		pos[i].x = clamp_val(div_s64(64 * num, den), 0, SZ_64K - 1);
-
-		tmp_y = (vc + vu) * (vc + vd);
-		if (tmp_y <= 0)
-			continue;
-
-		num = (2 * tx + 1) * tmp_y + 2 * vc * (vd - vu);
-		pos[i].y = clamp_val(div_s64(20 * num, tmp_y), 0, SZ_64K - 1);
-
-		pr_debug("calculate x: 64 * ( (2 * %d + 1) * %lld + 2 * %d * (%d - %d) ) / (3 * %lld) = %d\n",
-			 rx, (long long)tmp_x, vc, vr, vl, (long long)tmp_x, pos[i].x);
-		pr_debug("calculate y: 20 * ( (2 * %d + 1) * %lld + 2 * %d * (%d - %d) ) / %lld = %d\n",
-			 tx, (long long)tmp_y, vc, vd, vu, (long long)tmp_y, pos[i].y);
-	}
-}
-
-static inline s64 himax_dist2(const struct input_mt_pos *a,
-			      const struct hx_track *b)
-{
-	s32 dx = a->x - b->x;
-	s32 dy = a->y - b->y;
-
-	return (s64)dx * dx + (s64)dy * dy;
-}
-
-struct himax_match_candidate {
-	u8 track_idx;
-	u8 det_idx;
-	s64 dist2;
-};
-
-static void himax_reset_track(struct hx_track *trk)
-{
-	memset(trk, 0, sizeof(*trk));
-}
-
-static void himax_track_contacts(struct himax_ts_data *ts,
-				 struct input_mt_pos *det,
-				 int det_cnt)
-{
-	struct hx_algo *algo = ts->algo;
-	bool det_used[HIMAX_MAX_TOUCH] = { false };
-	bool track_matched[HIMAX_MAX_TOUCH] = { false };
-	struct himax_match_candidate cand[HIMAX_MAX_TOUCH * HIMAX_MAX_TOUCH];
-	int cand_cnt = 0;
-	int i, j, k;
-
-	/*
-	 * Match globally by shortest distance first so close contacts are less
-	 * likely to swap just because a lower-numbered slot was processed first.
-	 */
-	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
-		struct hx_track *trk = &algo->tracks[i];
-
-		if (!trk->active)
-			continue;
-
-		for (j = 0; j < det_cnt; j++) {
-			s64 d2 = himax_dist2(&det[j], trk);
-
-			if (d2 > algo->track_dist2_max)
-				continue;
-
-			cand[cand_cnt].track_idx = i;
-			cand[cand_cnt].det_idx = j;
-			cand[cand_cnt].dist2 = d2;
-			cand_cnt++;
-		}
-	}
-
-	for (i = 0; i < cand_cnt; i++) {
-		int best = i;
-
-		for (j = i + 1; j < cand_cnt; j++) {
-			if (cand[j].dist2 < cand[best].dist2 ||
-			    (cand[j].dist2 == cand[best].dist2 &&
-			     cand[j].track_idx < cand[best].track_idx) ||
-			    (cand[j].dist2 == cand[best].dist2 &&
-			     cand[j].track_idx == cand[best].track_idx &&
-			     cand[j].det_idx < cand[best].det_idx))
-				best = j;
-		}
-
-		if (best != i)
-			swap(cand[i], cand[best]);
-	}
-
-	for (k = 0; k < cand_cnt; k++) {
-		struct himax_match_candidate *match = &cand[k];
-		struct hx_track *trk;
-
-		if (track_matched[match->track_idx] || det_used[match->det_idx])
-			continue;
-
-		trk = &algo->tracks[match->track_idx];
-		if (!trk->active)
-			continue;
-
-		/* Mild temporal smoothing to reduce noisy point jitter. */
-		trk->vx = det[match->det_idx].x - trk->x;
-		trk->vy = det[match->det_idx].y - trk->y;
-		trk->x = (trk->x * 3 + det[match->det_idx].x) / 4;
-		trk->y = (trk->y * 3 + det[match->det_idx].y) / 4;
-		trk->missed = 0;
-		if (trk->age < U8_MAX)
-			trk->age++;
-		if (trk->debounce > 0)
-			trk->debounce--;
-
-		track_matched[match->track_idx] = true;
-		det_used[match->det_idx] = true;
-	}
-
-	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
-		struct hx_track *trk = &algo->tracks[i];
-
-		if (!trk->active)
-			continue;
-
-		if (track_matched[i])
-			continue;
-
-		/*
-		 * A candidate touch must be observed on consecutive
-		 * frames before it is allowed to start a new contact.
-		 * This drops short idle noise bursts before they can be
-		 * promoted into a reported touch.
-		 */
-		if (!algo->touch_active) {
-			himax_reset_track(trk);
-			continue;
-		}
-
-		trk->missed++;
-		if (trk->missed > algo->track_lost_frames)
-			himax_reset_track(trk);
-	}
-
-	for (j = 0; j < det_cnt; j++) {
-		struct hx_track *trk = NULL;
-
-		if (det_used[j])
-			continue;
-
-		for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
-			if (!algo->tracks[i].active) {
-				trk = &algo->tracks[i];
-				break;
-			}
-		}
-		if (!trk)
-			continue;
-
-		trk->active = true;
-		trk->age = 1;
-		trk->missed = 0;
-		trk->debounce = algo->debounce_base;
-		trk->x = det[j].x;
-		trk->y = det[j].y;
-	}
-}
-
-static int himax_count_stable_tracks(struct himax_ts_data *ts)
-{
-	int i;
-	int cnt = 0;
-
-	if (!ts->algo)
-		return 0;
-
-	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
-		if (ts->algo->tracks[i].active && ts->algo->tracks[i].debounce == 0)
-			cnt++;
-	}
-
-	return cnt;
-}
 
 static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
 {
@@ -1529,6 +1065,9 @@ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
 	input_sync(ts->input_dev);
 }
 
+/* Byte offset into the SPI event buffer where the raw capacitance grid starts. */
+#define OFST 4
+
 static irqreturn_t himax_ts_thread(int irq, void *data)
 {
 	struct himax_ts_data *ts = data;
@@ -1558,14 +1097,12 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 	hx_preprocess_frame(algo, ptr);
 	/* dump_frame(algo); */
 
-	raw2rxtx(ts, pos, &cnt);
-	for (int i = 0; i < cnt; ++i) {
-		dev_dbg(ts->dev, "rx-tx %d: %d, %d\n", i, pos[i].x, pos[i].y);
-	}
-
-	rxtx2xy(ts, pos, cnt);
-	himax_track_contacts(ts, pos, cnt);
-	stable_cnt = himax_count_stable_tracks(ts);
+	hx_detect_macro_zones(algo);
+	hx_reject_palms(algo);
+	hx_detect_peaks(algo);
+	hx_peaks_to_positions(algo, pos, &cnt);
+	hx_track_contacts(algo, pos, cnt);
+	stable_cnt = hx_count_stable_tracks(algo);
 
 	/* Not final results, touchscreen_report_pos will handle this (x-y swap, y invert) */
 	for (int i = 0; i < HIMAX_MAX_TOUCH; ++i) {
@@ -1840,6 +1377,13 @@ static int himax_spi_probe(struct spi_device *spi)
 	ret = device_create_file(ts->dev, &dev_attr_inplace_reset);
 	if (ret) {
 		dev_err(ts->dev, "failed to create inplace_reset sysfs attribute\n");
+		return ret;
+	}
+
+	ret = devm_device_add_group(ts->dev, &hx_algo_attr_group);
+	if (ret) {
+		dev_err(ts->dev, "failed to create algo sysfs group\n");
+		device_remove_file(ts->dev, &dev_attr_inplace_reset);
 		return ret;
 	}
 

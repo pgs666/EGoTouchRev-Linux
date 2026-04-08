@@ -3,6 +3,7 @@ MODNAME = himax-spi
 MODVER = 0.1
 
 obj-m += $(MODNAME).o
+$(MODNAME)-y := himax-spi-core.o hx-algo.o
 
 KVER = $(shell uname -r)
 KDIR = /lib/modules/$(KVER)/build
