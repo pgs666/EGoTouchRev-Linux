@@ -18,6 +18,10 @@
 #include <linux/limits.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
+
+static bool disable_pressure = true;
+module_param(disable_pressure, bool, 0444);
+MODULE_PARM_DESC(disable_pressure, "Disable ABS_MT_TOUCH_MAJOR and ABS_MT_PRESSURE axes (default: true)");
 #include <linux/spi/spi.h>
 #include <linux/math.h>
 #include <linux/math64.h>
@@ -611,8 +615,13 @@ static int himax_input_dev_config(struct himax_ts_data *ts)
 	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y,
 			     0, SZ_64K - 1, 8, 0);
 	// TODO: 根据触点附近数据集建模得到
-	input_set_abs_params(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
-	input_set_abs_params(ts->input_dev, ABS_MT_PRESSURE, 0, 4095, 0, 0);
+	if (!disable_pressure) {
+		input_set_abs_params(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
+		input_set_abs_params(ts->input_dev, ABS_MT_PRESSURE, 0, 4095, 0, 0);
+		dev_info(ts->dev, "pressure/touch_major axes enabled\n");
+	} else {
+		dev_info(ts->dev, "pressure/touch_major axes disabled by module parameter\n");
+	}
 	touchscreen_parse_properties(ts->input_dev, true, &ts->props);
 
 	ret = input_mt_init_slots(ts->input_dev, HIMAX_MAX_TOUCH,
@@ -1066,14 +1075,16 @@ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
 
 		touchscreen_report_pos(ts->input_dev, &ts->props,
 				       ts->algo->tracks[i].x, ts->algo->tracks[i].y, true);
-		if (ts->algo->pressure_enabled) {
-			input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR,
-					 min_t(s32, int_sqrt(ts->algo->tracks[i].signal_sum >> 4) * 4, 255));
-			input_report_abs(ts->input_dev, ABS_MT_PRESSURE,
-					 clamp_t(s32, ts->algo->tracks[i].signal_sum >> 2, 0, 4095));
-		} else {
-			input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, 1);
-			input_report_abs(ts->input_dev, ABS_MT_PRESSURE, 4095);
+		if (!disable_pressure) {
+			if (ts->algo->pressure_enabled) {
+				input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR,
+						 min_t(s32, int_sqrt(ts->algo->tracks[i].signal_sum >> 4) * 4, 255));
+				input_report_abs(ts->input_dev, ABS_MT_PRESSURE,
+						 clamp_t(s32, ts->algo->tracks[i].signal_sum >> 2, 0, 4095));
+			} else {
+				input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, 1);
+				input_report_abs(ts->input_dev, ABS_MT_PRESSURE, 4095);
+			}
 		}
 	}
 
