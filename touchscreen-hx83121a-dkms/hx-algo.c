@@ -60,6 +60,7 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	algo->track_smoothing   = true;
 	algo->track_active_guard   = true;
 	algo->track_start_debounce = 2;
+	algo->track_jump_dist2     = 0;  /* disabled by default */
 }
 
 /* ======================================================================== */
@@ -970,6 +971,7 @@ void hx_track_contacts(struct hx_algo *algo,
 {
 	bool det_used[HIMAX_MAX_TOUCH]     = { false };
 	bool track_matched[HIMAX_MAX_TOUCH] = { false };
+	u16  jump_released = 0;  /* bitmask: slots freed by jump detection */
 	struct hx_match_candidate cand[HIMAX_MAX_TOUCH * HIMAX_MAX_TOUCH];
 	int cand_cnt = 0;
 	int i, j, k;
@@ -1026,6 +1028,26 @@ void hx_track_contacts(struct hx_algo *algo,
 		if (!trk->active)
 			continue;
 
+		/* Jump detection: if the actual (non-predicted) displacement
+		 * exceeds the jump threshold, this is a finger swap, not a
+		 * slide.  Release the old slot and let the detection spawn
+		 * a new track at a *different* slot so that lift + press
+		 * both appear in the same SYN_REPORT (zero added latency).
+		 */
+		if (algo->track_jump_dist2 > 0 && trk->age >= 2) {
+			s32 dx = det[m->det_idx].x - trk->x;
+			s32 dy = det[m->det_idx].y - trk->y;
+			s64 actual_d2 = (s64)dx * dx + (s64)dy * dy;
+
+			if (actual_d2 > algo->track_jump_dist2) {
+				hx_reset_track(trk);
+				jump_released |= (1u << m->track_idx);
+				track_matched[m->track_idx] = true;
+				/* det stays unused → picked up by new-slot logic */
+				continue;
+			}
+		}
+
 		/* Update position: smooth or direct. */
 		trk->vx = det[m->det_idx].x - trk->x;
 		trk->vy = det[m->det_idx].y - trk->y;
@@ -1077,7 +1099,8 @@ void hx_track_contacts(struct hx_algo *algo,
 			continue;
 
 		for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
-			if (!algo->tracks[i].active) {
+			if (!algo->tracks[i].active &&
+			    !(jump_released & (1u << i))) {
 				trk = &algo->tracks[i];
 				break;
 			}

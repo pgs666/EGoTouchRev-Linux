@@ -988,6 +988,7 @@ HX_ALGO_ATTR_U8_RW(debounce_base);
 HX_ALGO_ATTR_BOOL_RW(track_smoothing);
 HX_ALGO_ATTR_BOOL_RW(track_active_guard);
 HX_ALGO_ATTR_U8_RW(track_start_debounce);
+HX_ALGO_ATTR_S32_RW(track_jump_dist2);
 
 static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_cmf_enabled.attr,
@@ -1016,6 +1017,7 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_track_smoothing.attr,
 	&dev_attr_track_active_guard.attr,
 	&dev_attr_track_start_debounce.attr,
+	&dev_attr_track_jump_dist2.attr,
 	NULL,
 };
 

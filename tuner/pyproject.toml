@@ -1,0 +1,10 @@
+[project]
+name = "tuner"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "hidpi-tk>=1.4.0",
+    "sv-ttk>=2.6.1",
+]

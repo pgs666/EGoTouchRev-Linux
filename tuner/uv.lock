@@ -1,0 +1,36 @@
+version = 1
+revision = 3
+requires-python = ">=3.14"
+
+[[package]]
+name = "hidpi-tk"
+version = "1.4.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/48/0a/7a636025c0fd2af031f08ee0b76b225064c2f2442dade9db27640266c7d2/hidpi_tk-1.4.0.tar.gz", hash = "sha256:4c752a7566537228f12ebcd4e50d3acef2e21edc80d53e61074801f3870f1a3f", size = 9089, upload-time = "2026-02-22T03:10:28.315Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d8/8f/67e02e49ef38eb78479d1bc368d2c46b31eec81b92ce279ed17ca5e0d199/hidpi_tk-1.4.0-py3-none-any.whl", hash = "sha256:eea482733719c7788d5124aa4dcd4bbb4b0cc354ef670d0cbfa30b10701ce02e", size = 9488, upload-time = "2026-02-22T03:10:27.002Z" },
+]
+
+[[package]]
+name = "sv-ttk"
+version = "2.6.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/4e/ca/9625914e7a7e58ce9f0d8d6a5eb29975bab077ce58a36cf86f863d188cd3/sv_ttk-2.6.1.tar.gz", hash = "sha256:47589d5e20398cf404e8362f24f3ed48f3830cd0ace056d83354fa25d8e4fe48", size = 49640, upload-time = "2025-06-08T16:14:21.333Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5b/36/32629d8bab9bccd54a36716a960ba1148fca4c1fd453370dba0b42d712ea/sv_ttk-2.6.1-py3-none-any.whl", hash = "sha256:8ca5944f95431a911986b00c54e7f44608f3f811382cd985fd14bb3e65f95d97", size = 50076, upload-time = "2025-06-08T16:14:20.402Z" },
+]
+
+[[package]]
+name = "tuner"
+version = "0.1.0"
+source = { virtual = "." }
+dependencies = [
+    { name = "hidpi-tk" },
+    { name = "sv-ttk" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "hidpi-tk", specifier = ">=1.4.0" },
+    { name = "sv-ttk", specifier = ">=2.6.1" },
+]

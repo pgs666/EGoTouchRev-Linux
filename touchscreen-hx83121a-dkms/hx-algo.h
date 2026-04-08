@@ -158,6 +158,7 @@ struct hx_algo {
 	bool track_smoothing;      /* position smoothing on/off            */
 	bool track_active_guard;   /* kill stray tracks before 1st stable  */
 	u8   track_start_debounce; /* frames to confirm touch_active       */
+	s32  track_jump_dist2;     /* position jump → force lift+repress   */
 };
 
 /* ---- Public API ---- */
