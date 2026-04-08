@@ -49,6 +49,7 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	algo->palm_area_threshold    = 50;
 	algo->palm_signal_threshold  = 80000;
 	algo->palm_density_low       = 400;
+	algo->pressure_enabled   = false;
 	algo->edge_comp_enabled = true;
 	algo->edge_boost_pct   = 50;   /* 50% signal boost on border pixels  */
 	algo->edge_push_q8     = 128;  /* push up to 0.5 grid cells outward  */
@@ -56,6 +57,9 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	algo->track_dist2_max   = HIMAX_TRACK_MATCH_DIST2;
 	algo->track_lost_frames = HIMAX_TRACK_LOST_FRAMES;
 	algo->debounce_base     = HIMAX_NEW_TOUCH_DEBOUNCE;
+	algo->track_smoothing   = true;
+	algo->track_active_guard   = true;
+	algo->track_start_debounce = 2;
 }
 
 /* ======================================================================== */
@@ -1022,11 +1026,16 @@ void hx_track_contacts(struct hx_algo *algo,
 		if (!trk->active)
 			continue;
 
-		/* Mild temporal smoothing to reduce jitter. */
+		/* Update position: smooth or direct. */
 		trk->vx = det[m->det_idx].x - trk->x;
 		trk->vy = det[m->det_idx].y - trk->y;
-		trk->x  = (trk->x * 3 + det[m->det_idx].x) / 4;
-		trk->y  = (trk->y * 3 + det[m->det_idx].y) / 4;
+		if (algo->track_smoothing) {
+			trk->x = (trk->x * 3 + det[m->det_idx].x) / 4;
+			trk->y = (trk->y * 3 + det[m->det_idx].y) / 4;
+		} else {
+			trk->x = det[m->det_idx].x;
+			trk->y = det[m->det_idx].y;
+		}
 		trk->missed = 0;
 		if (m->det_idx < algo->contact_count)
 			trk->signal_sum = algo->contacts[m->det_idx].signal_sum;
@@ -1050,7 +1059,7 @@ void hx_track_contacts(struct hx_algo *algo,
 		 * Before the first stable touch is established, drop stray
 		 * tracks immediately to prevent noise from being reported.
 		 */
-		if (!algo->touch_active) {
+		if (algo->track_active_guard && !algo->touch_active) {
 			hx_reset_track(trk);
 			continue;
 		}

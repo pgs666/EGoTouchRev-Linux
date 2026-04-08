@@ -965,6 +965,8 @@ HX_ALGO_ATTR_BOOL_RW(palm_enabled);
 HX_ALGO_ATTR_U8_RW(palm_area_threshold);
 HX_ALGO_ATTR_S32_RW(palm_signal_threshold);
 HX_ALGO_ATTR_S16_RW(palm_density_low);
+/* Pressure / touch-major reporting */
+HX_ALGO_ATTR_BOOL_RW(pressure_enabled);
 /* Edge compensation */
 HX_ALGO_ATTR_BOOL_RW(edge_comp_enabled);
 HX_ALGO_ATTR_S16_RW(edge_boost_pct);
@@ -974,6 +976,9 @@ HX_ALGO_ATTR_S16_RW(edge_blend_q8);
 HX_ALGO_ATTR_S32_RW(track_dist2_max);
 HX_ALGO_ATTR_U8_RW(track_lost_frames);
 HX_ALGO_ATTR_U8_RW(debounce_base);
+HX_ALGO_ATTR_BOOL_RW(track_smoothing);
+HX_ALGO_ATTR_BOOL_RW(track_active_guard);
+HX_ALGO_ATTR_U8_RW(track_start_debounce);
 
 static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_cmf_enabled.attr,
@@ -991,6 +996,7 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_palm_area_threshold.attr,
 	&dev_attr_palm_signal_threshold.attr,
 	&dev_attr_palm_density_low.attr,
+	&dev_attr_pressure_enabled.attr,
 	&dev_attr_edge_comp_enabled.attr,
 	&dev_attr_edge_boost_pct.attr,
 	&dev_attr_edge_push_q8.attr,
@@ -998,6 +1004,9 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_track_dist2_max.attr,
 	&dev_attr_track_lost_frames.attr,
 	&dev_attr_debounce_base.attr,
+	&dev_attr_track_smoothing.attr,
+	&dev_attr_track_active_guard.attr,
+	&dev_attr_track_start_debounce.attr,
 	NULL,
 };
 
@@ -1038,7 +1047,6 @@ static int hx83121a_gaokun_read_event_stack(struct himax_ts_data *ts)
 	return 0;
 }
 
-#define HIMAX_TOUCH_START_DEBOUNCE	2
 
 static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
 {
@@ -1058,10 +1066,15 @@ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
 
 		touchscreen_report_pos(ts->input_dev, &ts->props,
 				       ts->algo->tracks[i].x, ts->algo->tracks[i].y, true);
-		input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR,
-				 min_t(s32, int_sqrt(ts->algo->tracks[i].signal_sum >> 4) * 4, 255));
-		input_report_abs(ts->input_dev, ABS_MT_PRESSURE,
-				 clamp_t(s32, ts->algo->tracks[i].signal_sum >> 2, 0, 4095));
+		if (ts->algo->pressure_enabled) {
+			input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR,
+					 min_t(s32, int_sqrt(ts->algo->tracks[i].signal_sum >> 4) * 4, 255));
+			input_report_abs(ts->input_dev, ABS_MT_PRESSURE,
+					 clamp_t(s32, ts->algo->tracks[i].signal_sum >> 2, 0, 4095));
+		} else {
+			input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, 1);
+			input_report_abs(ts->input_dev, ABS_MT_PRESSURE, 4095);
+		}
 	}
 
 	/*
@@ -1123,7 +1136,7 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 
 	if (stable_cnt > 0 && !algo->touch_active) {
 		algo->touch_start_frames++;
-		if (algo->touch_start_frames < HIMAX_TOUCH_START_DEBOUNCE)
+		if (algo->touch_start_frames < algo->track_start_debounce)
 			report_on = false;
 		else
 			algo->touch_active = true;

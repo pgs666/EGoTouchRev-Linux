@@ -144,6 +144,8 @@ struct hx_algo {
 	u8   palm_area_threshold;  /* area >= this → palm                  */
 	s32  palm_signal_threshold;/* signal_sum >= this → palm            */
 	s16  palm_density_low;     /* signal/area < this → palm            */
+	/* Pressure / touch-major reporting */
+	bool pressure_enabled;     /* report PRESSURE + TOUCH_MAJOR        */
 	/* Edge compensation */
 	bool edge_comp_enabled;    /* edge compensation on/off             */
 	s16  edge_boost_pct;       /* signal boost for border pixels (%)   */
@@ -153,6 +155,9 @@ struct hx_algo {
 	s32  track_dist2_max;      /* max squared distance for match       */
 	u8   track_lost_frames;    /* missed frames before slot release    */
 	u8   debounce_base;        /* new-slot debounce count              */
+	bool track_smoothing;      /* position smoothing on/off            */
+	bool track_active_guard;   /* kill stray tracks before 1st stable  */
+	u8   track_start_debounce; /* frames to confirm touch_active       */
 };
 
 /* ---- Public API ---- */

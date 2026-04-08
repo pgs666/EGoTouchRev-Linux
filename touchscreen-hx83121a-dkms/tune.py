@@ -41,13 +41,17 @@ SLIDERS = [
     # Tracking
     ("track_lost_frames",  "Track lost frames",       1,   10,  1),
     ("debounce_base",      "Debounce base",           0,    8,  1),
+    ("track_start_debounce","Track start debounce",    0,    8,  1),
 ]
 
 TOGGLES = [
     ("cmf_enabled",        "CMF"),
     ("iir_enabled",        "IIR"),
     ("palm_enabled",       "Palm rejection"),
+    ("pressure_enabled",   "Pressure reporting"),
     ("edge_comp_enabled",  "Edge compensation"),
+    ("track_smoothing",    "Track smoothing"),
+    ("track_active_guard", "Track active guard"),
 ]
 
 # Parameters with large or irregular ranges — edited via Entry boxes
