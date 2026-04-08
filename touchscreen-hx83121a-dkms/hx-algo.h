@@ -137,8 +137,6 @@ struct hx_algo {
 	s16  iir_noise_floor;      /* clamp-to-zero below this             */
 	s16  iir_gate_floor;       /* min dynamic threshold                */
 	u8   iir_gate_ratio_q8;    /* dyn threshold = max * ratio/256      */
-	bool gauss_enabled;        /* 3x3 Gaussian smoothing (default off) */
-	u8   gauss_center_weight;  /* centre tap weight (W in kernel)      */
 	/* Detection */
 	s16  macro_threshold;      /* minimum pixel value to seed BFS      */
 	s16  peak_threshold;       /* minimum peak signal                  */
@@ -168,11 +166,11 @@ void hx_reject_palms(struct hx_algo *algo);
 /* Phase 2C: peak detection within surviving zones */
 void hx_detect_peaks(struct hx_algo *algo);
 
-/* Convert peaks to input_mt_pos output coordinates */
-void hx_peaks_to_positions(struct hx_algo *algo,
+/* Phase 2D: zone expansion + weighted centroid → contacts → output positions */
+void hx_expand_and_resolve(struct hx_algo *algo,
 			    struct input_mt_pos *pos, int *cnt);
 
-/* Phase 3A: greedy tracker update */
+/* Phase 3A: greedy tracker update (with velocity prediction) */
 void hx_track_contacts(struct hx_algo *algo,
 		       struct input_mt_pos *det, int det_cnt);
 

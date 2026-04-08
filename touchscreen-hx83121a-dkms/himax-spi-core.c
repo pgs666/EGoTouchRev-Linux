@@ -611,7 +611,7 @@ static int himax_input_dev_config(struct himax_ts_data *ts)
 	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y,
 			     0, SZ_64K - 1, 8, 0);
 	// TODO: 根据触点附近数据集建模得到
-	// input_set_abs_params(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
+	input_set_abs_params(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
 	input_set_abs_params(ts->input_dev, ABS_MT_PRESSURE, 0, 4095, 0, 0);
 	touchscreen_parse_properties(ts->input_dev, true, &ts->props);
 
@@ -958,8 +958,6 @@ HX_ALGO_ATTR_U16_RW(iir_decay_step);
 HX_ALGO_ATTR_S16_RW(iir_noise_floor);
 HX_ALGO_ATTR_S16_RW(iir_gate_floor);
 HX_ALGO_ATTR_U8_RW(iir_gate_ratio_q8);
-HX_ALGO_ATTR_BOOL_RW(gauss_enabled);
-HX_ALGO_ATTR_U8_RW(gauss_center_weight);
 /* Detection */
 HX_ALGO_ATTR_S16_RW(macro_threshold);
 HX_ALGO_ATTR_S16_RW(peak_threshold);
@@ -982,8 +980,6 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_iir_noise_floor.attr,
 	&dev_attr_iir_gate_floor.attr,
 	&dev_attr_iir_gate_ratio_q8.attr,
-	&dev_attr_gauss_enabled.attr,
-	&dev_attr_gauss_center_weight.attr,
 	&dev_attr_macro_threshold.attr,
 	&dev_attr_peak_threshold.attr,
 	&dev_attr_palm_enabled.attr,
@@ -1053,6 +1049,10 @@ static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
 
 		touchscreen_report_pos(ts->input_dev, &ts->props,
 				       ts->algo->tracks[i].x, ts->algo->tracks[i].y, true);
+		input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR,
+				 min_t(s32, int_sqrt(ts->algo->tracks[i].signal_sum >> 4) * 4, 255));
+		input_report_abs(ts->input_dev, ABS_MT_PRESSURE,
+				 clamp_t(s32, ts->algo->tracks[i].signal_sum >> 2, 0, 4095));
 	}
 
 	/*
@@ -1100,7 +1100,7 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 	hx_detect_macro_zones(algo);
 	hx_reject_palms(algo);
 	hx_detect_peaks(algo);
-	hx_peaks_to_positions(algo, pos, &cnt);
+	hx_expand_and_resolve(algo, pos, &cnt);
 	hx_track_contacts(algo, pos, cnt);
 	stable_cnt = hx_count_stable_tracks(algo);
 

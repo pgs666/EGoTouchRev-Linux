@@ -43,7 +43,6 @@ TOGGLES = [
     ("cmf_enabled",   "CMF"),
     ("iir_enabled",   "IIR"),
     ("palm_enabled",  "Palm rejection"),
-    ("gauss_enabled", "Gaussian filter"),
 ]
 
 # Parameters with large or irregular ranges — edited via Entry boxes
@@ -52,7 +51,6 @@ ENTRIES = [
     ("palm_signal_threshold","Palm signal threshold"),
     ("iir_noise_floor",      "IIR noise floor"),
     ("iir_gate_ratio_q8",    "IIR gate ratio (Q8)"),
-    ("gauss_center_weight",  "Gauss center weight"),
 ]
 
 # ── sysfs helpers ────────────────────────────────────────────────────────────

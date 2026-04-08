@@ -43,8 +43,6 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	algo->iir_noise_floor    = 5;
 	algo->iir_gate_floor     = 200;
 	algo->iir_gate_ratio_q8  = 26;
-	algo->gauss_enabled      = false;
-	algo->gauss_center_weight = 20;
 	algo->macro_threshold    = 800;
 	algo->peak_threshold     = 800;
 	algo->palm_enabled       = true;
@@ -617,47 +615,197 @@ void hx_detect_peaks(struct hx_algo *algo)
 }
 
 /* ======================================================================== */
-/* Peak → position conversion                                               */
+/* Phase 2D — zone expansion + weighted centroid                            */
 /*                                                                           */
-/* 4-point weighted interpolation.  Output range [0, 65535].               */
+/* For each peak, BFS-expand outward while signal >= 50% of the peak       */
+/* value.  Accumulate weighted centroid (Q8.8 fixed-point grid coords)     */
+/* using s64 intermediate products.  When the BFS meets pixels already     */
+/* owned by another peak, fall back to a 3x3 local centroid.               */
+/*                                                                           */
+/* Result: contacts[] filled, then converted to output coords [0, 65535].  */
 /* ======================================================================== */
 
-void hx_peaks_to_positions(struct hx_algo *algo,
+/*
+ * Compute the zone expansion threshold: ~50% of min(peak_threshold, peak_z).
+ * Uses integer multiply + shift: base * 0x40 >> 7 ≈ base * 0.5.
+ */
+static inline s16 hx_zone_thold(s16 sig_thold, s16 peak_z)
+{
+	int base = min((int)sig_thold, (int)peak_z);
+	int result = (base * 0x40) >> 7;
+
+	return (s16)max(result, 1);
+}
+
+/*
+ * Single-peak zone: BFS flood-fill weighted centroid.
+ * Returns true if the expansion was clean (no overlap with other zones).
+ */
+static bool hx_expand_single_peak(struct hx_algo *algo, int pi,
+				    struct hx_contact *ct)
+{
+	struct hx_peak *pk = &algo->peaks[pi];
+	s16 thold = hx_zone_thold(algo->peak_threshold, pk->z);
+	u8 zone_id = (u8)(pi + 1);
+	u16 head = 0, tail = 0;
+	int seed = pk->r * HX_COLS + pk->c;
+	bool clean = true;
+	s64 w_col = 0, w_row = 0;
+	s32 w_total = 0;
+	u16 area = 0;
+	s32 sig_sum = 0;
+
+	static const int dr[] = {-1, -1, -1, 0, 0, 1, 1, 1};
+	static const int dc[] = {-1,  0,  1, -1, 1, -1, 0, 1};
+
+	algo->zone_map[seed] = zone_id;
+	algo->bfs_queue[tail++] = seed;
+
+	while (head != tail) {
+		int idx = algo->bfs_queue[head++];
+		int r = idx / HX_COLS;
+		int c = idx % HX_COLS;
+		s16 sig = hx_frame_at(algo, r, c);
+		int d;
+
+		area++;
+		sig_sum += sig;
+		w_col += (s64)c * 128 * sig;
+		w_row += (s64)r * 128 * sig;
+		w_total += sig;
+
+		for (d = 0; d < 8; d++) {
+			int nr = r + dr[d];
+			int nc = c + dc[d];
+			int ni;
+
+			if (nr < 0 || nr >= HX_ROWS || nc < 0 || nc >= HX_COLS)
+				continue;
+			ni = nr * HX_COLS + nc;
+			if (algo->zone_map[ni]) {
+				if (algo->zone_map[ni] != zone_id)
+					clean = false;
+				continue;
+			}
+			if (hx_frame_at(algo, nr, nc) < thold)
+				continue;
+			algo->zone_map[ni] = zone_id;
+			algo->bfs_queue[tail++] = ni;
+		}
+	}
+
+	if (w_total > 0) {
+		ct->x = (s32)(w_col * 2 / w_total) + 0x80;
+		ct->y = (s32)(w_row * 2 / w_total) + 0x80;
+	} else {
+		ct->x = pk->c * 256 + 128;
+		ct->y = pk->r * 256 + 128;
+	}
+	ct->area = area;
+	ct->signal_sum = sig_sum;
+	ct->is_edge = (pk->r == 0 || pk->r == HX_ROWS - 1 ||
+		       pk->c == 0 || pk->c == HX_COLS - 1);
+
+	return clean;
+}
+
+/*
+ * Multi-peak fallback: 3x3 local weighted centroid around the peak.
+ */
+static void hx_local_centroid(struct hx_algo *algo, int pi,
+			       struct hx_contact *ct)
+{
+	struct hx_peak *pk = &algo->peaks[pi];
+	s64 w_col = 0, w_row = 0;
+	s32 w_total = 0;
+	u16 area = 0;
+	s32 sig_sum = 0;
+	int dr, dc;
+
+	for (dr = -1; dr <= 1; dr++) {
+		for (dc = -1; dc <= 1; dc++) {
+			int nr = pk->r + dr;
+			int nc = pk->c + dc;
+			s16 sig;
+
+			if (nr < 0 || nr >= HX_ROWS || nc < 0 || nc >= HX_COLS)
+				continue;
+			sig = hx_frame_at(algo, nr, nc);
+			if (sig <= 0)
+				continue;
+			w_col += (s64)nc * 128 * sig;
+			w_row += (s64)nr * 128 * sig;
+			w_total += sig;
+			area++;
+			sig_sum += sig;
+		}
+	}
+
+	if (w_total > 0) {
+		ct->x = (s32)(w_col * 2 / w_total) + 0x80;
+		ct->y = (s32)(w_row * 2 / w_total) + 0x80;
+	} else {
+		ct->x = pk->c * 256 + 128;
+		ct->y = pk->r * 256 + 128;
+	}
+	ct->area = area;
+	ct->signal_sum = sig_sum;
+	ct->is_edge = (pk->r == 0 || pk->r == HX_ROWS - 1 ||
+		       pk->c == 0 || pk->c == HX_COLS - 1);
+}
+
+void hx_expand_and_resolve(struct hx_algo *algo,
 			    struct input_mt_pos *pos, int *cnt)
 {
-	int i;
+	int i, n;
 
-	*cnt = min_t(int, algo->peak_count, HIMAX_MAX_TOUCH);
+	memset(algo->zone_map, 0, sizeof(algo->zone_map));
+	algo->contact_count = 0;
 
+	n = min_t(int, algo->peak_count, HIMAX_MAX_TOUCH);
+
+	for (i = 0; i < n; i++) {
+		struct hx_contact *ct = &algo->contacts[algo->contact_count];
+		bool clean;
+
+		clean = hx_expand_single_peak(algo, i, ct);
+		if (!clean)
+			hx_local_centroid(algo, i, ct);
+
+		algo->contact_count++;
+	}
+
+	/* If more peaks than slots, keep the strongest signal_sum contacts */
+	if (algo->contact_count > HIMAX_MAX_TOUCH) {
+		/* Selection-sort descending by signal_sum, keep first MAX */
+		u8 ci, cj;
+
+		for (ci = 0; ci + 1 < algo->contact_count; ci++) {
+			u8 best = ci;
+
+			for (cj = ci + 1; cj < algo->contact_count; cj++) {
+				if (algo->contacts[cj].signal_sum >
+				    algo->contacts[best].signal_sum)
+					best = cj;
+			}
+			if (best != ci)
+				swap(algo->contacts[ci], algo->contacts[best]);
+		}
+		algo->contact_count = HIMAX_MAX_TOUCH;
+	}
+
+	/* Convert Q8.8 grid coordinates to output space matching rxtx2xy:
+	 *   x = ct->x / 6       (maps to [~21, ~2539])
+	 *   y = 5 * ct->y / 32  (maps to [~20, ~1580])
+	 * This matches the coordinate range the DT/touchscreen_properties
+	 * are calibrated for.
+	 */
+	*cnt = algo->contact_count;
 	for (i = 0; i < *cnt; i++) {
-		int r = algo->peaks[i].r;
-		int c = algo->peaks[i].c;
-		s16 vc = hx_frame_at(algo, r, c);
-		s16 vl = hx_frame_at(algo, r, c - 1);
-		s16 vr = hx_frame_at(algo, r, c + 1);
-		s16 vu = hx_frame_at(algo, r - 1, c);
-		s16 vd = hx_frame_at(algo, r + 1, c);
-		s64 tmp_x, tmp_y, num;
+		struct hx_contact *ct = &algo->contacts[i];
 
-		tmp_x = (s64)(vc + vr) * (vc + vl);
-		if (tmp_x > 0) {
-			num = (2 * c + 1) * tmp_x + 2 * vc * (vr - vl);
-			pos[i].x = clamp_val(div_s64(64 * num, 3 * tmp_x),
-					     0, SZ_64K - 1);
-		} else {
-			pos[i].x = clamp_val((s64)c * SZ_64K / HX_COLS,
-					     0, SZ_64K - 1);
-		}
-
-		tmp_y = (s64)(vc + vu) * (vc + vd);
-		if (tmp_y > 0) {
-			num = (2 * r + 1) * tmp_y + 2 * vc * (vd - vu);
-			pos[i].y = clamp_val(div_s64(20 * num, tmp_y),
-					     0, SZ_64K - 1);
-		} else {
-			pos[i].y = clamp_val((s64)r * SZ_64K / HX_ROWS,
-					     0, SZ_64K - 1);
-		}
+		pos[i].x = clamp_val((s32)(ct->x / 6), 0, SZ_64K - 1);
+		pos[i].y = clamp_val((s32)(5 * ct->y / 32), 0, SZ_64K - 1);
 	}
 }
 
@@ -665,11 +813,17 @@ void hx_peaks_to_positions(struct hx_algo *algo,
 /* Phase 3A — greedy distance-matching tracker                              */
 /* ======================================================================== */
 
-static inline s64 hx_dist2(const struct input_mt_pos *a,
-			    const struct hx_track *b)
+/*
+ * Squared distance from a detection to a track's *predicted* position.
+ * Prediction: next_pos = current_pos + velocity.
+ */
+static inline s64 hx_dist2_predicted(const struct input_mt_pos *a,
+				       const struct hx_track *b)
 {
-	s32 dx = a->x - b->x;
-	s32 dy = a->y - b->y;
+	s32 pred_x = b->x + b->vx;
+	s32 pred_y = b->y + b->vy;
+	s32 dx = a->x - pred_x;
+	s32 dy = a->y - pred_y;
 
 	return (s64)dx * dx + (s64)dy * dy;
 }
@@ -705,7 +859,7 @@ void hx_track_contacts(struct hx_algo *algo,
 			continue;
 
 		for (j = 0; j < det_cnt; j++) {
-			s64 d2 = hx_dist2(&det[j], trk);
+			s64 d2 = hx_dist2_predicted(&det[j], trk);
 
 			if (d2 > algo->track_dist2_max)
 				continue;
@@ -752,6 +906,8 @@ void hx_track_contacts(struct hx_algo *algo,
 		trk->x  = (trk->x * 3 + det[m->det_idx].x) / 4;
 		trk->y  = (trk->y * 3 + det[m->det_idx].y) / 4;
 		trk->missed = 0;
+		if (m->det_idx < algo->contact_count)
+			trk->signal_sum = algo->contacts[m->det_idx].signal_sum;
 		if (trk->age < U8_MAX)
 			trk->age++;
 		if (trk->debounce > 0)
@@ -804,6 +960,10 @@ void hx_track_contacts(struct hx_algo *algo,
 		trk->debounce = algo->debounce_base;
 		trk->x        = det[j].x;
 		trk->y        = det[j].y;
+		trk->vx       = 0;
+		trk->vy       = 0;
+		if (j < algo->contact_count)
+			trk->signal_sum = algo->contacts[j].signal_sum;
 	}
 }
 
