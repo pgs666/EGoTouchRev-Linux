@@ -15,6 +15,7 @@ typedef int32_t s32;
 typedef int64_t s64;
 
 #define U8_MAX UINT8_MAX
+#define U16_MAX UINT16_MAX
 #define SZ_64K 65536
 #define __maybe_unused __attribute__((unused))
 #define CONFIG_DYNAMIC_DEBUG 0

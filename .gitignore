@@ -1,0 +1,4 @@
+deploy-logs/
+__pycache__/
+*.py[cod]
+.venv/
