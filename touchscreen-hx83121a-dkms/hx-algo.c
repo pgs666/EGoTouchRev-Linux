@@ -10,23 +10,26 @@
  * No SPI, no IRQ, no input_dev — all driver glue lives in himax-spi-core.c.
  */
 
+#ifdef HX_ALGO_HOST_TEST
+#include "../tests/host-compat.h"
+#else
 #include <linux/kernel.h>
 #include <linux/limits.h>
 #include <linux/math64.h>
 #include <linux/string.h>
+#endif
 
 #include "hx-algo.h"
 
-/* Raw baseline value output by the firmware when no touch is present. */
-#define HX_BASELINE  0x7ffe
+#define HX_BASELINE_FRACTION_BITS 8
 
 /*
  * Default tracking constants — exposed through hx_algo fields so they can
  * be overridden at runtime via sysfs without reloading the module.
  */
 #define HIMAX_TRACK_MATCH_DIST2   (420 * 420)
-#define HIMAX_TRACK_LOST_FRAMES   3
-#define HIMAX_NEW_TOUCH_DEBOUNCE  2
+#define HIMAX_TRACK_LOST_FRAMES   4
+#define HIMAX_NEW_TOUCH_DEBOUNCE  1
 
 /* ======================================================================== */
 /* Initialisation                                                            */
@@ -34,17 +37,32 @@
 
 void hx_algo_init_defaults(struct hx_algo *algo)
 {
+	/* Values track the current Windows solver defaults.  The baseline is
+	 * adaptive per cell; using one immutable 0x7ffe value was a major source
+	 * of weak-frame loss after temperature/VCOM/common-mode drift. */
+	algo->baseline_enabled              = true;
+	algo->baseline_initial              = 0x7fee;
+	algo->baseline_noise_deadband       = 90;
+	algo->baseline_positive_deadband    = 14;
+	algo->baseline_negative_deadband    = 13;
+	algo->baseline_peak_threshold       = 305;
+	algo->baseline_release_hold_frames  = 60;
+	algo->baseline_positive_alpha_shift = 7;
+	algo->baseline_negative_alpha_shift = 5;
+	algo->baseline_noise_alpha_shift    = 6;
+	algo->baseline_positive_max_step    = 20;
+	algo->baseline_negative_max_step    = 20;
 	algo->cmf_enabled        = true;
-	algo->cmf_exclusion      = 250;
-	algo->cmf_max_correction = 500;
+	algo->cmf_exclusion      = 2000;
+	algo->cmf_max_correction = 2000;
 	algo->iir_enabled        = true;
 	algo->iir_decay_weight   = 200;
 	algo->iir_decay_step     = 80;
 	algo->iir_noise_floor    = 5;
 	algo->iir_gate_floor     = 200;
 	algo->iir_gate_ratio_q8  = 26;
-	algo->macro_threshold    = 800;
-	algo->peak_threshold     = 800;
+	algo->macro_threshold    = 280;
+	algo->peak_threshold     = 280;
 	algo->palm_enabled       = true;
 	algo->palm_area_threshold    = 50;
 	algo->palm_signal_threshold  = 80000;
@@ -59,7 +77,7 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	algo->debounce_base     = HIMAX_NEW_TOUCH_DEBOUNCE;
 	algo->track_smoothing   = true;
 	algo->track_active_guard   = true;
-	algo->track_start_debounce = 2;
+	algo->track_start_debounce = 1;
 	algo->track_jump_dist2     = 0;  /* disabled by default */
 }
 
@@ -67,16 +85,78 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 /* Phase 1A — baseline subtraction                                          */
 /* ======================================================================== */
 
+static s32 hx_baseline_step_q8(s32 delta, u8 shift, s16 max_step)
+{
+	s32 limit_q8 = max_t(s32, max_step, 0) *
+			(1 << HX_BASELINE_FRACTION_BITS);
+	s32 step_q8;
+
+	if (!delta)
+		return 0;
+	step_q8 = delta * (1 << HX_BASELINE_FRACTION_BITS);
+	step_q8 >>= min_t(u8, shift, 30);
+	return clamp_t(s32, step_q8, -limit_q8, limit_q8);
+}
+
 static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw)
 {
 	int r, c;
 
+	if (!algo->baseline_initialized) {
+		for (r = 0; r < HX_PIXELS; r++)
+			algo->baseline_q8[r] = (s32)algo->baseline_initial <<
+						HX_BASELINE_FRACTION_BITS;
+		memset(algo->baseline_release_hold, 0,
+		       sizeof(algo->baseline_release_hold));
+		algo->baseline_initialized = true;
+	}
+
 	for (r = 0; r < HX_ROWS; r++) {
 		for (c = 0; c < HX_COLS; c++) {
 			int idx = r * HX_COLS + c;
-			s32 sample = (s32)le16_to_cpup(raw + idx) - HX_BASELINE;
+			s32 sample = (s32)le16_to_cpup(raw + idx);
+			s32 baseline = algo->baseline_q8[idx] >>
+					HX_BASELINE_FRACTION_BITS;
+			s32 delta = sample - baseline;
+			s32 step_q8 = 0;
 
-			algo->frame[r][c] = clamp_t(s32, sample, SHRT_MIN, SHRT_MAX);
+			if (!algo->baseline_enabled) {
+				delta = sample - algo->baseline_initial;
+				goto store;
+			}
+
+			/* Freeze cells carrying a finger-sized positive signal.  A hold
+			 * after release prevents the negative rebound from being absorbed
+			 * into the baseline and creating a later false lift. */
+			if (delta >= algo->baseline_peak_threshold) {
+				algo->baseline_release_hold[idx] =
+					algo->baseline_release_hold_frames;
+				goto store;
+			}
+			if (algo->baseline_release_hold[idx]) {
+				algo->baseline_release_hold[idx]--;
+				if (delta > -algo->baseline_negative_deadband)
+					goto store;
+			}
+
+			if (abs(delta) <= algo->baseline_noise_deadband)
+				step_q8 = hx_baseline_step_q8(delta,
+					algo->baseline_noise_alpha_shift, 1);
+			else if (delta > algo->baseline_positive_deadband)
+				step_q8 = hx_baseline_step_q8(delta,
+					algo->baseline_positive_alpha_shift,
+					algo->baseline_positive_max_step);
+			else if (delta < -algo->baseline_negative_deadband)
+				step_q8 = hx_baseline_step_q8(delta,
+					algo->baseline_negative_alpha_shift,
+					algo->baseline_negative_max_step);
+
+			algo->baseline_q8[idx] = clamp_t(s32,
+				algo->baseline_q8[idx] + step_q8, 0,
+				0xffff << HX_BASELINE_FRACTION_BITS);
+
+	store:
+			algo->frame[r][c] = clamp_t(s32, delta, SHRT_MIN, SHRT_MAX);
 		}
 	}
 
@@ -404,11 +484,8 @@ void hx_detect_macro_zones(struct hx_algo *algo)
 /* ======================================================================== */
 /* Phase 2B — palm rejection                                                 */
 /*                                                                           */
-/* Four integer-only rules.  Any zone matching a rule is discarded.         */
-/* Rule 1: area >= palm_area_threshold                (large footprint)     */
-/* Rule 2: signal_sum >= palm_signal_threshold         (strong integrated)  */
-/* Rule 3: area >= 20 && density < palm_density_low   (spread low signal)  */
-/* Rule 4: area >= 10 && aspect-ratio >= 4:1           (elongated shape)   */
+/* Combine footprint, integrated signal, density and bounding-box evidence. */
+/* A compact, sharp peak is preserved even when its total signal is high.   */
 /* ======================================================================== */
 
 void hx_reject_palms(struct hx_algo *algo)
@@ -422,38 +499,53 @@ void hx_reject_palms(struct hx_algo *algo)
 	for (i = 0; i < algo->zone_count; i++) {
 		struct hx_macro_zone *z = &algo->zones[i];
 		u16 bbox_w, bbox_h, max_side, min_side;
+		u16 px_limit, pi;
+		s32 max_signal = 0;
+		s32 mean_signal;
+		int palm_score = 0;
+		bool strong_finger_shape;
 		bool reject = false;
 
-		/* Rule 1 */
-		if (z->area >= algo->palm_area_threshold) {
-			reject = true;
-			goto next;
-		}
-
-		/* Rule 2 */
-		if (z->signal_sum >= algo->palm_signal_threshold) {
-			reject = true;
-			goto next;
-		}
-
-		/* Rule 3: density = signal_sum / area < palm_density_low
-		 *         Rewritten without division: signal_sum < low * area */
+		/* The Windows solver treats these as evidence, not four independent
+		 * kill switches.  The old Linux port dropped an entire normal finger
+		 * as soon as its integrated signal crossed 80000. */
+		if (z->area >= algo->palm_area_threshold)
+			palm_score += 35;
+		if (z->signal_sum >= algo->palm_signal_threshold)
+			palm_score += 25;
 		if (z->area >= 20 &&
-		    z->signal_sum < (s32)algo->palm_density_low * z->area) {
-			reject = true;
-			goto next;
-		}
+		    z->signal_sum < (s32)algo->palm_density_low * z->area)
+			palm_score += 15;
 
-		/* Rule 4: aspect ratio — fixed-point: max*256 >= 4*min*256 */
 		bbox_w   = z->max_c - z->min_c + 1;
 		bbox_h   = z->max_r - z->min_r + 1;
 		max_side = max(bbox_w, bbox_h);
 		min_side = min(bbox_w, bbox_h);
 		if (z->area >= 10 && min_side > 0 &&
 		    (u32)max_side * 256 >= 1024u * min_side)
-			reject = true;
+			palm_score += 15;
+		if (z->area >= 35 &&
+		    (u32)z->area * 100 >= (u32)bbox_w * bbox_h * 40)
+			palm_score += 15;
 
-next:
+		px_limit = min_t(u16, z->area, HX_ZONE_PX_MAX);
+		for (pi = 0; pi < px_limit; pi++) {
+			int idx = z->pixels[pi];
+
+			max_signal = max_t(s32, max_signal,
+					   hx_frame_at(algo, idx / HX_COLS,
+						       idx % HX_COLS));
+		}
+		mean_signal = z->area ? z->signal_sum / z->area : 0;
+		strong_finger_shape = max_signal >= mean_signal + 100 &&
+				      max_signal * 100 >= mean_signal * 335;
+		if (strong_finger_shape)
+			palm_score -= 20;
+
+		/* Mirror PalmLikely: a large region needs several independent palm
+		 * signals before it may suppress contacts. */
+		reject = z->area >= 55 && palm_score >= 55;
+
 		if (!reject) {
 			if (dst != i)
 				algo->zones[dst] = *z;
@@ -885,7 +977,7 @@ void hx_expand_and_resolve(struct hx_algo *algo,
 	memset(algo->zone_map, 0, sizeof(algo->zone_map));
 	algo->contact_count = 0;
 
-	n = min_t(int, algo->peak_count, HIMAX_MAX_TOUCH);
+	n = min_t(int, algo->peak_count, HX_MAX_PEAKS);
 
 	for (i = 0; i < n; i++) {
 		struct hx_contact *ct = &algo->contacts[algo->contact_count];
@@ -902,7 +994,9 @@ void hx_expand_and_resolve(struct hx_algo *algo,
 		algo->contact_count++;
 	}
 
-	/* If more peaks than slots, keep the strongest signal_sum contacts */
+	/* If more peaks than slots, keep the strongest signal_sum contacts.
+	 * Do this after resolving every stored peak: peaks are intentionally
+	 * processed weakest-first for deterministic zone ownership. */
 	if (algo->contact_count > HIMAX_MAX_TOUCH) {
 		/* Selection-sort descending by signal_sum, keep first MAX */
 		u8 ci, cj;
@@ -945,10 +1039,11 @@ void hx_expand_and_resolve(struct hx_algo *algo,
  * Prediction: next_pos = current_pos + velocity.
  */
 static inline s64 hx_dist2_predicted(const struct input_mt_pos *a,
-				       const struct hx_track *b)
+					       const struct hx_track *b)
 {
-	s32 pred_x = b->x + b->vx;
-	s32 pred_y = b->y + b->vy;
+	s32 frames_ahead = max_t(s32, 1, (s32)b->missed + 1);
+	s32 pred_x = b->x + b->vx * frames_ahead;
+	s32 pred_y = b->y + b->vy * frames_ahead;
 	s32 dx = a->x - pred_x;
 	s32 dy = a->y - pred_y;
 
@@ -988,8 +1083,13 @@ void hx_track_contacts(struct hx_algo *algo,
 
 		for (j = 0; j < det_cnt; j++) {
 			s64 d2 = hx_dist2_predicted(&det[j], trk);
+			s64 gate2 = algo->track_dist2_max;
 
-			if (d2 > algo->track_dist2_max)
+			/* Silent-gap relink: grow the gate up to 2x radius while
+			 * predicting across every missing frame. */
+			if (trk->missed)
+				gate2 *= min_t(s32, (s32)trk->missed + 1, 4);
+			if (d2 > gate2)
 				continue;
 
 			cand[cand_cnt].track_idx = i;
@@ -1052,8 +1152,19 @@ void hx_track_contacts(struct hx_algo *algo,
 		trk->vx = det[m->det_idx].x - trk->x;
 		trk->vy = det[m->det_idx].y - trk->y;
 		if (algo->track_smoothing) {
-			trk->x = (trk->x * 3 + det[m->det_idx].x) / 4;
-			trk->y = (trk->y * 3 + det[m->det_idx].y) / 4;
+			s32 dx = det[m->det_idx].x - trk->x;
+			s32 dy = det[m->det_idx].y - trk->y;
+			s32 speed = max(abs(dx), abs(dy));
+
+			/* Fixed-point approximation of the Windows 1-Euro filter:
+			 * strong smoothing at rest, rapidly decreasing lag in motion. */
+			if (speed >= 24) {
+				trk->x = (trk->x + det[m->det_idx].x * 3) / 4;
+				trk->y = (trk->y + det[m->det_idx].y * 3) / 4;
+			} else {
+				trk->x = (trk->x * 3 + det[m->det_idx].x) / 4;
+				trk->y = (trk->y * 3 + det[m->det_idx].y) / 4;
+			}
 		} else {
 			trk->x = det[m->det_idx].x;
 			trk->y = det[m->det_idx].y;

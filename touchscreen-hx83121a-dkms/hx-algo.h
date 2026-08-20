@@ -8,8 +8,18 @@
 #ifndef HX_ALGO_H
 #define HX_ALGO_H
 
+#ifdef HX_ALGO_HOST_TEST
+#include <stdbool.h>
+#include <stdint.h>
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef int16_t s16;
+typedef int32_t s32;
+struct input_mt_pos { int x; int y; };
+#else
 #include <linux/input/mt.h>
 #include <linux/types.h>
+#endif
 
 /* Grid dimensions — must match the firmware raw frame layout. */
 #define HX_ROWS        40
@@ -118,8 +128,16 @@ struct hx_algo {
 	struct hx_peak peaks[HX_MAX_PEAKS];
 	u8   peak_count;
 
-	struct hx_contact contacts[HIMAX_MAX_TOUCH];
+	/* Keep every peak candidate until the final strength-based capacity cut.
+	 * The old implementation truncated the ascending peak list to ten first,
+	 * which selected the ten weakest candidates on noisy frames. */
+	struct hx_contact contacts[HX_MAX_PEAKS];
 	u8   contact_count;
+
+	/* ---- Per-cell adaptive baseline (Q8 fixed point) ---- */
+	s32 baseline_q8[HX_PIXELS];
+	u8  baseline_release_hold[HX_PIXELS];
+	bool baseline_initialized;
 
 	/* ---- Tracking state ---- */
 	struct hx_track tracks[HIMAX_MAX_TOUCH];
@@ -128,6 +146,18 @@ struct hx_algo {
 
 	/* ---- Tunable parameters (sysfs-writable, atomically updated) ---- */
 	/* Preprocessing */
+	bool baseline_enabled;
+	u16  baseline_initial;
+	s16  baseline_noise_deadband;
+	s16  baseline_positive_deadband;
+	s16  baseline_negative_deadband;
+	s16  baseline_peak_threshold;
+	u8   baseline_release_hold_frames;
+	u8   baseline_positive_alpha_shift;
+	u8   baseline_negative_alpha_shift;
+	u8   baseline_noise_alpha_shift;
+	s16  baseline_positive_max_step;
+	s16  baseline_negative_max_step;
 	bool cmf_enabled;          /* CMF on/off (default: true)           */
 	s16  cmf_exclusion;        /* exclude pixels > this from CMF mean  */
 	s16  cmf_max_correction;   /* clamp per-row/col offset             */

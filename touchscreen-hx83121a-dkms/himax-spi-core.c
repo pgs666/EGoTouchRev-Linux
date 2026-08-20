@@ -102,6 +102,7 @@ HIMAX_MAX_TX + HIMAX_MAX_RX) * 2)
 #define HIMAX_PANEL_REINIT_DELAY_MS			50
 /* Let the panel and display pipeline settle before TDDI touch recovery. */
 #define HIMAX_PANEL_ENABLE_SETTLE_MS			300
+#define HIMAX_MAX_CONSECUTIVE_FRAME_ERRORS		3
 /* HIMAX SPI function select, 1st byte of any SPI command sequence */
 #define HIMAX_SPI_FUNCTION_READ				0xf3
 #define HIMAX_SPI_FUNCTION_WRITE			0xf2
@@ -134,6 +135,7 @@ struct himax_ts_data {
 	struct drm_panel_follower panel_follower;
 	struct delayed_work panel_reinit_work;
 	struct hx_algo *algo;
+	u8 consecutive_frame_errors;
 };
 
 static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on);
@@ -958,6 +960,10 @@ static ssize_t _name##_store(struct device *dev,			\
 static DEVICE_ATTR_RW(_name)
 
 /* Preprocessing */
+HX_ALGO_ATTR_BOOL_RW(baseline_enabled);
+HX_ALGO_ATTR_S16_RW(baseline_noise_deadband);
+HX_ALGO_ATTR_S16_RW(baseline_peak_threshold);
+HX_ALGO_ATTR_U8_RW(baseline_release_hold_frames);
 HX_ALGO_ATTR_BOOL_RW(cmf_enabled);
 HX_ALGO_ATTR_S16_RW(cmf_exclusion);
 HX_ALGO_ATTR_S16_RW(cmf_max_correction);
@@ -991,6 +997,10 @@ HX_ALGO_ATTR_U8_RW(track_start_debounce);
 HX_ALGO_ATTR_S32_RW(track_jump_dist2);
 
 static struct attribute *hx_algo_attrs[] = {
+	&dev_attr_baseline_enabled.attr,
+	&dev_attr_baseline_noise_deadband.attr,
+	&dev_attr_baseline_peak_threshold.attr,
+	&dev_attr_baseline_release_hold_frames.attr,
 	&dev_attr_cmf_enabled.attr,
 	&dev_attr_cmf_exclusion.attr,
 	&dev_attr_cmf_max_correction.attr,
@@ -1121,11 +1131,25 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 	}
 
 	if (hx83121a_gaokun_read_event_stack(ts)) {
-		dev_err(ts->dev, "failed to get touch data!\n");
-		himax_mcu_ic_reset(ts, true);
-		irq_ret = IRQ_NONE;
+		/* AFE transitions can transiently lose one or two frames.  Resetting
+		 * the controller on the first miss creates a long, user-visible UP/
+		 * DOWN break.  Match the Windows runtime recovery policy and recover
+		 * only after a consecutive failure streak. */
+		if (++ts->consecutive_frame_errors >=
+		    HIMAX_MAX_CONSECUTIVE_FRAME_ERRORS) {
+			dev_err(ts->dev, "%u consecutive frame reads failed, resetting controller\n",
+				ts->consecutive_frame_errors);
+			ts->consecutive_frame_errors = 0;
+			himax_mcu_ic_reset(ts, true);
+		} else {
+			dev_warn_ratelimited(ts->dev,
+				"touch frame read failed (%u/%u), retaining tracks\n",
+				ts->consecutive_frame_errors,
+				HIMAX_MAX_CONSECUTIVE_FRAME_ERRORS);
+		}
 		goto out_unlock;
 	}
+	ts->consecutive_frame_errors = 0;
 
 	// dump_frame((void *)ptr - OFST, true);
 

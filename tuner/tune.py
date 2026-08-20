@@ -58,6 +58,10 @@ _TR = {
     "err_generic":           "写入 {name} 失败：{err}",
     "err_invalid":           "无效值：「{val}」不是整数",
     # 参数标签
+    "baseline_enabled":       "自适应基线",
+    "baseline_noise_deadband":"基线噪声死区",
+    "baseline_peak_threshold":"基线冻结阈值",
+    "baseline_release_hold_frames": "基线释放保持帧",
     "cmf_enabled":           "CMF 开关",
     "cmf_exclusion":         "CMF 排除阈值",
     "cmf_max_correction":    "CMF 最大修正量",
@@ -88,6 +92,10 @@ _TR = {
 
 # 参数说明文本（浅色小字）
 _DESC = {
+    "baseline_enabled":       "逐像素追踪温漂与 VCOM 漂移，触摸区域自动冻结",
+    "baseline_noise_deadband":"基线附近按噪声慢速跟踪的范围",
+    "baseline_peak_threshold":"高于此差值视为真实触摸并冻结该像素基线",
+    "baseline_release_hold_frames": "抬手后暂缓吸收负回弹，避免产生假断触",
     "cmf_enabled":           "消除帧间共模噪声，改善基线稳定性",
     "cmf_exclusion":         "信号高于此值的像素不计入 CMF 均值，避免触点污染基线",
     "cmf_max_correction":    "每行/列 CMF 修正量的上限，防止过度补偿",
@@ -126,17 +134,21 @@ def desc(name):
 
 # ── 默认值（来自 hx_algo_init_defaults）──────────────────────────────────────
 DEFAULTS = {
+    "baseline_enabled":       1,
+    "baseline_noise_deadband": 90,
+    "baseline_peak_threshold": 305,
+    "baseline_release_hold_frames": 60,
     "cmf_enabled":           1,
-    "cmf_exclusion":         250,
-    "cmf_max_correction":    500,
+    "cmf_exclusion":         2000,
+    "cmf_max_correction":    2000,
     "iir_enabled":           1,
     "iir_decay_weight":      200,
     "iir_decay_step":        80,
     "iir_noise_floor":       5,
     "iir_gate_floor":        200,
     "iir_gate_ratio_q8":     26,
-    "macro_threshold":       800,
-    "peak_threshold":        800,
+    "macro_threshold":       280,
+    "peak_threshold":        280,
     "palm_enabled":          1,
     "palm_area_threshold":   50,
     "palm_signal_threshold": 80000,
@@ -146,11 +158,11 @@ DEFAULTS = {
     "edge_push_q8":          128,
     "edge_blend_q8":         512,
     "track_dist2_max":       176400,  # 420 * 420
-    "track_lost_frames":     3,
-    "debounce_base":         2,
+    "track_lost_frames":     4,
+    "debounce_base":         1,
     "track_smoothing":       1,
     "track_active_guard":    1,
-    "track_start_debounce":  2,
+    "track_start_debounce":  1,
     "track_jump_dist2":      0,
 }
 
@@ -203,9 +215,13 @@ def write_param(name, value):
 #       ("entry",  name)
 TABS = [
     ("tab_preprocessing", [
+        ("toggle", "baseline_enabled"),
+        ("slider", "baseline_noise_deadband", 0, 200, 1),
+        ("slider", "baseline_peak_threshold", 100, 1000, 5),
+        ("slider", "baseline_release_hold_frames", 0, 120, 1),
         ("toggle", "cmf_enabled"),
-        ("slider", "cmf_exclusion",          50,   800,  10),
-        ("slider", "cmf_max_correction",     50,  1500,  10),
+        ("slider", "cmf_exclusion",          50,  3000,  10),
+        ("slider", "cmf_max_correction",     50,  3000,  10),
         ("toggle", "iir_enabled"),
         ("slider", "iir_decay_weight",        0,   256,   1),
         ("slider", "iir_decay_step",          0,   200,   1),

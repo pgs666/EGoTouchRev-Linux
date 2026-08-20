@@ -10,10 +10,10 @@ KDIR = /lib/modules/$(KVER)/build
 MDIR = /usr/src/$(MODNAME)-$(MODVER)
 
 all:
-	make -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 
 clean:
-	make -C $(KDIR) M=$(PWD) clean
+	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 
 dkmsinstall:
 	cp -R . /usr/src/$(MODNAME)-$(MODVER)
