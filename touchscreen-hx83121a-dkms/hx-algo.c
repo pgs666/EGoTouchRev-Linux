@@ -1839,6 +1839,25 @@ int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
 	for (i = 0; i < HX_PIXELS; i++)
 		frame_max = max(frame_max, ((s16 *)algo->frame)[i]);
 	algo->diag_frame_max = frame_max;
+
+	/* The controller's master-frame status is authoritative for lift-off.
+	 * Do not let matrix rebound or the tracker's silent-gap window extend an
+	 * already confirmed UP event.  The gap window remains useful for UNKNOWN
+	 * status (host tests/legacy callers) and invalid frames, which never enter
+	 * this function from the IRQ path. */
+	if (finger_state == HX_FINGER_ABSENT) {
+		algo->zone_count = 0;
+		algo->peak_count = 0;
+		algo->contact_count = 0;
+		algo->diag_zones = 0;
+		algo->diag_peaks = 0;
+		algo->diag_contacts_pre_filter = 0;
+		algo->diag_contacts_post_filter = 0;
+		for (i = 0; i < HIMAX_MAX_TOUCH; i++)
+			hx_reset_track(&algo->tracks[i]);
+		goto update_state;
+	}
+
 	hx_detect_macro_zones(algo);
 	algo->diag_zones = algo->zone_count;
 	hx_reject_palms(algo);
@@ -1850,6 +1869,7 @@ int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
 	algo->diag_contacts_post_filter = det_cnt;
 	hx_track_contacts(algo, det, det_cnt);
 
+update_state:
 	for (i = 0; i < HIMAX_MAX_TOUCH; i++)
 		if (algo->tracks[i].active && algo->tracks[i].debounce == 0)
 			stable++;

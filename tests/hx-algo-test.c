@@ -519,6 +519,26 @@ static void test_integrated_ghost_and_gesture_lifecycle(void)
 	assert(algo.gesture_state == HX_GESTURE_IDLE);
 }
 
+static void test_confirmed_lift_releases_immediately(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+
+	init_integrated_algo(&algo);
+	init_raw(raw, 0x7fee);
+	add_blob(raw, 10, 13, 2200);
+	assert(hx_algo_process_frame_state(&algo, raw,
+					   HX_FINGER_PRESENT) == 1);
+	assert(algo.tracks[0].reported);
+
+	/* Keep the same residual matrix on purpose: an authoritative firmware
+	 * lift must beat both residual signal and track_lost_frames. */
+	assert(hx_algo_process_frame_state(&algo, raw,
+					   HX_FINGER_ABSENT) == 0);
+	assert(!algo.tracks[0].active);
+	assert(algo.gesture_state == HX_GESTURE_RELEASE);
+}
+
 static void test_edge_compensation_and_weak_rejection(void)
 {
 	struct hx_algo comp = {}, plain = {}, reject = {};
@@ -569,6 +589,7 @@ int main(void)
 	test_dynamic_debounce_uses_signal_and_edge();
 	test_one_euro_filters_jitter_but_tracks_motion();
 	test_integrated_ghost_and_gesture_lifecycle();
+	test_confirmed_lift_releases_immediately();
 	test_edge_compensation_and_weak_rejection();
 	puts("hx-algo host regression tests passed");
 	return 0;
