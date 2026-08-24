@@ -2,3 +2,7 @@ deploy-logs/
 __pycache__/
 *.py[cod]
 .venv/
+.tools/
+.gradle/
+himax-touch-diagnostic/.gradle/
+live-captures/

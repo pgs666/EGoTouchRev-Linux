@@ -5,6 +5,13 @@ MODVER = 0.1
 obj-m += $(MODNAME).o
 $(MODNAME)-y := himax-spi-core.o hx-algo.o
 
+# Full-rate diagnostic capture is deliberately excluded from normal builds.
+# Build an instrumented module with: make HIMAX_DIAGNOSTICS=1
+HIMAX_DIAGNOSTICS ?= 0
+ifeq ($(HIMAX_DIAGNOSTICS),1)
+ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS=1
+endif
+
 KVER = $(shell uname -r)
 KDIR = /lib/modules/$(KVER)/build
 MDIR = /usr/src/$(MODNAME)-$(MODVER)

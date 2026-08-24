@@ -25,6 +25,12 @@ driver_link="/sys/bus/spi/devices/$spi_device/driver"
 old_input_count=$(awk '/^N: Name="Himax Capacitive TouchScreen"$/{n++} END{print n+0}' \
 	/proc/bus/input/devices)
 rollback_needed=1
+himax_diagnostics="${HIMAX_DIAGNOSTICS:-0}"
+
+case "$himax_diagnostics" in
+	0|1) ;;
+	*) echo "HIMAX_DIAGNOSTICS must be 0 or 1" >&2; exit 2 ;;
+esac
 
 mkdir -p "$log_dir"
 exec > >(tee -a "$log_file") 2>&1
@@ -53,13 +59,15 @@ fi
 : > "$sysfs_state"
 while IFS= read -r path; do
 	[[ -r "$path" ]] || continue
-	[[ "$(basename "$path")" == "diagnostics" ]] && continue
+	case "$(basename "$path")" in
+		diagnostics|event_stack_hex) continue ;;
+	esac
 	printf '%s\t%s\n' "$(basename "$path")" "$(<"$path")" >> "$sysfs_state"
 done < <(find "$algo_dir" -maxdepth 1 -type f 2>/dev/null | sort)
 
 echo "checkpoint=$stamp kernel=$kernel_version old_module=${old_module:-none}"
 make -C "$repo_dir/tests" clean test
-make -C "$src_dir" clean all
+make -C "$src_dir" clean all HIMAX_DIAGNOSTICS="$himax_diagnostics"
 repo_hash=$(sha256sum "$src_dir/himax-spi.ko" | awk '{print $1}')
 
 [[ "$dkms_src" == "/usr/src/himax-spi-0.1" ]]

@@ -80,9 +80,15 @@ EGoTouchRev-Linux/
 
 ```bash
 cd touchscreen-hx83121a-dkms
-make
+make                         # 普通版，默认不包含诊断采集
+# make HIMAX_DIAGNOSTICS=1   # 诊断版，包含完整 event_trace/event_stack
 sudo insmod himax-spi.ko
 ```
+
+完整诊断采集是编译期可选功能，普通版默认关闭。关闭时不会编译
+`diagnostics`、`event_stack[_hex]` 和 `event_trace` sysfs 接口，不分配约
+10.3 MiB 的 trace ring/snapshot，也不会在每个触控 IRQ 中复制原始事件栈和
+2400 点处理矩阵。需要配合 Android 诊断 APK 抓取现场时，再显式构建诊断版。
 
 ### DKMS 安装（推荐）
 
@@ -101,6 +107,7 @@ sudo make dkmsremove
 
 ```bash
 make -C touchscreen-hx83121a-dkms deploy-local
+# 需要诊断版时：HIMAX_DIAGNOSTICS=1 ./scripts/deploy-local.sh
 ```
 
 该目标先跑 `test all` 再执行 `scripts/deploy-local.sh`，把“已知可用”的旧模块
