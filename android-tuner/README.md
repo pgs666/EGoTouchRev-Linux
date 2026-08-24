@@ -8,16 +8,13 @@
 
 ## 构建
 
-局域网构建服务器的完整连接方式见未提交的 `/home/user/Project/linux-gaokun-buildbot/LOCAL_BUILD_SERVER.md`。当前 Android 工具位置：
-
-- JDK 17：`/home/pgs/gaokun-build/jdk17`
-- Android SDK：`/home/pgs/gaokun-build/android-sdk`
-- Gradle 8.6：`/home/pgs/gaokun-build/gradle/gradle-8.6/bin/gradle`
+需要 JDK 17、Android SDK、Gradle 8.6，以及 `compileSdk 36` 对应的平台文件。项目
+不提交 Gradle wrapper、SDK、缓存或预编译 APK。
 
 ```sh
-export JAVA_HOME=/home/pgs/gaokun-build/jdk17
-export ANDROID_HOME=/home/pgs/gaokun-build/android-sdk
-/home/pgs/gaokun-build/gradle/gradle-8.6/bin/gradle :app:assembleDebug
+export JAVA_HOME=/path/to/jdk17
+export ANDROID_HOME=/path/to/android-sdk
+gradle :app:assembleDebug
 ```
 
 产物为 `app/build/outputs/apk/debug/app-debug.apk`。

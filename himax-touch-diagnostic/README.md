@@ -32,22 +32,19 @@ CSV 会列出每帧的 SPI/master 状态、芯片有手指标志、算法峰数�
 
 ## 构建
 
-本目录是独立 Android Gradle 工程，使用 Android Gradle Plugin 8.3.2、compileSdk 34。当前提交已经包含服务器构建出的调试 APK：
-
-```text
-artifacts/app-debug.apk
-```
-
-重新构建时，需要 Android SDK 34、Build Tools 34.0.0、JDK 17 和 Gradle 8.6；可在带这些依赖的环境执行：
+本目录是独立 Android Gradle 工程，使用 Android Gradle Plugin 8.3.2、compileSdk 34。
+需要 Android SDK 34、Build Tools 34.0.0、JDK 17 和 Gradle 8.6；可在带这些依赖
+的环境执行：
 
 ```sh
 ./gradlew :app:assembleDebug
 ```
 
-本项目不提交 Gradle wrapper，也不把 Gradle 缓存纳入版本控制。Gradle 的默认输出路径仍是 `app/build/outputs/apk/debug/app-debug.apk`；构建完成后复制到 `artifacts/app-debug.apk` 即为本项目交付的 APK。安装命令示例：
+本项目不提交 Gradle wrapper、Gradle 缓存或预编译 APK。默认输出路径是
+`app/build/outputs/apk/debug/app-debug.apk`。安装命令示例：
 
 ```sh
-adb install -r artifacts/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
 完整事件栈由驱动的只读二进制 sysfs 节点 `event_stack` 提供，全速环形追踪由 `event_trace` 提供。必须重新编译并部署包含这两个节点的 `himax-spi` 模块，APK 才能生成相应证据；核心节点不存在或读取失败会把采集状态标记为 `FAILED`。`event_trace` 在内核中保留最近 512 条 IRQ，通常约为 4 秒，并在读取时生成一致快照。原有 `event_stack_hex` 文本节点仍会采集为可读摘要。SPI/algo 辅助节点失败只记录为 `optional_*`，不会导致核心采集失败。

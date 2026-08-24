@@ -21,7 +21,7 @@ wheels = [
 ]
 
 [[package]]
-name = "tuner"
+name = "egotouch-tuner"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

@@ -132,7 +132,8 @@ struct hx_track {
 
 /* Age a possible second touch from the moment it starts competing with an
  * existing reported track.  Peak lifetime is not suitable for this: a mature
- * residual lobe can become unmatched for the first time after a split. */
+ * residual lobe can become unmatched for the first time after a split.
+ */
 struct hx_peak_competition {
 	u8 peak_id;
 	u8 age;
@@ -203,7 +204,8 @@ struct hx_algo {
 
 	/* Keep every peak candidate until the final strength-based capacity cut.
 	 * The old implementation truncated the ascending peak list to ten first,
-	 * which selected the ten weakest candidates on noisy frames. */
+	 * which selected the ten weakest candidates on noisy frames.
+	 */
 	struct hx_contact contacts[HX_MAX_PEAKS];
 	u8   contact_count;
 
@@ -212,7 +214,8 @@ struct hx_algo {
 	/* Windows keeps several validated baselines instead of treating the
 	 * currently-learning grid as authoritative across every screen cycle.
 	 * Keep the minimum useful subset here: last committed safe data, a wake
-	 * candidate, and baseline_q8 as the live/working copy. */
+	 * candidate, and baseline_q8 as the live/working copy.
+	 */
 	s32 safe_baseline_q8[HX_PIXELS];
 	s32 wake_candidate_q8[HX_PIXELS];
 	u8  baseline_release_hold[HX_PIXELS];

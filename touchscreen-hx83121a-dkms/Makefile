@@ -3,7 +3,9 @@ MODNAME = himax-spi
 MODVER = 0.1
 
 obj-m += $(MODNAME).o
-$(MODNAME)-y := himax-spi-core.o hx-algo.o
+$(MODNAME)-y := himax-spi-core.o himax-spi-hw.o himax-spi-sysfs.o \
+		hx-algo.o hx-algo-preprocess.o \
+		hx-algo-detect.o hx-algo-resolve.o hx-algo-track.o
 
 # Full-rate diagnostic capture is deliberately excluded from normal builds.
 # Build an instrumented module with: make HIMAX_DIAGNOSTICS=1
@@ -16,8 +18,12 @@ KVER = $(shell uname -r)
 KDIR = /lib/modules/$(KVER)/build
 MDIR = /usr/src/$(MODNAME)-$(MODVER)
 MODPROBE_CONF = /etc/modprobe.d/$(MODNAME)-dkms.conf
-DKMS_SOURCES = Makefile dkms.conf himax-spi-core.c hx-algo.c hx-algo.h \
-	       hx-frame-status.h
+DKMS_SOURCES = Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
+	       himax-spi-sysfs.c \
+	       himax-spi.h hx-algo.c \
+	       hx-algo-preprocess.c hx-algo-detect.c hx-algo-resolve.c \
+	       hx-algo-track.c \
+	       hx-algo.h hx-algo-internal.h hx-frame-status.h
 
 .PHONY: all clean test deploy-local dkmsinstall dkmsremove
 

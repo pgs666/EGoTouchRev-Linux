@@ -225,7 +225,7 @@ DEFAULTS = {
     "cmf_enabled":           1,
     "cmf_exclusion":         2000,
     "cmf_max_correction":    2000,
-    "iir_enabled":           1,
+    "iir_enabled":           0,
     "iir_decay_weight":      200,
     "iir_decay_step":        80,
     "iir_noise_floor":       5,
@@ -694,5 +694,10 @@ class App(_TkBase):
                 var.set(val)
 
 
-if __name__ == "__main__":
+def main():
+    """Run the tuner UI."""
     App().mainloop()
+
+
+if __name__ == "__main__":
+    main()
