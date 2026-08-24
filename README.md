@@ -28,9 +28,14 @@ EGoTouchRev-Linux/
 ├── scripts/
 │   └── deploy-local.sh          # 带校验和自动回滚的本机部署脚本
 ├── tests/                       # 无硬件算法回归测试
+├── docs/
+│   └── windows-porting-roadmap.md # 后续 Windows 特性选择性移植顺序
 └── tuner/
     └── tune.py                  # 图形化实时调参工具（Tkinter）
 ```
+
+后续开发优先级、每阶段验收条件和明确暂缓的 Windows 功能见
+[HX83121A 后续 Windows 特性移植路线图](docs/windows-porting-roadmap.md)。
 
 ---
 
