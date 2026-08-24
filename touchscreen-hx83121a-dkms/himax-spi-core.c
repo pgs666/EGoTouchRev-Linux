@@ -262,6 +262,8 @@ struct himax_ts_data {
 	u32 warm_resume_count;
 	u32 warm_resume_fallback_count;
 	u32 resume_stability_failures;
+	u32 afe_calibration_count;
+	u32 afe_calibration_failures;
 #endif
 };
 
@@ -558,9 +560,15 @@ static int himax_restore_afe_runtime(struct himax_ts_data *ts,
 					     HIMAX_HX83121A_AFE_CMD_START_CALIBRATION,
 					     0);
 		if (ret) {
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+			ts->afe_calibration_failures++;
+#endif
 			dev_warn(ts->dev, "failed to start AFE calibration: %d\n", ret);
 			first_error = ret;
 		} else {
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+			ts->afe_calibration_count++;
+#endif
 			dev_info(ts->dev,
 				 "AFE calibration command transport completed\n");
 		}
@@ -978,10 +986,12 @@ static int himax_warm_resume(struct himax_ts_data *ts)
 	if (ret)
 		return ret;
 
-	/* Xiaomi's resume replays runtime modes but does not recalibrate the AFE.
-	 * Preserve that distinction: calibration belongs to cold initialization;
-	 * only restore the requested scan rate on a retained-state wake. */
-	ret = himax_restore_afe_runtime(ts, false);
+	/* The retained controller state is valid at the protocol level, but the
+	 * display has just restarted and may now impose a different VCOM/scan-phase
+	 * environment on the touch AFE.  Windows runs StartCalibration after every
+	 * Chip::Init(); do the same here after the panel settle delay while keeping
+	 * the already converged host-side per-cell baseline. */
+	ret = himax_restore_afe_runtime(ts, true);
 	if (ret)
 		dev_warn(ts->dev,
 			 "warm-resume AFE mode replay incomplete: %d\n", ret);
@@ -1488,7 +1498,8 @@ static ssize_t diagnostics_show(struct device *dev,
 		"contacts_pre=%u contacts_post=%u active=%u reported=%u "
 		"baseline_generation=%u full_resets=%u live_clears=%u "
 		"cold_inits=%u warm_resumes=%u warm_fallbacks=%u "
-		"resume_stability_failures=%u "
+		"resume_stability_failures=%u afe_calibrations=%u "
+		"afe_calibration_failures=%u "
 		"small_peak_continued=%u weak_peak_continued=%u "
 		"small_peak_rejected=%u "
 		"split_peak_deferred=%u cross_zone_split_deferred=%u "
@@ -1501,6 +1512,7 @@ static ssize_t diagnostics_show(struct device *dev,
 		a->baseline_generation, a->full_reset_count, a->live_clear_count,
 		ts->cold_init_count, ts->warm_resume_count,
 		ts->warm_resume_fallback_count, ts->resume_stability_failures,
+		ts->afe_calibration_count, ts->afe_calibration_failures,
 		a->diag_small_peak_continued, a->diag_weak_peak_continued,
 		a->diag_small_peak_rejected,
 		a->diag_split_peak_deferred,
