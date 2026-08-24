@@ -158,39 +158,20 @@ static void test_one_euro_filters_jitter_but_tracks_motion(void)
 	assert(algo.tracks[slot].x > 1150 && algo.tracks[slot].x < 1200);
 }
 
-static void test_integrated_ghost_and_gesture_lifecycle(void)
+static void test_integrated_ghost_filter(void)
 {
 	struct hx_algo algo = {};
 	u16 raw[HX_PIXELS];
 
 	init_integrated_algo(&algo);
-	algo.gesture_long_press_frames = 3;
 	init_raw(raw, 0x7fee);
 	add_blob(raw, 10, 8, 2200);
 	add_blob(raw, 10, 30, 500);
 	assert(hx_algo_process_frame(&algo, raw) == 1);
-	assert(algo.gesture_state == HX_GESTURE_PRESS);
 
 	init_raw(raw, 0x7fee);
 	add_blob(raw, 10, 13, 2200);
 	assert(hx_algo_process_frame(&algo, raw) == 1);
-	assert(algo.gesture_state == HX_GESTURE_DRAG);
-
-	/* Start a stationary lifetime and reach long press. */
-	hx_algo_reset_runtime(&algo);
-	init_raw(raw, 0x7fee);
-	add_blob(raw, 10, 13, 2200);
-	assert(hx_algo_process_frame(&algo, raw) == 1);
-	assert(hx_algo_process_frame(&algo, raw) == 1);
-	assert(hx_algo_process_frame(&algo, raw) == 1);
-	assert(algo.gesture_state == HX_GESTURE_LONG_PRESS);
-
-	init_raw(raw, 0x7fee);
-	for (int i = 0; i <= algo.track_lost_frames; i++)
-		hx_algo_process_frame(&algo, raw);
-	assert(algo.gesture_state == HX_GESTURE_RELEASE);
-	hx_algo_process_frame(&algo, raw);
-	assert(algo.gesture_state == HX_GESTURE_IDLE);
 }
 
 static void test_confirmed_lift_releases_immediately(void)
@@ -210,7 +191,6 @@ static void test_confirmed_lift_releases_immediately(void)
 	assert(hx_algo_process_frame_state(&algo, raw,
 					   HX_FINGER_ABSENT) == 0);
 	assert(!algo.tracks[0].active);
-	assert(algo.gesture_state == HX_GESTURE_RELEASE);
 }
 
 static void test_small_peak_only_continues_reported_track(void)
@@ -444,7 +424,7 @@ void run_runtime_tests(void)
 	test_firmware_rising_edge_start_bypasses_debounce();
 	test_firmware_rising_compact_near_edge_starts_immediately();
 	test_one_euro_filters_jitter_but_tracks_motion();
-	test_integrated_ghost_and_gesture_lifecycle();
+	test_integrated_ghost_filter();
 	test_confirmed_lift_releases_immediately();
 	test_small_peak_only_continues_reported_track();
 	test_small_peak_rejects_ambiguous_tracks();

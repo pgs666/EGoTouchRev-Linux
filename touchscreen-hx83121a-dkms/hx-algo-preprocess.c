@@ -30,6 +30,7 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 {
 	s64 common_sum = 0;
 	s32 common_diff;
+	s32 max_delta = INT_MIN;
 	int common_bin = 0;
 	int common_count = 0;
 	int cumulative = 0;
@@ -58,21 +59,15 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	memset(algo->baseline_hist, 0, sizeof(algo->baseline_hist));
 
 	/* Estimate panel-wide VCOM/temperature drift before classifying cells. */
-	for (r = 0; r < HX_ROWS; r++) {
-		for (c = 0; c < HX_COLS; c++) {
-			int idx = r * HX_COLS + c;
-			s32 sample = (s32)le16_to_cpup(raw + idx);
-			s32 baseline = algo->baseline_q8[idx] >>
-					HX_BASELINE_FRACTION_BITS;
+	for (r = 1; r < HX_PIXELS; r++) {
+		s32 sample = (s32)le16_to_cpup(raw + r);
+		s32 baseline = algo->baseline_q8[r] >>
+				HX_BASELINE_FRACTION_BITS;
+		s32 delta = sample - baseline;
+		int bin = (delta + 65536) >> 6;
 
-			if (idx != 0) {
-				s32 delta = sample - baseline;
-				int bin = (delta + 65536) >> 6;
-
-				algo->baseline_hist[clamp_t(int, bin, 0,
-					HX_BASELINE_HIST_BINS - 1)]++;
-			}
-		}
+		algo->baseline_hist[clamp_t(int, bin, 0,
+			HX_BASELINE_HIST_BINS - 1)]++;
 	}
 	for (common_bin = 0; common_bin < HX_BASELINE_HIST_BINS;
 	     common_bin++) {
@@ -81,24 +76,18 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 			break;
 	}
 	common_bin = min(common_bin, HX_BASELINE_HIST_BINS - 1);
-	for (r = 0; r < HX_ROWS; r++) {
-		for (c = 0; c < HX_COLS; c++) {
-			int idx = r * HX_COLS + c;
-			s32 sample, baseline, delta;
-			int bin;
-
-			if (!idx)
-				continue;
-			sample = (s32)le16_to_cpup(raw + idx);
-			baseline = algo->baseline_q8[idx] >>
-				   HX_BASELINE_FRACTION_BITS;
-			delta = sample - baseline;
-			bin = clamp_t(int, (delta + 65536) >> 6, 0,
+	for (r = 1; r < HX_PIXELS; r++) {
+		s32 sample = (s32)le16_to_cpup(raw + r);
+		s32 baseline = algo->baseline_q8[r] >>
+				HX_BASELINE_FRACTION_BITS;
+		s32 delta = sample - baseline;
+		int bin = clamp_t(int, (delta + 65536) >> 6, 0,
 				      HX_BASELINE_HIST_BINS - 1);
-			if (bin == common_bin) {
-				common_sum += delta;
-				common_count++;
-			}
+
+		max_delta = max(max_delta, delta);
+		if (bin == common_bin) {
+			common_sum += delta;
+			common_count++;
 		}
 	}
 	common_diff = common_count ? (s32)(common_sum / common_count) : 0;
@@ -111,20 +100,11 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	 * interference.  Never let a contradictory raw peak be learned quickly.
 	 */
 	if (!has_signal) {
-		for (r = 0; r < HX_ROWS && !has_signal; r++) {
-			for (c = 0; c < HX_COLS; c++) {
-				int idx = r * HX_COLS + c;
-				s32 sample = (s32)le16_to_cpup(raw + idx);
-				s32 baseline = algo->baseline_q8[idx] >>
-						HX_BASELINE_FRACTION_BITS;
-
-				if (sample - baseline - common_diff >=
-				    algo->baseline_peak_threshold) {
-					has_signal = true;
-					break;
-				}
-			}
-		}
+		/* max_delta is collected while locating the common-mode bin.  This
+		 * avoids a third full-grid pass on every firmware no-finger frame.
+		 */
+		has_signal = max_delta - common_diff >=
+			algo->baseline_peak_threshold;
 		for (r = 0; r < HIMAX_MAX_TOUCH; r++)
 			if (algo->tracks[r].active) {
 				has_signal = true;
@@ -423,8 +403,10 @@ static void hx_apply_iir(struct hx_algo *algo)
 	u16 decay_weight, decay_step;
 
 	if (!algo->iir_enabled) {
-		memcpy(algo->iir_history, algo->frame, sizeof(algo->frame));
-		algo->iir_initialized = true;
+		/* Do not maintain an unused 2400-cell history at frame rate.  Marking
+		 * it invalid makes a later runtime enable seed from its first frame.
+		 */
+		algo->iir_initialized = false;
 		return;
 	}
 
@@ -471,10 +453,12 @@ static void hx_apply_iir(struct hx_algo *algo)
 /* Phase 1 entry point                                                       */
 /* ======================================================================== */
 
+#ifdef HX_ALGO_HOST_TEST
 void hx_preprocess_frame(struct hx_algo *algo, const u16 *raw)
 {
 	hx_preprocess_frame_state(algo, raw, HX_FINGER_UNKNOWN);
 }
+#endif
 
 void hx_preprocess_frame_state(struct hx_algo *algo, const u16 *raw,
 			       enum hx_finger_state finger_state)

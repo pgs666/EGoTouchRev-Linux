@@ -128,8 +128,6 @@ _TR = {
     "euro_alpha_min_q8":               "Euro 速率下限 (Q8)",
     "euro_alpha_max_q8":               "Euro 速率上限 (Q8)",
     "euro_speed_threshold":            "Euro 速度阈值",
-    "gesture_drag_distance":           "拖拽手势距离",
-    "gesture_long_press_frames":       "长按手势帧数",
 }
 
 # 参数说明文本（浅色小字）
@@ -204,8 +202,6 @@ _DESC = {
     "euro_alpha_min_q8":               "低速移动时的平滑系数下限 (Q8)",
     "euro_alpha_max_q8":               "高速移动时的平滑系数上限 (Q8)",
     "euro_speed_threshold":            "达到最大平滑系数所需的移动速度",
-    "gesture_drag_distance":           "判定为拖拽手势的最小移动距离",
-    "gesture_long_press_frames":       "判定为长按手势的持续帧数",
 }
 
 def t(key, **kwargs):
@@ -288,8 +284,6 @@ DEFAULTS = {
     "euro_alpha_min_q8":             64,
     "euro_alpha_max_q8":            224,
     "euro_speed_threshold":          24,
-    "gesture_drag_distance":         80,
-    "gesture_long_press_frames":     45,
 }
 
 # 游戏预设（来自 game_preset.sh）
@@ -423,8 +417,6 @@ TABS = [
         ("slider", "euro_alpha_min_q8",       1,   255,   1),
         ("slider", "euro_alpha_max_q8",       1,   255,   1),
         ("slider", "euro_speed_threshold",    1,    64,   1),
-        ("slider", "gesture_drag_distance",   0,   256,   4),
-        ("slider", "gesture_long_press_frames", 1, 120,   1),
     ]),
 ]
 

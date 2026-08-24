@@ -95,10 +95,10 @@ static void hx_hungarian_assign(struct hx_algo *algo, const u8 *active,
 	int cols = det_cnt + active_cnt;
 	int i, j;
 
-	memset(algo->assign_u, 0, sizeof(algo->assign_u));
-	memset(algo->assign_v, 0, sizeof(algo->assign_v));
-	memset(algo->assign_p, 0, sizeof(algo->assign_p));
-	memset(algo->assign_way, 0, sizeof(algo->assign_way));
+	memset(algo->assign_u, 0, (active_cnt + 1) * sizeof(algo->assign_u[0]));
+	memset(algo->assign_v, 0, (cols + 1) * sizeof(algo->assign_v[0]));
+	memset(algo->assign_p, 0, (cols + 1) * sizeof(algo->assign_p[0]));
+	memset(algo->assign_way, 0, (cols + 1) * sizeof(algo->assign_way[0]));
 	for (i = 1; i <= active_cnt; i++) {
 		s64 minv[HX_ASSIGN_COLS + 1];
 		bool used[HX_ASSIGN_COLS + 1] = { false };
@@ -566,50 +566,12 @@ static void hx_suppress_rx_ghosts(struct hx_algo *algo,
 	algo->contact_count = dst;
 }
 
-static void hx_update_gesture(struct hx_algo *algo)
-{
-	struct hx_track *first = NULL;
-	int reported = 0;
-	int i;
-
-	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
-		if (algo->tracks[i].active && algo->tracks[i].reported) {
-			if (!first)
-				first = &algo->tracks[i];
-			reported++;
-		}
-	}
-	if (!reported) {
-		if (algo->gesture_state == HX_GESTURE_RELEASE)
-			algo->gesture_state = HX_GESTURE_IDLE;
-		else if (algo->gesture_state != HX_GESTURE_IDLE)
-			algo->gesture_state = HX_GESTURE_RELEASE;
-		algo->gesture_frames = 0;
-		return;
-	}
-	if (algo->gesture_state == HX_GESTURE_IDLE ||
-	    algo->gesture_state == HX_GESTURE_RELEASE) {
-		algo->gesture_state = HX_GESTURE_PRESS;
-		algo->gesture_frames = 1;
-		algo->gesture_start_x = first->x;
-		algo->gesture_start_y = first->y;
-		return;
-	}
-	if (algo->gesture_frames < U16_MAX)
-		algo->gesture_frames++;
-	if (abs(first->x - algo->gesture_start_x) >=
-			algo->gesture_drag_distance ||
-	    abs(first->y - algo->gesture_start_y) >=
-			algo->gesture_drag_distance)
-		algo->gesture_state = HX_GESTURE_DRAG;
-	else if (algo->gesture_frames >= algo->gesture_long_press_frames)
-		algo->gesture_state = HX_GESTURE_LONG_PRESS;
-}
-
+#ifdef HX_ALGO_HOST_TEST
 int hx_algo_process_frame(struct hx_algo *algo, const u16 *raw)
 {
 	return hx_algo_process_frame_state(algo, raw, HX_FINGER_UNKNOWN);
 }
+#endif
 
 int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
 				enum hx_finger_state finger_state)
@@ -618,6 +580,7 @@ int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
 	bool firmware_finger_rising = false;
 	bool has_active_track = false;
 	int det_cnt = 0;
+	int reported = 0;
 	int stable = 0;
 	int i;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
@@ -724,12 +687,13 @@ update_state:
 		if (algo->tracks[i].active && algo->tracks[i].debounce == 0 &&
 		    algo->touch_active)
 			algo->tracks[i].reported = true;
+		if (algo->tracks[i].active && algo->tracks[i].reported)
+			reported++;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 		if (algo->tracks[i].reported)
 			algo->diag_reported_tracks++;
 #endif
 	}
 
-	hx_update_gesture(algo);
-	return hx_count_stable_tracks(algo);
+	return reported;
 }

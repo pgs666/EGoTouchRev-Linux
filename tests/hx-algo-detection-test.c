@@ -107,6 +107,28 @@ static void test_adaptive_baseline_follows_panel_drift(void)
 	assert(algo.frame[10][10] > 1000);
 }
 
+static void test_disabled_iir_does_not_maintain_history(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	algo.cmf_enabled = false;
+	algo.iir_enabled = false;
+	algo.iir_initialized = true;
+	algo.iir_history[10][10] = 1234;
+	init_raw(raw, 0x7fee);
+	hx_preprocess_frame(&algo, raw);
+	assert(!algo.iir_initialized);
+	assert(algo.iir_history[10][10] == 1234);
+
+	algo.iir_enabled = true;
+	add_blob(raw, 10, 10, 1800);
+	hx_preprocess_frame(&algo, raw);
+	assert(algo.iir_initialized);
+	assert(algo.iir_history[10][10] == algo.frame[10][10]);
+}
+
 static void test_uniform_startup_offset_is_not_a_fullscreen_palm(void)
 {
 	struct hx_algo algo = {};
@@ -329,7 +351,6 @@ static void test_live_clear_preserves_baseline_and_configuration(void)
 	algo.palm_box_count = 1;
 	algo.tracks[3].active = true;
 	algo.tracks[3].reported = true;
-	algo.gesture_state = HX_GESTURE_DRAG;
 	hx_algo_clear_live_state(&algo);
 	assert(algo.peak_threshold == 777);
 	assert(algo.baseline_initialized);
@@ -337,7 +358,6 @@ static void test_live_clear_preserves_baseline_and_configuration(void)
 	assert(!algo.iir_initialized);
 	assert(algo.palm_box_count == 0);
 	assert(!algo.tracks[3].active);
-	assert(algo.gesture_state == HX_GESTURE_IDLE);
 	assert(algo.live_clear_count == 1);
 }
 
@@ -577,6 +597,7 @@ void run_detection_tests(void)
 	test_compact_strong_finger_is_not_a_palm();
 	test_flat_large_contact_is_a_palm();
 	test_adaptive_baseline_follows_panel_drift();
+	test_disabled_iir_does_not_maintain_history();
 	test_uniform_startup_offset_is_not_a_fullscreen_palm();
 	test_firmware_finger_state_drives_baseline_dispatch();
 	test_native_master_frame_status_parser();

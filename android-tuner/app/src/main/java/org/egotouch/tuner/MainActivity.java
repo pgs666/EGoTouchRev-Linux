@@ -151,9 +151,7 @@ public final class MainActivity extends AppCompatActivity {
         t("追踪","euro_enabled","速度自适应平滑","1-Euro 坐标平滑",1),
         s("追踪","euro_alpha_min_q8","Euro 速率下限 (Q8)","低速平滑系数",64,1,255,1),
         s("追踪","euro_alpha_max_q8","Euro 速率上限 (Q8)","高速平滑系数",224,1,255,1),
-        s("追踪","euro_speed_threshold","Euro 速度阈值","达到最大系数的速度",24,1,64,1),
-        s("追踪","gesture_drag_distance","拖拽手势距离","判定拖拽最小距离",80,0,256,4),
-        s("追踪","gesture_long_press_frames","长按手势帧数","判定长按持续帧数",45,1,120,1)
+        s("追踪","euro_speed_threshold","Euro 速度阈值","达到最大系数的速度",24,1,64,1)
     );
 
     @Override protected void onCreate(Bundle state) {

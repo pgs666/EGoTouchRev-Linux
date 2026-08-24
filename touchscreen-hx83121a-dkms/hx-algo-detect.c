@@ -168,7 +168,6 @@ static void hx_update_palm_box(struct hx_algo *algo,
 
 	if (!algo->palm_box_enabled)
 		return;
-	candidate.active = true;
 	candidate.min_r = max_t(int, 0, z->min_r - algo->palm_box_expand_rows);
 	candidate.max_r = min_t(int, HX_ROWS - 1,
 				z->max_r + algo->palm_box_expand_rows);
@@ -610,11 +609,6 @@ void hx_detect_peaks(struct hx_algo *algo)
 
 		for (i = 0; i < algo->peak_count; i++) {
 			struct hx_peak *pk = &algo->peaks[i];
-			bool on_edge = (algo->peaks[i].r == 0 ||
-					algo->peaks[i].r == HX_ROWS - 1 ||
-					algo->peaks[i].c == 0 ||
-					algo->peaks[i].c == HX_COLS - 1);
-
 			bool near_edge =
 				pk->r < algo->peak_fast_start_edge_cells ||
 				pk->r >= HX_ROWS - algo->peak_fast_start_edge_cells ||
@@ -635,7 +629,7 @@ void hx_detect_peaks(struct hx_algo *algo)
 			pk->fast_start_candidate = fast_start;
 			pk->continuation_only = false;
 			pk->continuation_track_slot = -1;
-			if (pk->zone_area < algo->peak_macro_min_area && !on_edge &&
+			if (pk->zone_area < algo->peak_macro_min_area && !pk->on_edge &&
 			    pk->zone_area >= algo->peak_continue_min_area &&
 			    (pk->z >= algo->peak_continue_min_signal ||
 			     weak_single_track)) {
@@ -657,7 +651,7 @@ void hx_detect_peaks(struct hx_algo *algo)
 				}
 				continuation = matches == 1;
 			}
-			if (pk->zone_area >= algo->peak_macro_min_area || on_edge ||
+			if (pk->zone_area >= algo->peak_macro_min_area || pk->on_edge ||
 			    fast_start || continuation) {
 				pk->continuation_only = continuation;
 				pk->continuation_track_slot = continuation ?

@@ -159,17 +159,8 @@ struct hx_macro_zone {
 };
 
 struct hx_palm_box {
-	bool active;
 	u8 min_r, max_r, min_c, max_c;
 	u16 missed;
-};
-
-enum hx_gesture_state {
-	HX_GESTURE_IDLE = 0,
-	HX_GESTURE_PRESS,
-	HX_GESTURE_DRAG,
-	HX_GESTURE_LONG_PRESS,
-	HX_GESTURE_RELEASE,
 };
 
 /**
@@ -273,10 +264,6 @@ struct hx_algo {
 	u8   touch_start_frames;
 	bool firmware_finger_present;
 	bool fast_edge_start_pending;
-	enum hx_gesture_state gesture_state;
-	u16 gesture_frames;
-	s32 gesture_start_x;
-	s32 gesture_start_y;
 
 	/* Hungarian scratch is kept off the kernel stack. */
 	s64 assign_cost[HIMAX_MAX_TOUCH][HX_ASSIGN_COLS];
@@ -391,8 +378,6 @@ struct hx_algo {
 	u8 euro_alpha_min_q8;
 	u8 euro_alpha_max_q8;
 	u16 euro_speed_threshold;
-	u16 gesture_drag_distance;
-	u16 gesture_long_press_frames;
 };
 
 enum hx_finger_state {
@@ -418,16 +403,19 @@ void hx_algo_begin_wake(struct hx_algo *algo);
 int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
 			       enum hx_finger_state finger_state);
 bool hx_algo_is_exception_frame(struct hx_algo *algo, const u16 *raw);
-/* Compatibility alias: runtime reset means preserving the learned baseline. */
-void hx_algo_reset_runtime(struct hx_algo *algo);
-int hx_algo_process_frame(struct hx_algo *algo, const u16 *raw);
 int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
 				enum hx_finger_state finger_state);
 
 /* Phase 1: preprocessing (baseline subtraction, CMF, IIR) */
-void hx_preprocess_frame(struct hx_algo *algo, const u16 *raw);
 void hx_preprocess_frame_state(struct hx_algo *algo, const u16 *raw,
 			       enum hx_finger_state finger_state);
+
+#ifdef HX_ALGO_HOST_TEST
+/* Convenience wrappers retained only for hardware-independent fixtures. */
+void hx_algo_reset_runtime(struct hx_algo *algo);
+int hx_algo_process_frame(struct hx_algo *algo, const u16 *raw);
+void hx_preprocess_frame(struct hx_algo *algo, const u16 *raw);
+#endif
 
 /* Phase 2A: macro-zone detection */
 void hx_detect_macro_zones(struct hx_algo *algo);

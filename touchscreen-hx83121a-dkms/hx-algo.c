@@ -125,36 +125,23 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	algo->euro_alpha_min_q8 = 64;
 	algo->euro_alpha_max_q8 = 224;
 	algo->euro_speed_threshold = 24;
-	algo->gesture_drag_distance = 80;
-	algo->gesture_long_press_frames = 45;
 }
 
 static void hx_algo_clear_transient_state(struct hx_algo *algo)
 {
-	memset(algo->frame, 0, sizeof(algo->frame));
-	/* GridIIR is not in the v1.1.2 default pipeline.  If enabled locally,
-	 * discard its pre-suspend history so it cannot manufacture a wake peak.
+	/* Scratch/result arrays are guarded by their counts or cleared by the
+	 * pipeline stage that consumes them.  Reset only persistent state here;
+	 * bulk-clearing every backing array added latency without changing what
+	 * the next frame can observe.
 	 */
-	memset(algo->iir_history, 0, sizeof(algo->iir_history));
-	memset(algo->visited, 0, sizeof(algo->visited));
-	memset(algo->zone_map, 0, sizeof(algo->zone_map));
-	memset(algo->bfs_queue, 0, sizeof(algo->bfs_queue));
-	memset(algo->zone_arena, 0, sizeof(algo->zone_arena));
-	memset(algo->zones, 0, sizeof(algo->zones));
-	memset(algo->peaks, 0, sizeof(algo->peaks));
-	memset(algo->prev_peaks, 0, sizeof(algo->prev_peaks));
+	memset(algo->frame, 0, sizeof(algo->frame));
 	memset(algo->peak_competition, 0, sizeof(algo->peak_competition));
-	memset(algo->contacts, 0, sizeof(algo->contacts));
 	memset(algo->baseline_release_hold, 0,
 	       sizeof(algo->baseline_release_hold));
-	memset(algo->baseline_hist, 0, sizeof(algo->baseline_hist));
-	memset(algo->palm_boxes, 0, sizeof(algo->palm_boxes));
 	memset(algo->tracks, 0, sizeof(algo->tracks));
-	memset(algo->assign_cost, 0, sizeof(algo->assign_cost));
-	memset(algo->assign_u, 0, sizeof(algo->assign_u));
-	memset(algo->assign_v, 0, sizeof(algo->assign_v));
-	memset(algo->assign_p, 0, sizeof(algo->assign_p));
-	memset(algo->assign_way, 0, sizeof(algo->assign_way));
+	/* An invalid history makes the first frame after a runtime IIR enable
+	 * seed the complete buffer before it is read.
+	 */
 	algo->iir_initialized = false;
 	/* Preserve the converged per-cell baseline across display/lid/idle and
 	 * hardware reinitialisation.  Force the next valid frame to re-evaluate
@@ -186,10 +173,6 @@ static void hx_algo_clear_transient_state(struct hx_algo *algo)
 	algo->touch_start_frames = 0;
 	algo->firmware_finger_present = false;
 	algo->fast_edge_start_pending = false;
-	algo->gesture_state = HX_GESTURE_IDLE;
-	algo->gesture_frames = 0;
-	algo->gesture_start_x = 0;
-	algo->gesture_start_y = 0;
 }
 
 void hx_algo_clear_live_state(struct hx_algo *algo)
@@ -460,10 +443,12 @@ exception:
 	return true;
 }
 
+#ifdef HX_ALGO_HOST_TEST
 void hx_algo_reset_runtime(struct hx_algo *algo)
 {
 	hx_algo_clear_live_state(algo);
 }
+#endif
 
 /* ======================================================================== */
 /* Phase 1A — baseline subtraction                                          */

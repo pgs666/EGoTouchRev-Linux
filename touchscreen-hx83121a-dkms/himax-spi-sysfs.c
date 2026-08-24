@@ -255,8 +255,6 @@ HX_ALGO_ATTR_BOOL_RW(euro_enabled);
 HX_ALGO_ATTR_U8_RW(euro_alpha_min_q8, 1, 255);
 HX_ALGO_ATTR_U8_RW(euro_alpha_max_q8, 1, 255);
 HX_ALGO_ATTR_U16_RW(euro_speed_threshold, 1, 4096);
-HX_ALGO_ATTR_U16_RW(gesture_drag_distance, 0, 4096);
-HX_ALGO_ATTR_U16_RW(gesture_long_press_frames, 1, 600);
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 static ssize_t diagnostics_show(struct device *dev,
@@ -637,8 +635,6 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_euro_alpha_min_q8.attr,
 	&dev_attr_euro_alpha_max_q8.attr,
 	&dev_attr_euro_speed_threshold.attr,
-	&dev_attr_gesture_drag_distance.attr,
-	&dev_attr_gesture_long_press_frames.attr,
 	NULL,
 };
 
