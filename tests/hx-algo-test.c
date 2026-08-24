@@ -390,6 +390,162 @@ static void test_full_reset_clears_baseline(void)
 	assert(algo.live_clear_count == 0);
 }
 
+static void test_wake_quality_commits_stable_no_finger_baseline(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+	int result = HX_WAKE_QUALITY_PENDING;
+
+	hx_algo_init_defaults(&algo);
+	init_raw(raw, 0x8050);
+	hx_algo_begin_wake(&algo);
+	for (int frame = 0; frame < algo.wake_stable_frames; frame++) {
+		raw[10] = 0x8050 + frame;
+		result = hx_algo_qualify_wake_frame(&algo, raw,
+						HX_FINGER_ABSENT);
+	}
+	assert(result == HX_WAKE_QUALITY_READY);
+	assert(algo.baseline_initialized);
+	assert(algo.safe_baseline_valid);
+	assert(!algo.wake_qualifying);
+	assert(algo.baseline_q8[100] == (s32)0x8050 << 8);
+	assert(algo.safe_baseline_q8[100] == algo.baseline_q8[100]);
+	assert(algo.wake_baseline_commit_count == 1);
+}
+
+static void test_wake_quality_rejects_unstable_candidate(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+	s32 old_safe;
+
+	hx_algo_init_defaults(&algo);
+	algo.safe_baseline_valid = true;
+	for (int i = 0; i < HX_PIXELS; i++)
+		algo.safe_baseline_q8[i] = (s32)0x7fee << 8;
+	old_safe = algo.safe_baseline_q8[100];
+	init_raw(raw, 0x7fee);
+	hx_algo_begin_wake(&algo);
+	assert(hx_algo_qualify_wake_frame(&algo, raw,
+			HX_FINGER_ABSENT) == HX_WAKE_QUALITY_PENDING);
+	for (int i = 1; i < 80; i++)
+		raw[i] += 400;
+	assert(hx_algo_qualify_wake_frame(&algo, raw,
+			HX_FINGER_ABSENT) == HX_WAKE_QUALITY_REJECTED);
+	assert(algo.safe_baseline_q8[100] == old_safe);
+	assert(algo.wake_candidate_reject_count == 1);
+}
+
+static void test_finger_at_wake_uses_last_safe_baseline(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+	int result = HX_WAKE_QUALITY_PENDING;
+
+	hx_algo_init_defaults(&algo);
+	algo.safe_baseline_valid = true;
+	for (int i = 0; i < HX_PIXELS; i++)
+		algo.safe_baseline_q8[i] = (s32)(0x7f00 + (i % 3)) << 8;
+	init_raw(raw, 0x7fee);
+	raw[15 * HX_COLS + 20] += 1800;
+	hx_algo_begin_wake(&algo);
+	for (int frame = 0; frame < algo.wake_finger_safe_frames; frame++)
+		result = hx_algo_qualify_wake_frame(&algo, raw,
+						HX_FINGER_PRESENT);
+	assert(result == HX_WAKE_QUALITY_USING_SAFE);
+	assert(algo.baseline_q8[101] == algo.safe_baseline_q8[101]);
+	assert(algo.wake_safe_fallback_count == 1);
+}
+
+static void test_invalid_wake_grid_is_never_committed(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS] = { 0 };
+
+	hx_algo_init_defaults(&algo);
+	hx_algo_begin_wake(&algo);
+	assert(hx_algo_qualify_wake_frame(&algo, raw,
+			HX_FINGER_ABSENT) == HX_WAKE_QUALITY_REJECTED);
+	assert(!algo.baseline_initialized);
+	assert(!algo.safe_baseline_valid);
+}
+
+static void test_finger_at_first_boot_uses_neutral_baseline(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+	int result = HX_WAKE_QUALITY_PENDING;
+
+	hx_algo_init_defaults(&algo);
+	init_raw(raw, 0x7fee);
+	raw[15 * HX_COLS + 20] += 1800;
+	hx_algo_begin_wake(&algo);
+	for (int frame = 0; frame < algo.wake_finger_safe_frames; frame++)
+		result = hx_algo_qualify_wake_frame(&algo, raw,
+						HX_FINGER_PRESENT);
+	assert(result == HX_WAKE_QUALITY_PROTECTED);
+	assert(algo.baseline_initialized);
+	assert(!algo.safe_baseline_valid);
+	assert(algo.baseline_q8[15 * HX_COLS + 20] ==
+	       (s32)algo.baseline_initial << 8);
+}
+
+static void test_divergent_safe_baseline_needs_second_window(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+	int result = HX_WAKE_QUALITY_PENDING;
+
+	hx_algo_init_defaults(&algo);
+	algo.safe_baseline_valid = true;
+	for (int i = 0; i < HX_PIXELS; i++)
+		algo.safe_baseline_q8[i] = (s32)0x7fee << 8;
+	init_raw(raw, 0x7fee);
+	for (int i = 0; i < 40; i++)
+		raw[(i * 47 + 13) % HX_PIXELS] += 500;
+	hx_algo_begin_wake(&algo);
+	for (int frame = 0; frame < algo.wake_stable_frames; frame++) {
+		raw[10] = 0x7fee + frame;
+		result = hx_algo_qualify_wake_frame(&algo, raw,
+						HX_FINGER_ABSENT);
+	}
+	assert(result == HX_WAKE_QUALITY_PENDING);
+	assert(algo.wake_needs_double_confirm);
+	for (int frame = algo.wake_stable_frames;
+	     frame < algo.wake_stable_frames * 2; frame++) {
+		raw[10] = 0x7fee + frame;
+		result = hx_algo_qualify_wake_frame(&algo, raw,
+						HX_FINGER_ABSENT);
+	}
+	assert(result == HX_WAKE_QUALITY_READY);
+	assert(algo.wake_safe_divergence_count == 1);
+}
+
+static void test_line_noise_is_held_but_compact_touch_is_not(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	algo.baseline_initialized = true;
+	for (int i = 0; i < HX_PIXELS; i++)
+		algo.baseline_q8[i] = (s32)0x7fee << 8;
+	init_raw(raw, 0x7fee);
+	for (int r = 14; r <= 16; r++)
+		for (int c = 19; c <= 21; c++)
+			raw[r * HX_COLS + c] += 2200;
+	assert(!hx_algo_is_exception_frame(&algo, raw));
+	init_raw(raw, 0x7fee);
+	for (int c = 0; c < 30; c++)
+		raw[12 * HX_COLS + c] += 2200;
+	assert(hx_algo_is_exception_frame(&algo, raw));
+	init_raw(raw, 0x7fee);
+	for (int r = 0; r < 30; r++)
+		raw[r * HX_COLS + 12] += 2200;
+	assert(hx_algo_is_exception_frame(&algo, raw));
+	assert(algo.noise_frame_hold_count == 2);
+}
+
 static void test_reported_track_survives_silent_gap(void)
 {
 	struct hx_algo algo = {};
@@ -1263,6 +1419,13 @@ int main(void)
 	test_saddle_splits_two_peaks();
 	test_live_clear_preserves_baseline_and_configuration();
 	test_full_reset_clears_baseline();
+	test_wake_quality_commits_stable_no_finger_baseline();
+	test_wake_quality_rejects_unstable_candidate();
+	test_finger_at_wake_uses_last_safe_baseline();
+	test_invalid_wake_grid_is_never_committed();
+	test_finger_at_first_boot_uses_neutral_baseline();
+	test_divergent_safe_baseline_needs_second_window();
+	test_line_noise_is_held_but_compact_touch_is_not();
 	test_reported_track_survives_silent_gap();
 	test_hungarian_keeps_two_ids();
 	test_dynamic_debounce_uses_signal_and_edge();

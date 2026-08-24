@@ -63,6 +63,15 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	algo->baseline_recovery_max_step = 256;
 	algo->baseline_recovery_max_frames = 30;
 	algo->baseline_noise_tracking = true;
+	algo->wake_stable_frames = 6;
+	algo->wake_finger_safe_frames = 3;
+	algo->wake_raw_jump_threshold = 160;
+	algo->wake_max_unstable_nodes = 24;
+	algo->wake_max_unstable_line_nodes = 12;
+	algo->safe_commit_no_finger_frames = 30;
+	algo->runtime_noise_threshold = 1800;
+	algo->runtime_noise_line_nodes = 20;
+	algo->runtime_noise_total_nodes = 180;
 	algo->cmf_enabled        = true;
 	algo->cmf_exclusion      = 2000;
 	algo->cmf_max_correction = 2000;
@@ -214,7 +223,17 @@ void hx_algo_full_reset(struct hx_algo *algo)
 {
 	hx_algo_clear_transient_state(algo);
 	memset(algo->baseline_q8, 0, sizeof(algo->baseline_q8));
+	memset(algo->safe_baseline_q8, 0, sizeof(algo->safe_baseline_q8));
+	memset(algo->wake_candidate_q8, 0,
+	       sizeof(algo->wake_candidate_q8));
 	algo->baseline_initialized = false;
+	algo->safe_baseline_valid = false;
+	algo->wake_qualifying = false;
+	algo->wake_candidate_valid = false;
+	algo->wake_needs_double_confirm = false;
+	algo->wake_candidate_frames = 0;
+	algo->wake_finger_frames = 0;
+	algo->safe_no_finger_frames = 0;
 	algo->baseline_prev_had_signal = false;
 	algo->baseline_had_freeze = false;
 	algo->baseline_recovery_frames = 0;
@@ -222,6 +241,238 @@ void hx_algo_full_reset(struct hx_algo *algo)
 	algo->baseline_generation++;
 	algo->full_reset_count++;
 #endif
+}
+
+static void hx_copy_raw_to_baseline(s32 *dst, const u16 *raw)
+{
+	int i;
+
+	for (i = 0; i < HX_PIXELS; i++)
+		dst[i] = (s32)le16_to_cpup(raw + i) <<
+			 HX_BASELINE_FRACTION_BITS;
+}
+
+void hx_algo_begin_wake(struct hx_algo *algo)
+{
+	hx_algo_clear_transient_state(algo);
+	algo->wake_qualifying = true;
+	algo->wake_candidate_valid = false;
+	algo->wake_needs_double_confirm = false;
+	algo->wake_candidate_frames = 0;
+	algo->wake_finger_frames = 0;
+	algo->safe_no_finger_frames = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->live_clear_count++;
+#endif
+}
+
+int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
+			       enum hx_finger_state finger_state)
+{
+	u8 row_unstable[HX_ROWS] = { 0 };
+	u8 col_unstable[HX_COLS] = { 0 };
+	u16 out_of_range = 0;
+	u16 unstable = 0;
+	u8 required_frames;
+	int i;
+
+	if (!algo->wake_qualifying)
+		return HX_WAKE_QUALITY_READY;
+	for (i = 1; i < HX_PIXELS; i++) {
+		u16 sample = le16_to_cpup(raw + i);
+
+		if (sample < 0x1000 || sample > 0xf000)
+			out_of_range++;
+	}
+	if (out_of_range > algo->wake_max_unstable_nodes) {
+		algo->wake_candidate_valid = false;
+		algo->wake_candidate_frames = 0;
+		algo->wake_needs_double_confirm = false;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->wake_candidate_reject_count++;
+#endif
+		return HX_WAKE_QUALITY_REJECTED;
+	}
+
+	/* A finger already present at screen-on must never be learned into a new
+	 * baseline.  Use the last independently committed no-finger snapshot. */
+	if (finger_state == HX_FINGER_PRESENT) {
+		algo->wake_candidate_valid = false;
+		algo->wake_candidate_frames = 0;
+		algo->wake_needs_double_confirm = false;
+		if (algo->wake_finger_frames < U8_MAX)
+			algo->wake_finger_frames++;
+		if (algo->wake_finger_frames >= algo->wake_finger_safe_frames) {
+			if (algo->safe_baseline_valid) {
+				memcpy(algo->baseline_q8, algo->safe_baseline_q8,
+				       sizeof(algo->baseline_q8));
+			} else if (!algo->baseline_initialized) {
+				for (i = 0; i < HX_PIXELS; i++)
+					algo->baseline_q8[i] =
+						(s32)algo->baseline_initial <<
+						HX_BASELINE_FRACTION_BITS;
+			}
+			algo->baseline_initialized = true;
+			algo->wake_qualifying = false;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+			algo->wake_safe_fallback_count++;
+			algo->wake_qualification_count++;
+#endif
+			return algo->safe_baseline_valid ?
+				HX_WAKE_QUALITY_USING_SAFE :
+				HX_WAKE_QUALITY_PROTECTED;
+		}
+		return HX_WAKE_QUALITY_PENDING;
+	}
+	algo->wake_finger_frames = 0;
+
+	if (!algo->wake_candidate_valid) {
+		hx_copy_raw_to_baseline(algo->wake_candidate_q8, raw);
+		algo->wake_candidate_valid = true;
+		algo->wake_candidate_frames = 1;
+		return HX_WAKE_QUALITY_PENDING;
+	}
+
+	/* A candidate is only committed after several complete raw grids agree.
+	 * Count spatially-local changes; a panel-wide DC shift is naturally
+	 * represented by the first candidate and is not confused with activity. */
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample_q8 = (s32)le16_to_cpup(raw + i) <<
+				HX_BASELINE_FRACTION_BITS;
+		s32 delta = (sample_q8 - algo->wake_candidate_q8[i]) >>
+			    HX_BASELINE_FRACTION_BITS;
+
+		if (abs(delta) > algo->wake_raw_jump_threshold) {
+			row_unstable[i / HX_COLS]++;
+			col_unstable[i % HX_COLS]++;
+			unstable++;
+		}
+	}
+	for (i = 0; i < HX_ROWS; i++)
+		if (row_unstable[i] >= algo->wake_max_unstable_line_nodes)
+			unstable = algo->wake_max_unstable_nodes + 1;
+	for (i = 0; i < HX_COLS; i++)
+		if (col_unstable[i] >= algo->wake_max_unstable_line_nodes)
+			unstable = algo->wake_max_unstable_nodes + 1;
+	if (unstable > algo->wake_max_unstable_nodes) {
+		/* Start the next qualification window from the newest complete frame.
+		 * Do not poison either the working or last-safe baseline. */
+		hx_copy_raw_to_baseline(algo->wake_candidate_q8, raw);
+		algo->wake_candidate_frames = 1;
+		algo->wake_needs_double_confirm = false;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->wake_candidate_reject_count++;
+#endif
+		return HX_WAKE_QUALITY_REJECTED;
+	}
+
+	if (algo->wake_candidate_frames < U8_MAX)
+		algo->wake_candidate_frames++;
+	if (algo->wake_candidate_frames < algo->wake_stable_frames)
+		return HX_WAKE_QUALITY_PENDING;
+
+	/* A candidate that differs spatially from last-safe is not rejected just
+	 * because the display environment genuinely changed.  It must, however,
+	 * survive a second complete stability window before replacing last-safe. */
+	if (algo->safe_baseline_valid && !algo->wake_needs_double_confirm) {
+		s64 sum = 0;
+		s32 common;
+		u16 divergent = 0;
+
+		for (i = 1; i < HX_PIXELS; i++)
+			sum += (algo->wake_candidate_q8[i] -
+				algo->safe_baseline_q8[i]) >>
+				HX_BASELINE_FRACTION_BITS;
+		common = (s32)(sum / (HX_PIXELS - 1));
+		for (i = 1; i < HX_PIXELS; i++) {
+			s32 delta = ((algo->wake_candidate_q8[i] -
+				algo->safe_baseline_q8[i]) >>
+				HX_BASELINE_FRACTION_BITS) - common;
+
+			if (abs(delta) > algo->wake_raw_jump_threshold * 2)
+				divergent++;
+		}
+		if (divergent > algo->wake_max_unstable_nodes) {
+			algo->wake_needs_double_confirm = true;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+			algo->wake_safe_divergence_count++;
+#endif
+		}
+	}
+	required_frames = algo->wake_stable_frames;
+	if (algo->wake_needs_double_confirm)
+		required_frames = min_t(u8, algo->wake_stable_frames * 2,
+					 U8_MAX);
+	if (algo->wake_candidate_frames < required_frames)
+		return HX_WAKE_QUALITY_PENDING;
+
+	memcpy(algo->baseline_q8, algo->wake_candidate_q8,
+	       sizeof(algo->baseline_q8));
+	memcpy(algo->safe_baseline_q8, algo->wake_candidate_q8,
+	       sizeof(algo->safe_baseline_q8));
+	algo->baseline_initialized = true;
+	algo->safe_baseline_valid = true;
+	algo->wake_qualifying = false;
+	algo->wake_candidate_valid = false;
+	algo->wake_needs_double_confirm = false;
+	algo->baseline_prev_had_signal = false;
+	algo->baseline_had_freeze = false;
+	algo->baseline_recovery_frames = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->baseline_generation++;
+	algo->wake_baseline_commit_count++;
+	algo->wake_qualification_count++;
+#endif
+	return HX_WAKE_QUALITY_READY;
+}
+
+bool hx_algo_is_exception_frame(struct hx_algo *algo, const u16 *raw)
+{
+	u8 col_bad[HX_COLS] = { 0 };
+	s64 sum = 0;
+	s32 common;
+	u16 total = 0;
+	int r, c;
+
+	if (!algo->baseline_initialized || algo->wake_qualifying)
+		return false;
+	for (r = 1; r < HX_PIXELS; r++)
+		sum += (s32)le16_to_cpup(raw + r) -
+		       (algo->baseline_q8[r] >> HX_BASELINE_FRACTION_BITS);
+	common = (s32)(sum / (HX_PIXELS - 1));
+
+	for (r = 0; r < HX_ROWS; r++) {
+		u8 row_bad = 0;
+
+		for (c = 0; c < HX_COLS; c++) {
+			int idx = r * HX_COLS + c;
+			s32 local;
+
+			if (!idx)
+				continue;
+			local = (s32)le16_to_cpup(raw + idx) -
+				(algo->baseline_q8[idx] >>
+				 HX_BASELINE_FRACTION_BITS) - common;
+			if (abs(local) >= algo->runtime_noise_threshold) {
+				row_bad++;
+				col_bad[c]++;
+				total++;
+			}
+		}
+		if (row_bad >= algo->runtime_noise_line_nodes)
+			goto exception;
+	}
+	for (c = 0; c < HX_COLS; c++)
+		if (col_bad[c] >= algo->runtime_noise_line_nodes)
+			goto exception;
+	if (total < algo->runtime_noise_total_nodes)
+		return false;
+
+exception:
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->noise_frame_hold_count++;
+#endif
+	return true;
 }
 
 void hx_algo_reset_runtime(struct hx_algo *algo)
@@ -260,9 +511,17 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	int r, c;
 
 	if (!algo->baseline_initialized) {
-		for (r = 0; r < HX_PIXELS; r++)
-			algo->baseline_q8[r] = (s32)algo->baseline_initial <<
-						HX_BASELINE_FRACTION_BITS;
+		/* Match Windows BLIIR_Reset: use a real no-finger raw snapshot.  If
+		 * the first usable frame already carries a finger, retain the neutral
+		 * fallback so the contact cannot disappear into the baseline. */
+		if (finger_state != HX_FINGER_ABSENT) {
+			for (r = 0; r < HX_PIXELS; r++)
+				algo->baseline_q8[r] =
+					(s32)algo->baseline_initial <<
+					HX_BASELINE_FRACTION_BITS;
+		} else {
+			hx_copy_raw_to_baseline(algo->baseline_q8, raw);
+		}
 		memset(algo->baseline_release_hold, 0,
 		       sizeof(algo->baseline_release_hold));
 		algo->baseline_initialized = true;
@@ -317,12 +576,11 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	algo->diag_common_diff = common_diff;
 #endif
-	if (finger_state == HX_FINGER_PRESENT) {
+	if (finger_state == HX_FINGER_PRESENT)
 		has_signal = true;
-	} else if (finger_state == HX_FINGER_UNKNOWN) {
-		/* Host tests and callers without a validated suffix retain the
-		 * conservative signal/track fallback.
-		 */
+	/* Even a validated firmware "no finger" bit may be wrong during display
+	 * interference.  Never let a contradictory raw peak be learned quickly. */
+	if (!has_signal) {
 		for (r = 0; r < HX_ROWS && !has_signal; r++) {
 			for (c = 0; c < HX_COLS; c++) {
 				int idx = r * HX_COLS + c;
@@ -439,6 +697,56 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	algo->diag_has_signal = has_signal;
 #endif
 	algo->baseline_had_freeze = found_freeze;
+	if (finger_state == HX_FINGER_ABSENT && !has_signal && !found_freeze) {
+		u8 row_unstable[HX_ROWS] = { 0 };
+		u8 col_unstable[HX_COLS] = { 0 };
+		u16 unstable = 0;
+
+		if (!algo->safe_no_finger_frames) {
+			hx_copy_raw_to_baseline(algo->wake_candidate_q8, raw);
+			algo->safe_no_finger_frames = 1;
+		} else {
+			for (r = 1; r < HX_PIXELS; r++) {
+				s32 candidate = algo->wake_candidate_q8[r] >>
+						HX_BASELINE_FRACTION_BITS;
+				s32 sample = (s32)le16_to_cpup(raw + r);
+
+				if (abs(sample - candidate) >
+				    algo->wake_raw_jump_threshold) {
+					row_unstable[r / HX_COLS]++;
+					col_unstable[r % HX_COLS]++;
+					unstable++;
+				}
+			}
+			for (r = 0; r < HX_ROWS; r++)
+				if (row_unstable[r] >=
+				    algo->wake_max_unstable_line_nodes)
+					unstable = algo->wake_max_unstable_nodes + 1;
+			for (r = 0; r < HX_COLS; r++)
+				if (col_unstable[r] >=
+				    algo->wake_max_unstable_line_nodes)
+					unstable = algo->wake_max_unstable_nodes + 1;
+			if (unstable > algo->wake_max_unstable_nodes) {
+				hx_copy_raw_to_baseline(algo->wake_candidate_q8,
+							raw);
+				algo->safe_no_finger_frames = 1;
+			} else if (algo->safe_no_finger_frames < U8_MAX) {
+				algo->safe_no_finger_frames++;
+			}
+		}
+		if (algo->safe_no_finger_frames >=
+		    algo->safe_commit_no_finger_frames) {
+			memcpy(algo->safe_baseline_q8, algo->wake_candidate_q8,
+			       sizeof(algo->safe_baseline_q8));
+			algo->safe_baseline_valid = true;
+			algo->safe_no_finger_frames = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+			algo->baseline_safe_commit_count++;
+#endif
+		}
+	} else {
+		algo->safe_no_finger_frames = 0;
+	}
 
 	/* pixel [0][0] is always invalid on this panel layout */
 	algo->frame[0][0] = 0;

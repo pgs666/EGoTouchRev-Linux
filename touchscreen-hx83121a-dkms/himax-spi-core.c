@@ -28,7 +28,12 @@ MODULE_PARM_DESC(disable_pressure, "Disable ABS_MT_TOUCH_MAJOR and ABS_MT_PRESSU
 static bool restore_afe_runtime = true;
 module_param(restore_afe_runtime, bool, 0644);
 MODULE_PARM_DESC(restore_afe_runtime,
-		 "Replay calibration and 120 Hz scan-rate commands after hardware initialization");
+		 "Replay the 120 Hz scan-rate command after hardware initialization");
+
+static bool full_resume_on_panel_enable = true;
+module_param(full_resume_on_panel_enable, bool, 0644);
+MODULE_PARM_DESC(full_resume_on_panel_enable,
+		 "Run the complete reset/reload/wake qualification path after every panel enable");
 #include <linux/spi/spi.h>
 #include <linux/sysfs.h>
 #include <linux/math.h>
@@ -129,17 +134,18 @@ HIMAX_MAX_TX + HIMAX_MAX_RX) * 2)
 /* Let the panel and display pipeline settle before TDDI touch recovery. */
 #define HIMAX_PANEL_ENABLE_SETTLE_MS			300
 #define HIMAX_MAX_CONSECUTIVE_FRAME_ERRORS		3
-#define HIMAX_RESUME_STABLE_FRAMES			3
-#define HIMAX_RESUME_STABLE_ATTEMPTS			12
+#define HIMAX_RESUME_QUALITY_ATTEMPTS			30
+#define HIMAX_MAX_CONSECUTIVE_NOISE_FRAMES		12
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 #define HIMAX_TRACE_CAPACITY			512U
 #define HIMAX_TRACE_MAGIC			0x52545848U /* "HXTR" */
-#define HIMAX_TRACE_VERSION			2U
+#define HIMAX_TRACE_VERSION			3U
 
 #define HIMAX_TRACE_F_READ_OK			BIT(0)
 #define HIMAX_TRACE_F_MASTER_VALID		BIT(1)
 #define HIMAX_TRACE_F_RETRY			BIT(2)
 #define HIMAX_TRACE_F_HAS_FINGER		BIT(3)
+#define HIMAX_TRACE_F_NOISE_HOLD		BIT(4)
 
 struct himax_trace_header {
 	__le32 magic;
@@ -250,6 +256,8 @@ struct himax_ts_data {
 	struct delayed_work panel_reinit_work;
 	struct hx_algo *algo;
 	u8 consecutive_frame_errors;
+	u8 consecutive_noise_frames;
+	u8 afe_command_slot;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	struct himax_trace_record *trace_ring;
 	u8 *trace_snapshot;
@@ -545,47 +553,26 @@ static int himax_afe_send_command(struct himax_ts_data *ts, u8 *slot,
 	return 0;
 }
 
-static int himax_restore_afe_runtime(struct himax_ts_data *ts,
-				     bool start_calibration)
+static int himax_restore_afe_runtime(struct himax_ts_data *ts)
 {
-	u8 slot = 0;
-	int first_error = 0;
 	int ret;
 
 	if (!restore_afe_runtime)
 		return 0;
 
-	if (start_calibration) {
-		ret = himax_afe_send_command(ts, &slot,
-					     HIMAX_HX83121A_AFE_CMD_START_CALIBRATION,
-					     0);
-		if (ret) {
-#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
-			ts->afe_calibration_failures++;
-#endif
-			dev_warn(ts->dev, "failed to start AFE calibration: %d\n", ret);
-			first_error = ret;
-		} else {
-#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
-			ts->afe_calibration_count++;
-#endif
-			dev_info(ts->dev,
-				 "AFE calibration command transport completed\n");
-		}
-	}
-
-	ret = himax_afe_send_command(ts, &slot,
+	/* StartCalibration is intentionally absent here.  The command transport
+	 * has no calibration-complete acknowledgement in the recovered screen-on
+	 * path; issuing it and immediately consuming raw frames races the AFE. */
+	ret = himax_afe_send_command(ts, &ts->afe_command_slot,
 				     HIMAX_HX83121A_AFE_CMD_FORCE_SCAN_RATE,
 				     HIMAX_HX83121A_AFE_SCAN_RATE_120HZ);
 	if (ret) {
 		dev_warn(ts->dev, "failed to force 120 Hz scan rate: %d\n", ret);
-		if (!first_error)
-			first_error = ret;
 	} else {
 		dev_info(ts->dev, "120 Hz scan-rate command transport completed\n");
 	}
 
-	return first_error;
+	return ret;
 }
 
 /*
@@ -979,6 +966,7 @@ static int himax_warm_resume(struct himax_ts_data *ts)
 	int ret;
 
 	himax_release_all_touches(ts);
+	hx_algo_begin_wake(ts->algo);
 	ret = himax_verify_running_ic(ts);
 	if (ret)
 		return ret;
@@ -986,12 +974,7 @@ static int himax_warm_resume(struct himax_ts_data *ts)
 	if (ret)
 		return ret;
 
-	/* The retained controller state is valid at the protocol level, but the
-	 * display has just restarted and may now impose a different VCOM/scan-phase
-	 * environment on the touch AFE.  Windows runs StartCalibration after every
-	 * Chip::Init(); do the same here after the panel settle delay while keeping
-	 * the already converged host-side per-cell baseline. */
-	ret = himax_restore_afe_runtime(ts, true);
+	ret = himax_restore_afe_runtime(ts);
 	if (ret)
 		dev_warn(ts->dev,
 			 "warm-resume AFE mode replay incomplete: %d\n", ret);
@@ -1022,6 +1005,7 @@ static int himax_hw_reinit(struct himax_ts_data *ts, bool check_crc)
 	ts->controller_initialized = false;
 	ts->retained_suspend = false;
 	himax_release_all_touches(ts);
+	hx_algo_begin_wake(ts->algo);
 
 	ret = hx83121a_chip_detect(ts);
 	if (ret) {
@@ -1054,7 +1038,7 @@ static int himax_hw_reinit(struct himax_ts_data *ts, bool check_crc)
 		 * They are best-effort because older firmware may not expose the
 		 * command queue even though touch reporting itself is usable.
 		 */
-		afe_ret = himax_restore_afe_runtime(ts, true);
+		afe_ret = himax_restore_afe_runtime(ts);
 		if (afe_ret)
 			dev_warn(ts->dev,
 				 "AFE runtime restore incomplete; continuing with firmware defaults\n");
@@ -1148,11 +1132,11 @@ static void himax_panel_reinit_work(struct work_struct *work)
 		return;
 	}
 
-	/* dagu's active configuration deliberately omits HX_RESUME_HW_RESET:
-	 * preserve the controller across display sleep, replay firmware-owned
-	 * runtime state, and hard-reset only when the retained state fails
-	 * validation.  Cold boot always takes the complete init path. */
-	if (ts->retained_suspend && ts->controller_initialized) {
+	/* Gaokun Windows performs the complete reset/reload path on screen-on.
+	 * Keep retained resume as an explicit A/B escape hatch, but default to the
+	 * deterministic full path while the electrical wake issue is evaluated. */
+	if (!full_resume_on_panel_enable && ts->retained_suspend &&
+	    ts->controller_initialized) {
 		ret = himax_warm_resume(ts);
 		if (ret) {
 			dev_warn(ts->dev,
@@ -1168,7 +1152,9 @@ static void himax_panel_reinit_work(struct work_struct *work)
 	} else {
 		ret = himax_hw_reinit_retry(ts, false,
 				HIMAX_PANEL_REINIT_RETRIES,
-				HIMAX_PANEL_REINIT_DELAY_MS, "panel-cold");
+				HIMAX_PANEL_REINIT_DELAY_MS,
+				full_resume_on_panel_enable ? "panel-full" :
+				"panel-cold");
 	}
 	if (ret)
 		himax_power_down(ts);
@@ -1406,6 +1392,15 @@ HX_ALGO_ATTR_S16_RW(baseline_no_finger_max_step, 1, 2048);
 HX_ALGO_ATTR_S16_RW(baseline_recovery_max_step, 1, 2048);
 HX_ALGO_ATTR_U8_RW(baseline_recovery_max_frames, 1, 120);
 HX_ALGO_ATTR_BOOL_RW(baseline_noise_tracking);
+HX_ALGO_ATTR_U8_RW(wake_stable_frames, 2, 30);
+HX_ALGO_ATTR_U8_RW(wake_finger_safe_frames, 1, 15);
+HX_ALGO_ATTR_S16_RW(wake_raw_jump_threshold, 1, 4095);
+HX_ALGO_ATTR_U16_RW(wake_max_unstable_nodes, 0, HX_PIXELS);
+HX_ALGO_ATTR_U8_RW(wake_max_unstable_line_nodes, 1, HX_ROWS);
+HX_ALGO_ATTR_U8_RW(safe_commit_no_finger_frames, 1, 240);
+HX_ALGO_ATTR_S16_RW(runtime_noise_threshold, 1, 8192);
+HX_ALGO_ATTR_U8_RW(runtime_noise_line_nodes, 1, HX_COLS);
+HX_ALGO_ATTR_U16_RW(runtime_noise_total_nodes, 1, HX_PIXELS);
 HX_ALGO_ATTR_BOOL_RW(cmf_enabled);
 HX_ALGO_ATTR_S16_RW(cmf_exclusion, 0, 32767);
 HX_ALGO_ATTR_S16_RW(cmf_max_correction, 0, 32767);
@@ -1500,6 +1495,11 @@ static ssize_t diagnostics_show(struct device *dev,
 		"cold_inits=%u warm_resumes=%u warm_fallbacks=%u "
 		"resume_stability_failures=%u afe_calibrations=%u "
 		"afe_calibration_failures=%u "
+		"full_resume=%u wake_qualifications=%u "
+		"wake_candidate_rejects=%u wake_safe_fallbacks=%u "
+		"wake_baseline_commits=%u wake_safe_divergences=%u "
+		"safe_baseline_commits=%u "
+		"noise_frame_holds=%u "
 		"small_peak_continued=%u weak_peak_continued=%u "
 		"small_peak_rejected=%u "
 		"split_peak_deferred=%u cross_zone_split_deferred=%u "
@@ -1513,6 +1513,11 @@ static ssize_t diagnostics_show(struct device *dev,
 		ts->cold_init_count, ts->warm_resume_count,
 		ts->warm_resume_fallback_count, ts->resume_stability_failures,
 		ts->afe_calibration_count, ts->afe_calibration_failures,
+		full_resume_on_panel_enable, a->wake_qualification_count,
+		a->wake_candidate_reject_count, a->wake_safe_fallback_count,
+		a->wake_baseline_commit_count, a->wake_safe_divergence_count,
+		a->baseline_safe_commit_count,
+		a->noise_frame_hold_count,
 		a->diag_small_peak_continued, a->diag_weak_peak_continued,
 		a->diag_small_peak_rejected,
 		a->diag_split_peak_deferred,
@@ -1581,7 +1586,8 @@ static struct bin_attribute event_stack_attr = {
 
 static void himax_trace_record_irq(struct himax_ts_data *ts, int read_error,
 				   bool master_valid,
-				   const struct hx_frame_status *frame_status)
+				   const struct hx_frame_status *frame_status,
+				   bool noise_hold)
 {
 	struct himax_trace_record *record;
 	struct hx_algo *algo = ts->algo;
@@ -1606,6 +1612,8 @@ static void himax_trace_record_irq(struct himax_ts_data *ts, int read_error,
 		flags |= HIMAX_TRACE_F_RETRY;
 	if (master_valid && frame_status->has_finger)
 		flags |= HIMAX_TRACE_F_HAS_FINGER;
+	if (noise_hold)
+		flags |= HIMAX_TRACE_F_NOISE_HOLD;
 	record->flags = cpu_to_le32(flags);
 
 	record->algo_frame_sequence = cpu_to_le32(algo->diag_frame_seq);
@@ -1735,12 +1743,14 @@ static struct bin_attribute event_trace_attr = {
 #else
 static inline void himax_trace_record_irq(struct himax_ts_data *ts,
 					  int read_error, bool master_valid,
-					  const struct hx_frame_status *frame_status)
+					  const struct hx_frame_status *frame_status,
+					  bool noise_hold)
 {
 	(void)ts;
 	(void)read_error;
 	(void)master_valid;
 	(void)frame_status;
+	(void)noise_hold;
 }
 #endif
 
@@ -1761,6 +1771,15 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_baseline_recovery_max_step.attr,
 	&dev_attr_baseline_recovery_max_frames.attr,
 	&dev_attr_baseline_noise_tracking.attr,
+	&dev_attr_wake_stable_frames.attr,
+	&dev_attr_wake_finger_safe_frames.attr,
+	&dev_attr_wake_raw_jump_threshold.attr,
+	&dev_attr_wake_max_unstable_nodes.attr,
+	&dev_attr_wake_max_unstable_line_nodes.attr,
+	&dev_attr_safe_commit_no_finger_frames.attr,
+	&dev_attr_runtime_noise_threshold.attr,
+	&dev_attr_runtime_noise_line_nodes.attr,
+	&dev_attr_runtime_noise_total_nodes.attr,
 	&dev_attr_cmf_enabled.attr,
 	&dev_attr_cmf_exclusion.attr,
 	&dev_attr_cmf_max_correction.attr,
@@ -1891,13 +1910,13 @@ static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts)
 	struct hx_frame_status status;
 	u32 previous_hash = 0;
 	bool have_previous = false;
-	int consecutive = 0;
 	int attempt;
 	int ret = -EIO;
 
-	for (attempt = 0; attempt < HIMAX_RESUME_STABLE_ATTEMPTS; attempt++) {
+	for (attempt = 0; attempt < HIMAX_RESUME_QUALITY_ATTEMPTS; attempt++) {
 		u32 hash = 2166136261U;
 		u32 i;
+		int quality;
 
 		memset(&status, 0, sizeof(status));
 		usleep_range(8000, 9000);
@@ -1910,16 +1929,29 @@ static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts)
 				hash = (hash ^ ts->event_buf[i]) * 16777619U;
 			/* Valid but byte-identical reads can be a stale SRAM image;
 			 * they do not prove that scanning resumed. */
-			if (have_previous && hash == previous_hash) {
-				consecutive = 0;
+			if (have_previous && hash == previous_hash)
 				continue;
-			}
 			previous_hash = hash;
 			have_previous = true;
-			if (++consecutive >= HIMAX_RESUME_STABLE_FRAMES)
+			quality = hx_algo_qualify_wake_frame(ts->algo,
+				(const u16 *)(ts->event_buf + HX_FRAME_HEADER_BYTES),
+				status.has_finger ? HX_FINGER_PRESENT :
+				HX_FINGER_ABSENT);
+			if (quality > HX_WAKE_QUALITY_PENDING) {
+				const char *baseline_source = "new baseline";
+
+				if (quality == HX_WAKE_QUALITY_USING_SAFE)
+					baseline_source = "last-safe baseline";
+				else if (quality == HX_WAKE_QUALITY_PROTECTED)
+					baseline_source = "protected neutral baseline";
+				dev_info(ts->dev,
+					 "raw producer passed wake quality (%s)\n",
+					 baseline_source);
 				return 0;
+			}
+			if (quality == HX_WAKE_QUALITY_REJECTED)
+				ret = -EUCLEAN;
 		} else {
-			consecutive = 0;
 			if (!ret)
 				ret = -EAGAIN;
 		}
@@ -1928,7 +1960,8 @@ static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts)
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	ts->resume_stability_failures++;
 #endif
-	dev_err(ts->dev, "raw event producer did not stabilize after resume\n");
+	dev_err(ts->dev,
+		"raw event producer did not pass wake quality after resume\n");
 	return ret;
 }
 
@@ -1996,7 +2029,7 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 
 	read_ret = hx83121a_gaokun_read_event_stack(ts);
 	if (read_ret) {
-		himax_trace_record_irq(ts, read_ret, false, &frame_status);
+		himax_trace_record_irq(ts, read_ret, false, &frame_status, false);
 		/* AFE transitions can transiently lose one or two frames.  Resetting
 		 * the controller on the first miss creates a long, user-visible UP/
 		 * DOWN break.  Match the Windows runtime recovery policy and recover
@@ -2040,13 +2073,39 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 		dev_warn_ratelimited(ts->dev,
 			"discarding invalid/retry master event-stack frame\n");
 		stable_cnt = hx_count_stable_tracks(algo);
-		himax_trace_record_irq(ts, 0, master_valid, &frame_status);
+		himax_trace_record_irq(ts, 0, master_valid, &frame_status, false);
 		goto report;
 	}
+	if (hx_algo_is_exception_frame(algo, ptr)) {
+		int recovery_ret;
+
+		stable_cnt = hx_count_stable_tracks(algo);
+		himax_trace_record_irq(ts, 0, true, &frame_status, true);
+		if (++ts->consecutive_noise_frames <
+		    HIMAX_MAX_CONSECUTIVE_NOISE_FRAMES) {
+			dev_warn_ratelimited(ts->dev,
+				"holding tracks across electrical-noise frame (%u/%u)\n",
+				ts->consecutive_noise_frames,
+				HIMAX_MAX_CONSECUTIVE_NOISE_FRAMES);
+			goto report;
+		}
+		ts->consecutive_noise_frames = 0;
+		dev_err(ts->dev,
+			"persistent electrical-noise frames, reinitializing controller\n");
+		himax_int_enable(ts, false);
+		recovery_ret = himax_hw_reinit_retry(ts, false,
+			HIMAX_PANEL_REINIT_RETRIES, HIMAX_PANEL_REINIT_DELAY_MS,
+			"noise");
+		if (recovery_ret)
+			dev_err(ts->dev,
+				"noise recovery failed; touch IRQ remains disabled\n");
+		goto out_unlock;
+	}
+	ts->consecutive_noise_frames = 0;
 
 	stable_cnt = hx_algo_process_frame_state(algo, ptr,
 		frame_status.has_finger ? HX_FINGER_PRESENT : HX_FINGER_ABSENT);
-	himax_trace_record_irq(ts, 0, true, &frame_status);
+	himax_trace_record_irq(ts, 0, true, &frame_status, false);
 
 	/* Not final results, touchscreen_report_pos will handle this (x-y swap, y invert) */
 	for (int i = 0; i < HIMAX_MAX_TOUCH; ++i) {
@@ -2145,6 +2204,22 @@ static int himax_mcu_power_on_init(struct himax_ts_data *ts)
 	if (ret < 0) {
 		dev_err(ts->dev, "%s: sense on fail\n", __func__);
 		return ret;
+	}
+
+	/* Windows waits for central-state A8 == 0x05 before trusting reload
+	 * state.  A responsive bus alone does not mean firmware boot completed. */
+	for (retry_cnt = 0; retry_cnt < retry_limit; retry_cnt++) {
+		ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_FW_STATUS,
+					      data.byte, 4);
+		if (ret < 0)
+			return ret;
+		if (data.byte[0] == HIMAX_REG_DATA_FW_STATE_RUNNING)
+			break;
+		usleep_range(10000, 11000);
+	}
+	if (retry_cnt == retry_limit) {
+		dev_err(ts->dev, "%s: FW did not enter running state\n", __func__);
+		return -ETIMEDOUT;
 	}
 
 	dev_info(ts->dev, "%s: waiting for FW reload data\n", __func__);

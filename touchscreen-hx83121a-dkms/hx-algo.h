@@ -174,7 +174,8 @@ enum hx_gesture_state {
 /**
  * struct hx_algo - all algorithm state, allocated once in probe.
  *
- * Memory budget: ~40 KB.  Never allocate on the stack.
+ * Memory budget: ~64 KB with three baseline grids.  Never allocate on the
+ * kernel stack.
  */
 struct hx_algo {
 	/* ---- Frame buffers ---- */
@@ -208,9 +209,22 @@ struct hx_algo {
 
 	/* ---- Per-cell adaptive baseline (Q8 fixed point) ---- */
 	s32 baseline_q8[HX_PIXELS];
+	/* Windows keeps several validated baselines instead of treating the
+	 * currently-learning grid as authoritative across every screen cycle.
+	 * Keep the minimum useful subset here: last committed safe data, a wake
+	 * candidate, and baseline_q8 as the live/working copy. */
+	s32 safe_baseline_q8[HX_PIXELS];
+	s32 wake_candidate_q8[HX_PIXELS];
 	u8  baseline_release_hold[HX_PIXELS];
 	u16 baseline_hist[HX_BASELINE_HIST_BINS];
 	bool baseline_initialized;
+	bool safe_baseline_valid;
+	bool wake_qualifying;
+	bool wake_candidate_valid;
+	bool wake_needs_double_confirm;
+	u8 wake_candidate_frames;
+	u8 wake_finger_frames;
+	u8 safe_no_finger_frames;
 	bool baseline_prev_had_signal;
 	bool baseline_had_freeze;
 	u8 baseline_recovery_frames;
@@ -238,6 +252,13 @@ struct hx_algo {
 	u32 baseline_generation;
 	u32 full_reset_count;
 	u32 live_clear_count;
+	u32 wake_qualification_count;
+	u32 wake_candidate_reject_count;
+	u32 wake_safe_fallback_count;
+	u32 wake_baseline_commit_count;
+	u32 wake_safe_divergence_count;
+	u32 baseline_safe_commit_count;
+	u32 noise_frame_hold_count;
 #endif
 
 	struct hx_palm_box palm_boxes[HX_MAX_PALM_BOXES];
@@ -283,6 +304,15 @@ struct hx_algo {
 	s16  baseline_recovery_max_step;
 	u8   baseline_recovery_max_frames;
 	bool baseline_noise_tracking;
+	u8   wake_stable_frames;
+	u8   wake_finger_safe_frames;
+	s16  wake_raw_jump_threshold;
+	u16  wake_max_unstable_nodes;
+	u8   wake_max_unstable_line_nodes;
+	u8   safe_commit_no_finger_frames;
+	s16  runtime_noise_threshold;
+	u8   runtime_noise_line_nodes;
+	u16  runtime_noise_total_nodes;
 	bool cmf_enabled;          /* CMF on/off (default: true)           */
 	s16  cmf_exclusion;        /* exclude pixels > this from CMF mean  */
 	s16  cmf_max_correction;   /* clamp per-row/col offset             */
@@ -368,11 +398,23 @@ enum hx_finger_state {
 	HX_FINGER_PRESENT,
 };
 
+enum hx_wake_quality_result {
+	HX_WAKE_QUALITY_REJECTED = -1,
+	HX_WAKE_QUALITY_PENDING = 0,
+	HX_WAKE_QUALITY_READY = 1,
+	HX_WAKE_QUALITY_USING_SAFE = 2,
+	HX_WAKE_QUALITY_PROTECTED = 3,
+};
+
 /* ---- Public API ---- */
 
 void hx_algo_init_defaults(struct hx_algo *algo);
 void hx_algo_clear_live_state(struct hx_algo *algo);
 void hx_algo_full_reset(struct hx_algo *algo);
+void hx_algo_begin_wake(struct hx_algo *algo);
+int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
+			       enum hx_finger_state finger_state);
+bool hx_algo_is_exception_frame(struct hx_algo *algo, const u16 *raw);
 /* Compatibility alias: runtime reset means preserving the learned baseline. */
 void hx_algo_reset_runtime(struct hx_algo *algo);
 int hx_algo_process_frame(struct hx_algo *algo, const u16 *raw);

@@ -24,6 +24,7 @@ FLAG_READ_OK = 1 << 0
 FLAG_MASTER_VALID = 1 << 1
 FLAG_RETRY = 1 << 2
 FLAG_HAS_FINGER = 1 << 3
+FLAG_NOISE_HOLD = 1 << 4
 
 
 def decode(path: Path):
@@ -36,7 +37,7 @@ def decode(path: Path):
         raise ValueError(f"bad magic 0x{magic:08x}")
     if version == 1:
         peak_struct, track_struct = PEAK_V1, TRACK_V1
-    elif version == 2:
+    elif version in (2, 3):
         peak_struct, track_struct = PEAK_V2, TRACK_V2
     else:
         raise ValueError(f"unsupported format version={version}")
@@ -100,6 +101,7 @@ def decode(path: Path):
             "master_valid": int(bool(flags & FLAG_MASTER_VALID)),
             "retry": int(bool(flags & FLAG_RETRY)),
             "has_finger": int(bool(flags & FLAG_HAS_FINGER)),
+            "noise_hold": int(bool(flags & FLAG_NOISE_HOLD)),
             "read_error": read_error,
             "algo_frame": algo_frame,
             "common_diff": common_diff,
