@@ -73,8 +73,10 @@ repo_hash=$(sha256sum "$src_dir/himax-spi.ko" | awk '{print $1}')
 [[ "$dkms_src" == "/usr/src/himax-spi-0.1" ]]
 sudo install -d "$dkms_src"
 sudo find "$dkms_src" -mindepth 1 -delete
-for file in Makefile dkms.conf himax-spi-core.c hx-algo.c hx-algo.h \
-		hx-frame-status.h; do
+for file in Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
+		himax-spi-sysfs.c himax-spi.h hx-algo.c hx-algo-preprocess.c \
+		hx-algo-detect.c hx-algo-resolve.c hx-algo-track.c hx-algo.h \
+		hx-algo-internal.h hx-frame-status.h; do
 	sudo install -m644 "$src_dir/$file" "$dkms_src/$file"
 done
 sudo install -Dm644 "$src_dir/himax-spi-dkms.conf" /etc/modprobe.d/himax-spi-dkms.conf
