@@ -1,0 +1,4 @@
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/nav_tuner" android:icon="@drawable/ic_tune" android:title="@string/nav_tuner" />
+    <item android:id="@+id/nav_diagnostic" android:icon="@drawable/ic_monitor_heart" android:title="@string/nav_diagnostic" />
+</menu>

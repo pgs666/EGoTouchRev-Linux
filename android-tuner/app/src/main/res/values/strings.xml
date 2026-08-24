@@ -1,0 +1,4 @@
+<resources>
+    <string name="nav_tuner">调参</string>
+    <string name="nav_diagnostic">诊断</string>
+</resources>
