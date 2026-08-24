@@ -19,7 +19,7 @@
 
 实现边界与并发约束见 [驱动架构](docs/architecture.md)，已审计的热路径与待验证候选
 见 [性能审计](docs/performance.md)，后续选择性移植顺序见
-[Windows 特性路线图](docs/windows-porting-roadmap.md)。
+[逆向证据与移植路线图](docs/windows-porting-roadmap.md)。
 
 ## 仓库结构
 
