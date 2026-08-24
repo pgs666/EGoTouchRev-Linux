@@ -207,15 +207,23 @@ public final class MainActivity extends AppCompatActivity {
             retry.setOnClickListener(v -> discoverAndLoad()); statusBox.addView(retry);
         }
         page.addView(statusCard);
-        ChipGroup modes = new ChipGroup(this); modes.setSingleSelection(true); modes.setSelectionRequired(true);
-        Chip daily=chip("日用模式"), game=chip("游戏模式"), custom=chip("自定义模式");
-        daily.setId(View.generateViewId()); game.setId(View.generateViewId()); custom.setId(View.generateViewId());
-        modes.addView(daily); modes.addView(game); modes.addView(custom);
         String detectedMode = detectCurrentMode();
+        LinearLayout modeHeader = new LinearLayout(this); modeHeader.setGravity(Gravity.CENTER_VERTICAL);
+        TextView modeLabel = body("当前配置");
+        Chip modeStatus = new Chip(this); modeStatus.setCheckable(false); modeStatus.setClickable(false);
+        modeStatus.setText(connectionBusy ? "读取中" : connectionFailed ? "不可用" :
+                "game".equals(detectedMode) ? "游戏模式" : "daily".equals(detectedMode) ? "日用模式" : "自定义");
+        modeHeader.addView(modeLabel, new LinearLayout.LayoutParams(0,-2,1)); modeHeader.addView(modeStatus);
+        page.addView(modeHeader);
+        TextView immediateHint = body("选择预设或调整参数后会立即写入当前内核；无需另行保存。");
+        immediateHint.setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall);
+        page.addView(immediateHint);
+        ChipGroup modes = new ChipGroup(this); modes.setSingleSelection(true); modes.setSelectionRequired(false);
+        Chip daily=chip("应用日用预设"), game=chip("应用游戏预设");
+        daily.setId(View.generateViewId()); game.setId(View.generateViewId());
+        modes.addView(daily); modes.addView(game);
         if ("game".equals(detectedMode)) game.setChecked(true);
         else if ("daily".equals(detectedMode)) daily.setChecked(true);
-        else custom.setChecked(true);
-        custom.setEnabled(false);
         daily.setEnabled(!connectionBusy && !connectionFailed && presetSupported());
         game.setEnabled(!connectionBusy && !connectionFailed && presetSupported());
         page.addView(modes);
@@ -320,7 +328,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private void commitEntry(Param p,TextInputEditText edit){try{write(p,Integer.parseInt(String.valueOf(edit.getText())));}catch(Exception ex){edit.setError("请输入整数");}}
-    private void write(Param p,int value){if(algoPath==null||connectionBusy||!values.containsKey(p.key)){toast("该参数不可用");return;}final int generation=operationGeneration.get();final String path=algoPath;worker.execute(()->{try{RootShell.run("printf '%s' "+RootShell.quote(String.valueOf(value))+" > "+RootShell.quote(path+"/"+p.key));if(!isCurrent(generation))return;Map<String,Integer> updated=new HashMap<>(values);updated.put(p.key,value);values=Collections.unmodifiableMap(updated);}catch(Exception ex){postIfCurrent(generation,()->toast("写入 "+p.title+" 失败："+ex.getMessage()));}});}
+    private void write(Param p,int value){if(algoPath==null||connectionBusy||!values.containsKey(p.key)){toast("该参数不可用");return;}final int generation=operationGeneration.get();final String path=algoPath;worker.execute(()->{try{RootShell.run("printf '%s' "+RootShell.quote(String.valueOf(value))+" > "+RootShell.quote(path+"/"+p.key));if(!isCurrent(generation))return;Map<String,Integer> updated=new HashMap<>(values);updated.put(p.key,value);Map<String,Integer> published=Collections.unmodifiableMap(updated);postIfCurrent(generation,()->{values=published;refreshVisiblePage();toast(p.title+" 已生效");});}catch(Exception ex){postIfCurrent(generation,()->toast("写入 "+p.title+" 失败："+ex.getMessage()));}});}
     private void applyPreset(boolean game){
         if (algoPath == null || connectionBusy || connectionFailed || !presetSupported()) { toast("当前内核不支持完整模式预设"); return; }
         Map<String,Integer> preset=new HashMap<>();
