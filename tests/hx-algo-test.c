@@ -923,6 +923,94 @@ static void test_peak_ids_persist_across_motion(void)
 	assert(algo.contacts[0].source_peak_age == 1);
 }
 
+static void test_peak_ids_follow_fast_predicted_motion(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+	u8 id;
+
+	init_integrated_algo(&algo);
+	init_raw(raw, 0x7fee);
+	add_blob(raw, 10, 8, 1800);
+	run_detection(&algo, raw);
+	id = algo.peaks[0].id;
+
+	/* Both steps exceed the legacy adjacent-cell (<4 Manhattan) gate. */
+	init_raw(raw, 0x7fee);
+	add_blob(raw, 10, 13, 1800);
+	run_detection(&algo, raw);
+	assert(algo.peaks[0].id == id);
+	init_raw(raw, 0x7fee);
+	add_blob(raw, 10, 19, 1800);
+	run_detection(&algo, raw);
+	assert(algo.peaks[0].id == id);
+	assert(algo.peaks[0].age == 2);
+}
+
+static void test_fast_motion_handoff_defers_mature_residual(void)
+{
+	struct hx_algo algo = {};
+	struct input_mt_pos p0 = { .x = 1291, .y = 2212 };
+	struct input_mt_pos p1 = { .x = 1221, .y = 2107 };
+	struct input_mt_pos p2 = { .x = 1128, .y = 1990 };
+	struct input_mt_pos split[2] = {
+		{ .x = 1124, .y = 1988 }, /* stalled mature residual */
+		{ .x = 760, .y = 1717 },  /* actual fast-moving lobe */
+	};
+	int slot = -1;
+
+	hx_algo_init_defaults(&algo);
+	algo.track_smoothing = false;
+	algo.debounce_base = 0;
+	algo.debounce_weak_extra = 0;
+	algo.debounce_edge_extra = 0;
+	algo.touch_active = true;
+	algo.contacts[0].source_peak_id = 186;
+	algo.contacts[0].source_peak_age = 20;
+	algo.contacts[0].source_zone_index = 1;
+	algo.contact_count = 1;
+	hx_track_contacts(&algo, &p0, 1);
+	hx_track_contacts(&algo, &p1, 1);
+	hx_track_contacts(&algo, &p2, 1);
+	for (int i = 0; i < HIMAX_MAX_TOUCH; i++)
+		if (algo.tracks[i].active)
+			slot = i;
+	assert(slot >= 0);
+
+	algo.contacts[0].source_peak_id = 186;
+	algo.contacts[0].source_peak_age = 23;
+	algo.contacts[0].source_zone_index = 1;
+	algo.contacts[1].source_peak_id = 187;
+	algo.contacts[1].source_peak_age = 0;
+	algo.contacts[1].source_zone_index = 2;
+	algo.contact_count = 2;
+	hx_track_contacts(&algo, split, 2);
+	assert(hx_count_stable_tracks(&algo) == 1);
+	assert(algo.tracks[slot].source_peak_id == 187);
+	assert(algo.tracks[slot].x == split[1].x);
+	assert(algo.diag_peak_id_handoffs == 1);
+	assert(algo.diag_handoff_residual_deferred == 1);
+
+	/* Once the track owns the moving ID, the old residual is no longer the
+	 * immediate handoff ID.  Its competition history must still keep it from
+	 * becoming a second slot on the following frames. */
+	for (int age = 1; age < 4; age++) {
+		split[1].x -= 90;
+		split[1].y -= 70;
+		algo.contacts[0].source_peak_id = 186;
+		algo.contacts[0].source_peak_age = 23 + age;
+		algo.contacts[0].source_zone_index = 1;
+		algo.contacts[1].source_peak_id = 187;
+		algo.contacts[1].source_peak_age = age;
+		algo.contacts[1].source_zone_index = 2;
+		algo.contact_count = 2;
+		hx_track_contacts(&algo, split, 2);
+		assert(hx_count_stable_tracks(&algo) == 1);
+		assert(algo.tracks[slot].source_peak_id == 187);
+	}
+	assert(algo.diag_handoff_residual_deferred == 4);
+}
+
 static void test_close_same_zone_split_requires_confirmation(void)
 {
 	struct hx_algo algo = {};
@@ -1190,6 +1278,8 @@ int main(void)
 	test_regular_peak_beats_continuation_for_same_track();
 	test_edge_compensation_and_weak_rejection();
 	test_peak_ids_persist_across_motion();
+	test_peak_ids_follow_fast_predicted_motion();
+	test_fast_motion_handoff_defers_mature_residual();
 	test_close_same_zone_split_requires_confirmation();
 	test_cross_zone_split_hands_off_existing_track();
 	test_persistent_cross_zone_second_touch_is_eventually_reported();

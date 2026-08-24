@@ -18,6 +18,7 @@
 #include <linux/limits.h>
 #include <linux/mutex.h>
 #include <linux/module.h>
+#include <linux/power_supply.h>
 #include <linux/slab.h>
 
 static bool disable_pressure = true;
@@ -83,9 +84,13 @@ HIMAX_MAX_TX + HIMAX_MAX_RX) * 2)
 #define HIMAX_DSRAM_ADDR_SORTING_MODE_EN		0x10007f04
 #define HIMAX_DSRAM_ADDR_SET_NFRAME			0x10007294
 #define HIMAX_DSRAM_ADDR_RAWDATA_PASSWORD		0x10000000
+#define HIMAX_DSRAM_ADDR_AP_NOTIFY_FW_SUSPEND		0x10007fd0
+#define HIMAX_DSRAM_ADDR_USB_DETECT			0x10007f38
 
 /* dsram flag data */
 #define HIMAX_DSRAM_DATA_FW_RELOAD_DONE			0x000072c0
+#define HIMAX_DSRAM_DATA_AP_RESUMED			0x00000000
+#define HIMAX_DSRAM_DATA_USB_CONNECTED			0xa55aa55a
 /* hx83121a-specific register/dsram flags/data */
 #define HIMAX_HX83121A_DSRAM_ADDR_RAW_OUT_SEL		0x100072ec
 #define HIMAX_HX83121A_FLASH_SIZE			(255 * 1024)
@@ -124,6 +129,8 @@ HIMAX_MAX_TX + HIMAX_MAX_RX) * 2)
 /* Let the panel and display pipeline settle before TDDI touch recovery. */
 #define HIMAX_PANEL_ENABLE_SETTLE_MS			300
 #define HIMAX_MAX_CONSECUTIVE_FRAME_ERRORS		3
+#define HIMAX_RESUME_STABLE_FRAMES			3
+#define HIMAX_RESUME_STABLE_ATTEMPTS			12
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 #define HIMAX_TRACE_CAPACITY			512U
 #define HIMAX_TRACE_MAGIC			0x52545848U /* "HXTR" */
@@ -231,6 +238,8 @@ struct himax_ts_data {
 	bool irq_enabled;
 	bool panel_prepared;
 	bool panel_enabled;
+	bool controller_initialized;
+	bool retained_suspend;
 	bool shutting_down;
 	struct gpio_desc *gpiod_rst;
 	struct device *dev;
@@ -249,12 +258,18 @@ struct himax_ts_data {
 	u32 trace_count;
 	u32 trace_irq_sequence;
 	u32 reset_generation;
+	u32 cold_init_count;
+	u32 warm_resume_count;
+	u32 warm_resume_fallback_count;
+	u32 resume_stability_failures;
 #endif
 };
 
 static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on);
 static int himax_enable_fw_reload(struct himax_ts_data *ts);
 static int himax_mcu_power_on_init(struct himax_ts_data *ts);
+static int hx83121a_gaokun_read_event_stack(struct himax_ts_data *ts);
+static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts);
 static int himax_mcu_check_crc(struct himax_ts_data *ts, u32 start_addr,
 			       int reload_length, u32 *crc_result);
 
@@ -444,6 +459,36 @@ static int himax_mcu_register_write(struct himax_ts_data *ts, u32 addr, const u8
 	return himax_mcu_set_burst_mode(ts, !(len > HIMAX_REG_SZ));
 }
 
+/* Xiaomi replays firmware-owned state with write/read retry loops.  Keep the
+ * same rule, but require an exact readback (their AP-notify loop accidentally
+ * stops on a successful read even when the value differs). */
+static int himax_mcu_write_verify_u32(struct himax_ts_data *ts, u32 addr,
+				      u32 value, int attempts)
+{
+	union himax_dword_data expected = { .dword = cpu_to_le32(value) };
+	union himax_dword_data actual;
+	int attempt;
+	int ret = -EIO;
+
+	for (attempt = 0; attempt < attempts; attempt++) {
+		ret = himax_mcu_register_write(ts, addr, expected.byte,
+					       sizeof(expected.byte));
+		if (ret)
+			continue;
+		usleep_range(1000, 1100);
+		ret = himax_mcu_register_read(ts, addr, actual.byte,
+					      sizeof(actual.byte));
+		if (!ret && actual.dword == expected.dword)
+			return 0;
+		if (!ret)
+			ret = -EIO;
+	}
+
+	dev_err(ts->dev, "register 0x%08x failed readback for 0x%08x\n",
+		addr, value);
+	return ret;
+}
+
 static void himax_afe_build_command(u8 command, u8 value, u8 *packet)
 {
 	u32 sum = 0;
@@ -498,7 +543,8 @@ static int himax_afe_send_command(struct himax_ts_data *ts, u8 *slot,
 	return 0;
 }
 
-static int himax_restore_afe_runtime(struct himax_ts_data *ts)
+static int himax_restore_afe_runtime(struct himax_ts_data *ts,
+				     bool start_calibration)
 {
 	u8 slot = 0;
 	int first_error = 0;
@@ -507,14 +553,17 @@ static int himax_restore_afe_runtime(struct himax_ts_data *ts)
 	if (!restore_afe_runtime)
 		return 0;
 
-	ret = himax_afe_send_command(ts, &slot,
-				     HIMAX_HX83121A_AFE_CMD_START_CALIBRATION,
-				     0);
-	if (ret) {
-		dev_warn(ts->dev, "failed to start AFE calibration: %d\n", ret);
-		first_error = ret;
-	} else {
-		dev_info(ts->dev, "AFE calibration command transport completed\n");
+	if (start_calibration) {
+		ret = himax_afe_send_command(ts, &slot,
+					     HIMAX_HX83121A_AFE_CMD_START_CALIBRATION,
+					     0);
+		if (ret) {
+			dev_warn(ts->dev, "failed to start AFE calibration: %d\n", ret);
+			first_error = ret;
+		} else {
+			dev_info(ts->dev,
+				 "AFE calibration command transport completed\n");
+		}
 	}
 
 	ret = himax_afe_send_command(ts, &slot,
@@ -849,6 +898,108 @@ static void himax_release_all_touches(struct himax_ts_data *ts)
 		himax_report_tracked_state(ts, false);
 }
 
+static int himax_verify_running_ic(struct himax_ts_data *ts)
+{
+	union himax_dword_data data;
+	int ret;
+
+	ret = himax_mcu_interface_on(ts);
+	if (ret)
+		return ret;
+	ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_ICID, data.byte,
+				      sizeof(data.byte));
+	if (ret)
+		return ret;
+	if ((le32_to_cpu(data.dword) >> 8) != 0x83121a)
+		return -ENODEV;
+
+	return 0;
+}
+
+static int himax_restore_raw_runtime(struct himax_ts_data *ts)
+{
+	union himax_dword_data password = {
+		.dword = cpu_to_le32(0x00005aa5),
+	};
+	int ret;
+	int supplied;
+
+	/* These are firmware-owned runtime values.  Xiaomi similarly replays its
+	 * USB/gesture/touch-mode values after resume; our raw-matrix transport
+	 * additionally needs RawOut and the SRAM producer handshake. */
+	ret = himax_mcu_write_verify_u32(ts,
+		HIMAX_DSRAM_ADDR_AP_NOTIFY_FW_SUSPEND,
+		HIMAX_DSRAM_DATA_AP_RESUMED, 3);
+	if (ret)
+		return ret;
+	ret = himax_mcu_write_verify_u32(ts,
+		HIMAX_DSRAM_ADDR_SORTING_MODE_EN, HIMAX_DATA_CLEAR, 3);
+	if (ret)
+		return ret;
+	ret = himax_mcu_write_verify_u32(ts, HIMAX_DSRAM_ADDR_SET_NFRAME,
+					 1, 3);
+	if (ret)
+		return ret;
+	ret = himax_mcu_write_verify_u32(ts,
+		HIMAX_HX83121A_DSRAM_ADDR_RAW_OUT_SEL, 0xf6, 3);
+	if (ret)
+		return ret;
+
+	/* dagu replays charger state after every resume to select the firmware's
+	 * anti-USB-interference profile.  It is supplementary to our host-side
+	 * common-mode filter, not a replacement for it. */
+	supplied = power_supply_is_system_supplied();
+	if (supplied >= 0) {
+		ret = himax_mcu_write_verify_u32(ts,
+			HIMAX_DSRAM_ADDR_USB_DETECT,
+			supplied ? HIMAX_DSRAM_DATA_USB_CONNECTED : 0, 3);
+		if (ret)
+			dev_warn(ts->dev,
+				 "failed to replay charger interference mode: %d\n",
+				 ret);
+	}
+
+	/* The password is a producer/consumer handshake, not persistent config;
+	 * firmware may consume it immediately, so an equality readback would be
+	 * incorrect.  Validate it through fresh master event frames below. */
+	return himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_RAWDATA_PASSWORD,
+					password.byte, sizeof(password.byte));
+}
+
+static int himax_warm_resume(struct himax_ts_data *ts)
+{
+	int ret;
+
+	himax_release_all_touches(ts);
+	ret = himax_verify_running_ic(ts);
+	if (ret)
+		return ret;
+	ret = himax_restore_raw_runtime(ts);
+	if (ret)
+		return ret;
+
+	/* Xiaomi's resume replays runtime modes but does not recalibrate the AFE.
+	 * Preserve that distinction: calibration belongs to cold initialization;
+	 * only restore the requested scan rate on a retained-state wake. */
+	ret = himax_restore_afe_runtime(ts, false);
+	if (ret)
+		dev_warn(ts->dev,
+			 "warm-resume AFE mode replay incomplete: %d\n", ret);
+
+	ret = himax_wait_for_stable_event_frames(ts);
+	if (ret)
+		return ret;
+
+	ts->retained_suspend = false;
+	ts->controller_initialized = true;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	ts->warm_resume_count++;
+#endif
+	himax_int_enable(ts, true);
+	dev_info(ts->dev, "retained-state resume completed\n");
+	return 0;
+}
+
 static int himax_hw_reinit(struct himax_ts_data *ts, bool check_crc)
 {
 	u32 crc_hw;
@@ -858,6 +1009,8 @@ static int himax_hw_reinit(struct himax_ts_data *ts, bool check_crc)
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	ts->reset_generation++;
 #endif
+	ts->controller_initialized = false;
+	ts->retained_suspend = false;
 	himax_release_all_touches(ts);
 
 	ret = hx83121a_chip_detect(ts);
@@ -891,15 +1044,26 @@ static int himax_hw_reinit(struct himax_ts_data *ts, bool check_crc)
 		 * They are best-effort because older firmware may not expose the
 		 * command queue even though touch reporting itself is usable.
 		 */
-		afe_ret = himax_restore_afe_runtime(ts);
+		afe_ret = himax_restore_afe_runtime(ts, true);
 		if (afe_ret)
 			dev_warn(ts->dev,
 				 "AFE runtime restore incomplete; continuing with firmware defaults\n");
+		ret = himax_restore_raw_runtime(ts);
+		if (ret)
+			dev_err(ts->dev, "cold-init runtime replay failed: %d\n",
+				ret);
+		if (!ret)
+			ret = himax_wait_for_stable_event_frames(ts);
 	}
 
 out_enable_irq:
-	if (!ret)
+	if (!ret) {
+		ts->controller_initialized = true;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		ts->cold_init_count++;
+#endif
 		himax_int_enable(ts, true);
+	}
 	return ret;
 }
 
@@ -929,8 +1093,19 @@ static int himax_hw_reinit_retry(struct himax_ts_data *ts, bool check_crc,
 
 static void himax_power_down(struct himax_ts_data *ts)
 {
+	himax_int_enable(ts, false);
 	himax_release_all_touches(ts);
 	gpiod_set_value_cansleep(ts->gpiod_rst, 1);
+	ts->controller_initialized = false;
+	ts->retained_suspend = false;
+}
+
+static void himax_retain_for_suspend(struct himax_ts_data *ts)
+{
+	himax_int_enable(ts, false);
+	himax_release_all_touches(ts);
+	ts->consecutive_frame_errors = 0;
+	ts->retained_suspend = ts->controller_initialized;
 }
 
 static int himax_panel_prepared(struct drm_panel_follower *follower)
@@ -963,10 +1138,28 @@ static void himax_panel_reinit_work(struct work_struct *work)
 		return;
 	}
 
-	ret = himax_hw_reinit_retry(ts, false,
-				    HIMAX_PANEL_REINIT_RETRIES,
-				    HIMAX_PANEL_REINIT_DELAY_MS,
-				    "panel");
+	/* dagu's active configuration deliberately omits HX_RESUME_HW_RESET:
+	 * preserve the controller across display sleep, replay firmware-owned
+	 * runtime state, and hard-reset only when the retained state fails
+	 * validation.  Cold boot always takes the complete init path. */
+	if (ts->retained_suspend && ts->controller_initialized) {
+		ret = himax_warm_resume(ts);
+		if (ret) {
+			dev_warn(ts->dev,
+				 "retained-state resume failed (%d), falling back to hardware init\n",
+				 ret);
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+			ts->warm_resume_fallback_count++;
+#endif
+			ret = himax_hw_reinit_retry(ts, false,
+				HIMAX_PANEL_REINIT_RETRIES,
+				HIMAX_PANEL_REINIT_DELAY_MS, "panel-fallback");
+		}
+	} else {
+		ret = himax_hw_reinit_retry(ts, false,
+				HIMAX_PANEL_REINIT_RETRIES,
+				HIMAX_PANEL_REINIT_DELAY_MS, "panel-cold");
+	}
 	if (ret)
 		himax_power_down(ts);
 	himax_unlock(ts);
@@ -1001,7 +1194,7 @@ static int himax_panel_disabling(struct drm_panel_follower *follower)
 	himax_lock(ts);
 	ts->panel_enabled = false;
 	if (ts->panel_prepared)
-		himax_power_down(ts);
+		himax_retain_for_suspend(ts);
 	himax_unlock(ts);
 
 	return 0;
@@ -1017,7 +1210,7 @@ static int himax_panel_unpreparing(struct drm_panel_follower *follower)
 	himax_lock(ts);
 	ts->panel_enabled = false;
 	ts->panel_prepared = false;
-	himax_power_down(ts);
+	himax_retain_for_suspend(ts);
 	himax_unlock(ts);
 
 	return 0;
@@ -1294,19 +1487,26 @@ static ssize_t diagnostics_show(struct device *dev,
 		"frame=%u common=%d max=%d signal=%u zones=%u peaks=%u "
 		"contacts_pre=%u contacts_post=%u active=%u reported=%u "
 		"baseline_generation=%u full_resets=%u live_clears=%u "
+		"cold_inits=%u warm_resumes=%u warm_fallbacks=%u "
+		"resume_stability_failures=%u "
 		"small_peak_continued=%u weak_peak_continued=%u "
 		"small_peak_rejected=%u "
 		"split_peak_deferred=%u cross_zone_split_deferred=%u "
+		"peak_id_handoffs=%u handoff_residual_deferred=%u "
 		"fast_edge_starts=%u\n",
 		a->diag_frame_seq, a->diag_common_diff, a->diag_frame_max,
 		a->diag_has_signal, a->diag_zones, a->diag_peaks,
 		a->diag_contacts_pre_filter, a->diag_contacts_post_filter,
 		a->diag_active_tracks, a->diag_reported_tracks,
 		a->baseline_generation, a->full_reset_count, a->live_clear_count,
+		ts->cold_init_count, ts->warm_resume_count,
+		ts->warm_resume_fallback_count, ts->resume_stability_failures,
 		a->diag_small_peak_continued, a->diag_weak_peak_continued,
 		a->diag_small_peak_rejected,
 		a->diag_split_peak_deferred,
-		a->diag_cross_zone_split_deferred, a->diag_fast_edge_starts);
+		a->diag_cross_zone_split_deferred, a->diag_peak_id_handoffs,
+		a->diag_handoff_residual_deferred,
+		a->diag_fast_edge_starts);
 	mutex_unlock(&ts->op_lock);
 	return len;
 }
@@ -1668,6 +1868,56 @@ static int hx83121a_gaokun_read_event_stack(struct himax_ts_data *ts)
 #endif
 
 	return 0;
+}
+
+/* The Xiaomi coordinate path can trust a checksum-protected firmware packet
+ * immediately after resume.  Our 0xf6 raw producer has a separate SRAM
+ * handshake, so do not expose IRQs until several newly sampled master frames
+ * prove that the producer is running and no retry frame is pending. */
+static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts)
+{
+	struct hx_frame_status status;
+	u32 previous_hash = 0;
+	bool have_previous = false;
+	int consecutive = 0;
+	int attempt;
+	int ret = -EIO;
+
+	for (attempt = 0; attempt < HIMAX_RESUME_STABLE_ATTEMPTS; attempt++) {
+		u32 hash = 2166136261U;
+		u32 i;
+
+		memset(&status, 0, sizeof(status));
+		usleep_range(8000, 9000);
+		ret = hx83121a_gaokun_read_event_stack(ts);
+		if (!ret &&
+		    hx_parse_master_frame_status(ts->event_buf, ts->event_buf_sz,
+						 &status) &&
+		    !status.retry) {
+			for (i = 0; i < ts->event_buf_sz; i++)
+				hash = (hash ^ ts->event_buf[i]) * 16777619U;
+			/* Valid but byte-identical reads can be a stale SRAM image;
+			 * they do not prove that scanning resumed. */
+			if (have_previous && hash == previous_hash) {
+				consecutive = 0;
+				continue;
+			}
+			previous_hash = hash;
+			have_previous = true;
+			if (++consecutive >= HIMAX_RESUME_STABLE_FRAMES)
+				return 0;
+		} else {
+			consecutive = 0;
+			if (!ret)
+				ret = -EAGAIN;
+		}
+	}
+
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	ts->resume_stability_failures++;
+#endif
+	dev_err(ts->dev, "raw event producer did not stabilize after resume\n");
+	return ret;
 }
 
 

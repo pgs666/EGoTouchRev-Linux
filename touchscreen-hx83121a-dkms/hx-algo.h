@@ -49,6 +49,7 @@ struct input_mt_pos { int x; int y; };
  * @zone_index: index of the owning macro-zone
  * @id:         persistent peak identity across adjacent frames
  * @age:        consecutive matched-frame age (first frame is zero)
+ * @vr, @vc:    last matched grid velocity, used for peak-ID prediction
  * @on_edge:    true when the peak lies on the outermost grid row or column
  * @fast_start_candidate: firmware-confirmed strong, compact edge onset
  * @continuation_only: candidate may only update its bound existing slot
@@ -63,6 +64,8 @@ struct hx_peak {
 	u8  zone_index;
 	u8  id;
 	u8  age;
+	s8  vr;
+	s8  vc;
 	bool on_edge;
 	bool fast_start_candidate;
 	bool continuation_only;
@@ -127,6 +130,16 @@ struct hx_track {
 	s32  deriv_y_q8;
 };
 
+/* Age a possible second touch from the moment it starts competing with an
+ * existing reported track.  Peak lifetime is not suitable for this: a mature
+ * residual lobe can become unmatched for the first time after a split. */
+struct hx_peak_competition {
+	u8 peak_id;
+	u8 age;
+	bool seen;
+	bool handoff_residual;
+};
+
 /**
  * struct hx_macro_zone - contiguous above-threshold region.
  * @arena_start: first pixel in hx_algo.zone_arena
@@ -185,6 +198,7 @@ struct hx_algo {
 	struct hx_peak prev_peaks[HX_MAX_PEAKS];
 	u8   prev_peak_count;
 	u8   next_peak_id;
+	struct hx_peak_competition peak_competition[HX_MAX_PEAKS];
 
 	/* Keep every peak candidate until the final strength-based capacity cut.
 	 * The old implementation truncated the ascending peak list to ten first,
@@ -218,6 +232,8 @@ struct hx_algo {
 	u32 diag_small_peak_rejected;
 	u32 diag_split_peak_deferred;
 	u32 diag_cross_zone_split_deferred;
+	u32 diag_peak_id_handoffs;
+	u32 diag_handoff_residual_deferred;
 	u32 diag_fast_edge_starts;
 	u32 baseline_generation;
 	u32 full_reset_count;
