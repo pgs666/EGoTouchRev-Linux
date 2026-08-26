@@ -55,6 +55,8 @@ void hx_safe_baseline_buffer_comparison(struct hx_algo *algo,
 	s16 bl2bl_common;
 	s16 bl2raw_common;
 	int i;
+	u16 positive = 0;
+	u16 negative = 0;
 
 	for (i = 0; i < HX_PIXELS; i++) {
 		s32 safe = algo->safe_baseline_q8[i] >>
@@ -67,7 +69,13 @@ void hx_safe_baseline_buffer_comparison(struct hx_algo *algo,
 			SHRT_MIN, SHRT_MAX);
 		algo->safe_bl2raw_dif[i] = clamp_t(s32, sample - safe,
 			SHRT_MIN, SHRT_MAX);
+		if (i && algo->safe_bl2raw_dif[i] > algo->baseline_peak_threshold)
+			positive++;
+		if (i && algo->safe_bl2raw_dif[i] < -algo->baseline_peak_threshold)
+			negative++;
 	}
+	algo->safe_current_positive_nodes = positive;
+	algo->safe_current_negative_nodes = negative;
 	bl2bl_common = clamp_t(s32,
 		hx_safe_diff_common(algo->safe_bl2bl_dif), SHRT_MIN, SHRT_MAX);
 	bl2raw_common = clamp_t(s32,

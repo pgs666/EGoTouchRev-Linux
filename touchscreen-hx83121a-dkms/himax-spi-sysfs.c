@@ -420,9 +420,11 @@ static ssize_t diagnostics_show(struct device *dev,
 			     a->runtime_blreset_count,
 			     a->runtime_blreset_suppressed_count);
 	len += sysfs_emit_at(buf, len,
-			     "safe_abnormal_max=%u safe_abnormal_min=%u ",
+			     "safe_abnormal_max=%u safe_abnormal_min=%u safe_current_positive=%u safe_current_negative=%u ",
 			     a->baseline_safe_abnormal_max_count,
-			     a->baseline_safe_abnormal_min_count);
+			     a->baseline_safe_abnormal_min_count,
+			     a->safe_current_positive_nodes,
+			     a->safe_current_negative_nodes);
 	len += sysfs_emit_at(buf, len,
 			     "safe_reset_debounce=%u safe_invalid_frames=%u safe_side_sync=%u safe_side_frames=%u safe_signal_stable=%u safe_valid_touches=%u safe_abnormal_touches=%u ",
 			     a->safe_reset_in_debounce,

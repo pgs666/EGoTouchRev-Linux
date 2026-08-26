@@ -431,6 +431,8 @@ struct hx_algo {
 	u32 baseline_safe_side_reset_count;
 	u32 baseline_safe_abnormal_max_count;
 	u32 baseline_safe_abnormal_min_count;
+	u16 safe_current_positive_nodes;
+	u16 safe_current_negative_nodes;
 	u32 noise_frame_hold_count;
 #endif
 
