@@ -317,13 +317,21 @@ static bool hx_runtime_compare_triggered(struct hx_algo *algo, const u16 *raw,
 
 bool hx_safe_baseline_can_recover(const struct hx_algo *algo)
 {
+	u8 i;
 	if (!algo->safe_baseline_count)
 		return true; /* Legacy/test state with a directly installed safe BL. */
-	if (algo->safe_baseline_selected >= HX_SAFE_BASELINE_SLOTS)
-		return false;
-	return algo->safe_baselines[algo->safe_baseline_selected].valid &&
+	if (algo->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS &&
+	    algo->safe_baselines[algo->safe_baseline_selected].valid &&
+	    !algo->safe_baselines[algo->safe_baseline_selected].reset_pending &&
 	       algo->safe_baselines[algo->safe_baseline_selected].confidence >=
-		HX_SAFE_BASELINE_CONFIRMED;
+		HX_SAFE_BASELINE_CONFIRMED)
+		return true;
+	for (i = 0; i < HX_SAFE_BASELINE_SLOTS; i++)
+		if (algo->safe_baselines[i].valid &&
+		    !algo->safe_baselines[i].reset_pending &&
+		    algo->safe_baselines[i].confidence >= HX_SAFE_BASELINE_CONFIRMED)
+			return true;
+	return false;
 }
 
 bool hx_algo_runtime_baseline_process(struct hx_algo *algo, const u16 *raw,
@@ -370,6 +378,8 @@ bool hx_algo_runtime_baseline_process(struct hx_algo *algo, const u16 *raw,
 	 * behaviour missing from the original two-slot implementation. */
 	if (algo->safe_baseline_count > 1)
 		hx_safe_baseline_select_for_raw(algo, raw);
+	if (!hx_safe_baseline_can_recover(algo))
+		hx_safe_baseline_promote_latest_confirmed(algo);
 	hx_safe_baseline_buffer_comparison(algo, raw);
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	algo->diag_baseline_compare_triggers++;

@@ -8,6 +8,7 @@ void hx_copy_raw_to_baseline(s32 *baseline, const u16 *raw);
 void hx_safe_baseline_bootstrap(struct hx_algo *algo, const s32 *baseline_q8);
 void hx_safe_baseline_commit(struct hx_algo *algo, const s32 *baseline_q8);
 void hx_safe_baseline_select_for_raw(struct hx_algo *algo, const u16 *raw);
+bool hx_safe_baseline_promote_latest_confirmed(struct hx_algo *algo);
 bool hx_safe_baseline_can_recover(const struct hx_algo *algo);
 void hx_restore_working_from_safe(struct hx_algo *algo, s32 common,
 				  bool touch_hold, bool touch_seen);

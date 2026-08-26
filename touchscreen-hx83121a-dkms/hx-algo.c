@@ -397,6 +397,30 @@ void hx_safe_baseline_reset_selected(struct hx_algo *algo)
 #endif
 }
 
+bool hx_safe_baseline_promote_latest_confirmed(struct hx_algo *algo)
+{
+	u8 best = HX_SAFE_BASELINE_SLOTS;
+	u32 generation = 0;
+	u8 i;
+
+	for (i = 0; i < HX_SAFE_BASELINE_SLOTS; i++) {
+		struct hx_safe_baseline_entry *entry = &algo->safe_baselines[i];
+
+		if (!entry->valid || entry->reset_pending ||
+		    entry->confidence < HX_SAFE_BASELINE_CONFIRMED)
+			continue;
+		if (best == HX_SAFE_BASELINE_SLOTS ||
+		    entry->generation > generation) {
+			best = i;
+			generation = entry->generation;
+		}
+	}
+	if (best == HX_SAFE_BASELINE_SLOTS)
+		return false;
+	hx_safe_baseline_select_slot(algo, best);
+	return true;
+}
+
 void hx_safe_baseline_bootstrap(struct hx_algo *algo, const s32 *baseline_q8)
 {
 	struct hx_safe_baseline_entry *entry;
@@ -660,7 +684,11 @@ void hx_safe_baseline_select_for_raw(struct hx_algo *algo, const u16 *raw)
 		if (score > algo->wake_max_unstable_nodes)
 			continue;
 		if (score < best_score ||
-		    (score == best_score && entry->confidence > best_confidence)) {
+		    (score == best_score &&
+		     (entry->confidence > best_confidence ||
+		      (entry->confidence == best_confidence &&
+		       (best == HX_SAFE_BASELINE_SLOTS ||
+			entry->generation > algo->safe_baselines[best].generation))))) {
 			best_confidence = entry->confidence;
 			best_score = score;
 			best = slot;
