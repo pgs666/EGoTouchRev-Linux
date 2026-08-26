@@ -35,6 +35,8 @@ hx_safe_baseline_reset_policy(struct hx_algo *algo,
 			      enum hx_safe_compare_result result,
 			      bool side_abnormal,
 			      enum hx_finger_state finger_state);
+bool hx_safe_baseline_reset_statistics(struct hx_algo *algo,
+						 u16 reason_mask, bool safe_raw_checked);
 s64 hx_dist2_predicted(const struct input_mt_pos *position,
 			const struct hx_track *track);
 

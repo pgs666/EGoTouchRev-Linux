@@ -1518,6 +1518,20 @@ static void test_safe_buffer_comparison_tracks_common_mode(void)
 	assert(algo.safe_bl2raw_dif_cmf[100] == 0);
 }
 
+static void test_safe_reset_statistics_decay_and_trigger(void)
+{
+	struct hx_algo algo = {};
+
+	hx_algo_init_defaults(&algo);
+	algo.safe_reset_reason_trigger_frames = 3;
+	assert(!hx_safe_baseline_reset_statistics(&algo, 1U << 5, false));
+	assert(!hx_safe_baseline_reset_statistics(&algo, 1U << 5, false));
+	assert(hx_safe_baseline_reset_statistics(&algo, 1U << 5, false));
+	assert(algo.safe_reset_reason_mask & (1U << 5));
+	hx_safe_baseline_reset_statistics(&algo, 0, false);
+	assert(algo.safe_reset_reason_frames[5] == 2);
+}
+
 void run_detection_tests(void)
 {
 	test_strongest_candidates_survive();
@@ -1576,4 +1590,5 @@ void run_detection_tests(void)
 	test_safe_reset_policy_debounces_and_separates_side_reset();
 	test_safe_side_postprocess_restores_after_release();
 	test_safe_buffer_comparison_tracks_common_mode();
+	test_safe_reset_statistics_decay_and_trigger();
 }

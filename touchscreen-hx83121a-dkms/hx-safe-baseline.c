@@ -9,6 +9,40 @@
 
 #include "hx-algo-internal.h"
 
+bool hx_safe_baseline_reset_statistics(struct hx_algo *algo,
+						 u16 reason_mask, bool safe_raw_checked)
+{
+	bool triggered = false;
+	int i;
+
+	for (i = 0; i < 10; i++) {
+		u16 bit = (u16)(1U << i);
+		u16 *frames = &algo->safe_reset_reason_frames[i];
+
+		if (reason_mask & bit) {
+			*frames = min_t(u16, *frames + 1,
+					U16_MAX);
+		} else if (*frames) {
+			/* ResetStatisticsUnit decays by the frame interval when the
+			 * corresponding abnormal bit is no longer asserted. */
+			*frames = *frames > 1 ? *frames - 1 : 0;
+		}
+		if (*frames >= max_t(u16,
+			algo->safe_reset_reason_trigger_frames, 1))
+			triggered = true;
+	}
+	algo->safe_reset_reason_mask = 0;
+	for (i = 0; i < 10; i++)
+		if (algo->safe_reset_reason_frames[i] >= max_t(u16,
+			algo->safe_reset_reason_trigger_frames, 1))
+			algo->safe_reset_reason_mask |= (u16)(1U << i);
+	/* A checked raw frame suppresses destructive reset until the queue has
+	 * either supplied a replacement or all reason counters agree. */
+	if (safe_raw_checked && algo->safe_reset_reason_mask)
+		return false;
+	return triggered;
+}
+
 bool hx_safe_baseline_raw_matches_selected(const struct hx_algo *algo,
 						 const u16 *raw)
 {
@@ -131,6 +165,18 @@ hx_safe_baseline_reset_policy(struct hx_algo *algo,
 			      enum hx_finger_state finger_state)
 {
 	u8 required = max_t(u8, algo->runtime_blreset_confirm_frames, 1);
+	u16 reasons = 0;
+
+	if (result == HX_SAFE_COMPARE_BOTH_INVALID)
+		reasons |= (u16)(1U << 5);
+	if (side_abnormal)
+		reasons |= (u16)(1U << 9);
+	if (algo->safe_current_negative_nodes > algo->wake_max_unstable_nodes)
+		reasons |= (u16)(1U << 7);
+	if (algo->safe_current_positive_nodes > algo->wake_max_unstable_nodes)
+		reasons |= (u16)(1U << 6);
+	hx_safe_baseline_reset_statistics(algo, reasons,
+		result != HX_SAFE_COMPARE_BOTH_INVALID);
 
 	/* IsResetInDebounce: never invalidate recovery authority from a single
 	 * bad raw frame.  A clean or merely ambiguous comparison cancels the

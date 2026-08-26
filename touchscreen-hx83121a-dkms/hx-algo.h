@@ -327,6 +327,11 @@ struct hx_algo {
 	u8 safe_signal_stable_frames;
 	u8 safe_valid_touch_count;
 	u8 safe_abnormal_touch_count;
+	u16 safe_current_positive_nodes;
+	u16 safe_current_negative_nodes;
+	u16 safe_reset_reason_frames[10];
+	u16 safe_reset_reason_mask;
+	u16 safe_reset_reason_trigger_frames;
 	u16 runtime_blreset_cooldown_frames;
 	bool baseline_prev_had_signal;
 	bool baseline_had_freeze;
@@ -431,8 +436,6 @@ struct hx_algo {
 	u32 baseline_safe_side_reset_count;
 	u32 baseline_safe_abnormal_max_count;
 	u32 baseline_safe_abnormal_min_count;
-	u16 safe_current_positive_nodes;
-	u16 safe_current_negative_nodes;
 	u32 noise_frame_hold_count;
 #endif
 

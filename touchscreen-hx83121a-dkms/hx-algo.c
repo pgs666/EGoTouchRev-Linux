@@ -218,6 +218,10 @@ static void hx_algo_clear_transient_state(struct hx_algo *algo)
 	algo->safe_abnormal_touch_count = 0;
 	algo->safe_current_positive_nodes = 0;
 	algo->safe_current_negative_nodes = 0;
+	memset(algo->safe_reset_reason_frames, 0,
+	       sizeof(algo->safe_reset_reason_frames));
+	algo->safe_reset_reason_mask = 0;
+	algo->safe_reset_reason_trigger_frames = 5;
 	algo->runtime_blreset_cooldown_frames = 0;
 }
 
@@ -271,6 +275,10 @@ void hx_algo_full_reset(struct hx_algo *algo)
 	algo->safe_abnormal_touch_count = 0;
 	algo->safe_current_positive_nodes = 0;
 	algo->safe_current_negative_nodes = 0;
+	memset(algo->safe_reset_reason_frames, 0,
+	       sizeof(algo->safe_reset_reason_frames));
+	algo->safe_reset_reason_mask = 0;
+	algo->safe_reset_reason_trigger_frames = 5;
 	algo->runtime_blreset_cooldown_frames = 0;
 	algo->baseline_prev_had_signal = false;
 	algo->baseline_had_freeze = false;
