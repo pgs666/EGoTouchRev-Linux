@@ -35,6 +35,43 @@ struct input_mt_pos { int x; int y; };
 #define HX_MAX_PALM_BOXES 8
 #define HX_ASSIGN_COLS (HIMAX_MAX_TOUCH * 2)
 #define HX_BASELINE_HIST_BINS 2048
+#define HX_BASELINE_COMPARE_REGIONS 5
+#define HX_SAFE_BASELINE_SLOTS 5
+#define HX_BASELINE_FRACTION_BITS 8
+#define HX_BASELINE_CLEAN_LOCAL_THRESHOLD 100
+#define HX_BASELINE_CLEAN_MAX_NODES 3
+
+enum hx_safe_baseline_confidence {
+	HX_SAFE_BASELINE_EMPTY,
+	HX_SAFE_BASELINE_BOOTSTRAP,
+	HX_SAFE_BASELINE_CONFIRMED,
+	HX_SAFE_BASELINE_CROSS_WAKE,
+};
+
+struct hx_safe_baseline_entry {
+	s32 baseline_q8[HX_PIXELS];
+	u32 generation;
+	u32 screen_epoch;
+	u32 captured_frame;
+	u8 confidence;
+	bool valid;
+};
+
+enum hx_safe_compare_result {
+	HX_SAFE_COMPARE_NOT_RUN,
+	HX_SAFE_COMPARE_WORKING_BETTER,
+	HX_SAFE_COMPARE_SAFE_BETTER,
+	HX_SAFE_COMPARE_BOTH_VALID,
+	HX_SAFE_COMPARE_BOTH_INVALID,
+	HX_SAFE_COMPARE_AMBIGUOUS,
+};
+
+enum hx_baseline_guard_state {
+	HX_BASELINE_GUARD_NORMAL,
+	HX_BASELINE_GUARD_PROTECTED,
+	HX_BASELINE_GUARD_RELEASE_SETTLE,
+	HX_BASELINE_GUARD_CLEAN_QUALIFY,
+};
 
 /* Maximum simultaneous reported contacts. */
 #define HIMAX_MAX_TOUCH 10
@@ -166,8 +203,9 @@ struct hx_palm_box {
 /**
  * struct hx_algo - all algorithm state, allocated once in probe.
  *
- * Memory budget: ~64 KB with three baseline grids.  Never allocate on the
- * kernel stack.
+ * Memory budget: ~112 KB with five historical grids plus the live, selected
+ * safe and candidate baselines.  Allocate with a vmalloc fallback and never
+ * place this structure on the kernel stack.
  */
 struct hx_algo {
 	/* ---- Frame buffers ---- */
@@ -202,28 +240,82 @@ struct hx_algo {
 
 	/* ---- Per-cell adaptive baseline (Q8 fixed point) ---- */
 	s32 baseline_q8[HX_PIXELS];
-	/* Windows keeps several validated baselines instead of treating the
-	 * currently-learning grid as authoritative across every screen cycle.
-	 * Keep the minimum useful subset here: last committed safe data, a wake
-	 * candidate, and baseline_q8 as the live/working copy.
+	/* Keep the selected safe baseline as a hot working copy.  The five-entry
+	 * store preserves independently qualified history without making the
+	 * per-frame path compare every saved grid.
 	 */
 	s32 safe_baseline_q8[HX_PIXELS];
 	s32 wake_candidate_q8[HX_PIXELS];
+	struct hx_safe_baseline_entry safe_baselines[HX_SAFE_BASELINE_SLOTS];
 	u8  baseline_release_hold[HX_PIXELS];
 	u16 baseline_hist[HX_BASELINE_HIST_BINS];
 	bool baseline_initialized;
 	bool safe_baseline_valid;
+	u8 safe_baseline_count;
+	u8 safe_baseline_selected;
+	u8 safe_baseline_next;
+	u32 safe_baseline_generation;
+	u32 screen_epoch;
+	u32 frame_sequence;
 	bool wake_qualifying;
 	bool wake_candidate_valid;
 	bool wake_needs_double_confirm;
 	u8 wake_candidate_frames;
 	u8 wake_finger_frames;
+	u8 wake_finger_reject_frames;
+	s32 wake_finger_common_sum;
+	s32 wake_finger_common_last;
+	bool wake_raw_finger_override;
+	u8 wake_raw_finger_release_frames;
 	u8 safe_no_finger_frames;
+	bool safe_candidate_armed;
+	bool safe_candidate_confirming;
+	u32 safe_candidate_screen_epoch;
+	s32 safe_confirm_common_sum;
+	s32 safe_confirm_common_last;
+	u8 runtime_safe_improvement_frames;
+	u8 runtime_safe_regression_frames;
+	u16 runtime_blreset_cooldown_frames;
 	bool baseline_prev_had_signal;
 	bool baseline_had_freeze;
 	u8 baseline_recovery_frames;
+	/* BLSM stage-0 equivalent: require a stable no-touch interval before
+	 * allowing BLIIR-style per-cell baseline tracking.
+	 */
+	u8 baseline_no_touch_stable_frames;
+	bool baseline_touch_hold;
+	bool baseline_touch_seen;
+	bool baseline_held_in_hand;
+	bool baseline_reacquire_pending;
+	u8 baseline_touch_release_frames;
+	u8 baseline_guard_state;
+	u8 baseline_guard_clean_frames;
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	enum hx_safe_compare_result diag_safe_compare_result;
+	s32 diag_working_common_shift;
+	s32 diag_safe_common_shift;
+	s32 diag_working_max_positive;
+	s32 diag_working_max_negative;
+	s32 diag_safe_max_positive;
+	s32 diag_safe_max_negative;
+	u16 diag_working_bad_nodes;
+	u16 diag_safe_bad_nodes;
+	u16 diag_working_negative_nodes;
+	u16 diag_safe_negative_nodes;
+	u16 diag_working_line_noise;
+	u16 diag_safe_line_noise;
+	u16 diag_touch_mask_nodes;
+	u16 diag_working_masked_bad_nodes;
+	u16 diag_safe_masked_bad_nodes;
+	u16 diag_working_region_bad[HX_BASELINE_COMPARE_REGIONS];
+	u16 diag_safe_region_bad[HX_BASELINE_COMPARE_REGIONS];
+	u8 diag_safe_improvement_frames;
+	u8 diag_safe_regression_frames;
+	bool diag_blreset_recommended;
+	u32 diag_baseline_compare_triggers;
+	u32 diag_baseline_compare_runs;
+	u32 diag_blreset_recommendation_count;
 	/* Read-only pipeline snapshot for diagnosing hardware-only dropouts. */
 	u32 diag_frame_seq;
 	s32 diag_common_diff;
@@ -251,7 +343,30 @@ struct hx_algo {
 	u32 wake_safe_fallback_count;
 	u32 wake_baseline_commit_count;
 	u32 wake_safe_divergence_count;
+	u32 wake_finger_mask_accept_count;
+	u32 wake_finger_mask_reject_count;
+	u32 wake_finger_degraded_fallback_count;
+	u32 wake_raw_finger_inferred_count;
+	u32 wake_raw_finger_release_count;
+	u32 wake_ambiguous_safe_fallback_count;
+	u32 wake_safe_preserved_count;
+	u32 wake_clean_safe_restore_count;
 	u32 baseline_safe_commit_count;
+	u32 baseline_safe_confirm_count;
+	u32 baseline_safe_temporal_reject_count;
+	u32 baseline_safe_spatial_reject_count;
+	u32 baseline_safe_negative_reject_count;
+	u32 baseline_safe_range_reject_count;
+	u32 baseline_safe_dedup_count;
+	u32 baseline_safe_eviction_count;
+	u32 runtime_blreset_count;
+	u32 runtime_blreset_suppressed_count;
+	u32 baseline_touch_hold_count;
+	u32 baseline_touch_release_count;
+	u32 baseline_guard_restart_count;
+	u32 baseline_spatial_update_count;
+	u32 baseline_spatial_block_count;
+	u32 baseline_safe_clamp_count;
 	u32 noise_frame_hold_count;
 #endif
 
@@ -275,6 +390,9 @@ struct hx_algo {
 	/* ---- Tunable parameters (sysfs-writable, atomically updated) ---- */
 	/* Preprocessing */
 	bool baseline_enabled;
+	/* Set for the wake qualification frame: it is consumed by the tracker
+	 * exactly once, but must not also advance baseline learning. */
+	bool baseline_update_suppressed_once;
 	u16  baseline_initial;
 	s16  baseline_noise_deadband;
 	s16  baseline_positive_deadband;
@@ -300,6 +418,9 @@ struct hx_algo {
 	u16  wake_max_unstable_nodes;
 	u8   wake_max_unstable_line_nodes;
 	u8   safe_commit_no_finger_frames;
+	bool runtime_blreset_enabled;
+	u8   runtime_blreset_confirm_frames;
+	u16  runtime_blreset_cooldown;
 	s16  runtime_noise_threshold;
 	u8   runtime_noise_line_nodes;
 	u16  runtime_noise_total_nodes;
@@ -392,6 +513,7 @@ enum hx_wake_quality_result {
 	HX_WAKE_QUALITY_READY = 1,
 	HX_WAKE_QUALITY_USING_SAFE = 2,
 	HX_WAKE_QUALITY_PROTECTED = 3,
+	HX_WAKE_QUALITY_USING_WORKING = 4,
 };
 
 /* ---- Public API ---- */
@@ -402,7 +524,13 @@ void hx_algo_full_reset(struct hx_algo *algo);
 void hx_algo_begin_wake(struct hx_algo *algo);
 int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
 			       enum hx_finger_state finger_state);
+enum hx_finger_state
+hx_algo_resolve_finger_state(struct hx_algo *algo, const u16 *raw,
+			     enum hx_finger_state firmware_state);
 bool hx_algo_is_exception_frame(struct hx_algo *algo, const u16 *raw);
+bool hx_algo_runtime_baseline_process(struct hx_algo *algo, const u16 *raw,
+				      enum hx_finger_state finger_state,
+				      bool force);
 int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
 				enum hx_finger_state finger_state);
 

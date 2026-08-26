@@ -66,8 +66,8 @@ static void hx_filter_track(struct hx_algo *algo, struct hx_track *trk,
 	if (!algo->track_smoothing || !algo->euro_enabled) {
 		trk->x = det->x;
 		trk->y = det->y;
-		trk->filtered_x_q8 = det->x << 8;
-		trk->filtered_y_q8 = det->y << 8;
+		trk->filtered_x_q8 = det->x * (1 << 8);
+		trk->filtered_y_q8 = det->y * (1 << 8);
 		return;
 	}
 
@@ -78,12 +78,14 @@ static void hx_filter_track(struct hx_algo *algo, struct hx_track *trk,
 			 min_t(s32, speed, algo->euro_speed_threshold) /
 			 algo->euro_speed_threshold;
 	alpha = clamp_t(s32, alpha, 1, 255);
-	trk->deriv_x_q8 += (alpha * ((dx << 8) - trk->deriv_x_q8)) >> 8;
-	trk->deriv_y_q8 += (alpha * ((dy << 8) - trk->deriv_y_q8)) >> 8;
+	trk->deriv_x_q8 += (alpha * (dx * (1 << 8) -
+		trk->deriv_x_q8)) >> 8;
+	trk->deriv_y_q8 += (alpha * (dy * (1 << 8) -
+		trk->deriv_y_q8)) >> 8;
 	trk->filtered_x_q8 +=
-		(alpha * ((det->x << 8) - trk->filtered_x_q8)) >> 8;
+		(alpha * (det->x * (1 << 8) - trk->filtered_x_q8)) >> 8;
 	trk->filtered_y_q8 +=
-		(alpha * ((det->y << 8) - trk->filtered_y_q8)) >> 8;
+		(alpha * (det->y * (1 << 8) - trk->filtered_y_q8)) >> 8;
 	trk->x = trk->filtered_x_q8 >> 8;
 	trk->y = trk->filtered_y_q8 >> 8;
 }
@@ -495,8 +497,8 @@ void hx_track_contacts(struct hx_algo *algo,
 		trk->y        = det[j].y;
 		trk->vx       = 0;
 		trk->vy       = 0;
-		trk->filtered_x_q8 = det[j].x << 8;
-		trk->filtered_y_q8 = det[j].y << 8;
+			trk->filtered_x_q8 = det[j].x * (1 << 8);
+			trk->filtered_y_q8 = det[j].y * (1 << 8);
 		if (j < algo->contact_count)
 			trk->signal_sum = algo->contacts[j].signal_sum;
 		trk->reported = trk->debounce == 0 && algo->touch_active;
@@ -585,8 +587,11 @@ int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
 	int i;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	s16 frame_max = 0;
+#endif
 
-	algo->diag_frame_seq++;
+	algo->frame_sequence++;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->diag_frame_seq = algo->frame_sequence;
 #endif
 
 	if (finger_state == HX_FINGER_PRESENT) {

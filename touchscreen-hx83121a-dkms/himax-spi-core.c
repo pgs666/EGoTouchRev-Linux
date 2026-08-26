@@ -468,14 +468,39 @@ static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts)
 				HX_FINGER_ABSENT);
 			if (quality > HX_WAKE_QUALITY_PENDING) {
 				const char *baseline_source = "new baseline";
+				enum hx_finger_state effective_finger;
+				int stable_cnt;
 
 				if (quality == HX_WAKE_QUALITY_USING_SAFE)
 					baseline_source = "last-safe baseline";
 				else if (quality == HX_WAKE_QUALITY_PROTECTED)
 					baseline_source = "protected neutral baseline";
+				else if (quality == HX_WAKE_QUALITY_USING_WORKING)
+					baseline_source = "retained working baseline";
 				dev_info(ts->dev,
 					 "raw producer passed wake quality (%s)\n",
 					 baseline_source);
+				/* Do not throw away the frame that proved a finger-on
+				 * wake safe.  Seed the tracker before IRQ enable so the
+				 * first fresh IRQ completes, rather than starts, normal
+				 * down debounce.  A fast-start contact may be reported
+				 * immediately from this already validated frame.
+				 */
+				effective_finger = hx_algo_resolve_finger_state(
+					ts->algo,
+					(const u16 *)(ts->event_buf +
+						HX_FRAME_HEADER_BYTES),
+					status.has_finger ? HX_FINGER_PRESENT :
+					HX_FINGER_ABSENT);
+				ts->algo->baseline_update_suppressed_once = true;
+				stable_cnt = hx_algo_process_frame_state(ts->algo,
+					/* qualify_wake_frame() already consumed this raw
+					 * grid for wake validation; process it once for
+					 * tracking, without a second baseline update. */
+					(const u16 *)(ts->event_buf +
+					 HX_FRAME_HEADER_BYTES),
+					effective_finger);
+				himax_report_tracked_state(ts, stable_cnt > 0);
 				return 0;
 			}
 			if (quality == HX_WAKE_QUALITY_REJECTED)
@@ -545,6 +570,7 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 	u16 *ptr = (u16 *)(ts->event_buf + OFST);
 	struct hx_algo *algo = ts->algo;
 	struct hx_frame_status frame_status = { 0 };
+	enum hx_finger_state effective_finger;
 	bool master_valid;
 	int read_ret;
 	int stable_cnt;
@@ -607,6 +633,12 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 		himax_trace_record_irq(ts, 0, master_valid, &frame_status, false);
 		goto report;
 	}
+	effective_finger = hx_algo_resolve_finger_state(algo, ptr,
+		frame_status.has_finger ? HX_FINGER_PRESENT : HX_FINGER_ABSENT);
+	/* Classify electrical exceptions against the baseline that was active
+	 * when this frame arrived.  Runtime BLReset must not rewrite that
+	 * reference before the exception decision, otherwise a fault frame can
+	 * be normalized away and bypass the noise-hold/reinit path. */
 	if (hx_algo_is_exception_frame(algo, ptr)) {
 		int recovery_ret;
 
@@ -633,9 +665,12 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 		goto out_unlock;
 	}
 	ts->consecutive_noise_frames = 0;
+	if (hx_algo_runtime_baseline_process(algo, ptr, effective_finger,
+					     false))
+		dev_warn_ratelimited(ts->dev,
+			"restored working baseline from validated safe history\n");
 
-	stable_cnt = hx_algo_process_frame_state(algo, ptr,
-		frame_status.has_finger ? HX_FINGER_PRESENT : HX_FINGER_ABSENT);
+	stable_cnt = hx_algo_process_frame_state(algo, ptr, effective_finger);
 	himax_trace_record_irq(ts, 0, true, &frame_status, false);
 
 report:
@@ -646,12 +681,10 @@ out_unlock:
 	return irq_ret;
 }
 
-#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 static void himax_kvfree_action(void *data)
 {
 	kvfree(data);
 }
-#endif
 
 static int himax_spi_probe(struct spi_device *spi)
 {
@@ -712,9 +745,16 @@ static int himax_spi_probe(struct spi_device *spi)
 		return ret;
 #endif
 
-	ts->algo = devm_kzalloc(ts->dev, sizeof(*ts->algo), GFP_KERNEL);
+	/* Five complete safe-baseline grids make the algorithm state larger than
+	 * a reliable high-order kmalloc.  Permit a vmalloc fallback so a module
+	 * reload cannot fail merely because physical memory is fragmented.
+	 */
+	ts->algo = kvzalloc(sizeof(*ts->algo), GFP_KERNEL);
 	if (!ts->algo)
 		return -ENOMEM;
+	ret = devm_add_action_or_reset(ts->dev, himax_kvfree_action, ts->algo);
+	if (ret)
+		return ret;
 	hx_algo_init_defaults(ts->algo);
 	hx_algo_full_reset(ts->algo);
 

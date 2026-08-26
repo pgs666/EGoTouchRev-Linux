@@ -25,11 +25,852 @@ static s32 hx_baseline_step_q8(s32 delta, u8 shift, s16 max_step)
 	return clamp_t(s32, step_q8, -limit_q8, limit_q8);
 }
 
+enum hx_clean_baseline_quality {
+	HX_CLEAN_BASELINE_GOOD = 0,
+	HX_CLEAN_BASELINE_TEMPORAL,
+	HX_CLEAN_BASELINE_SPATIAL,
+	HX_CLEAN_BASELINE_NEGATIVE,
+	HX_CLEAN_BASELINE_RANGE,
+};
+
+#define HX_RUNTIME_COMPARE_TRIGGER_NODES 8
+#define HX_RUNTIME_COMPARE_SCORE_MARGIN 4
+
+struct hx_baseline_compare_metrics {
+	s32 common;
+	s32 max_positive;
+	s32 max_negative;
+	u16 bad_nodes;
+	u16 negative_nodes;
+	u16 line_noise;
+	u16 masked_bad_nodes;
+	u16 out_of_range;
+	u16 region_bad[HX_BASELINE_COMPARE_REGIONS];
+};
+
+static s32 hx_compare_common_shift(struct hx_algo *algo, const u16 *raw,
+				   const s32 *reference_q8)
+{
+	s64 sum = 0;
+	int common_bin;
+	int common_count = 0;
+	int cumulative = 0;
+	int i;
+
+	memset(algo->baseline_hist, 0, sizeof(algo->baseline_hist));
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample = (s32)le16_to_cpup(raw + i);
+		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
+		int bin = clamp_t(int, (sample - reference + 65536) >> 6,
+				      0, HX_BASELINE_HIST_BINS - 1);
+
+		algo->baseline_hist[bin]++;
+	}
+	for (common_bin = 0; common_bin < HX_BASELINE_HIST_BINS;
+	     common_bin++) {
+		cumulative += algo->baseline_hist[common_bin];
+		if (cumulative >= (HX_PIXELS - 1) / 2)
+			break;
+	}
+	common_bin = min(common_bin, HX_BASELINE_HIST_BINS - 1);
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample = (s32)le16_to_cpup(raw + i);
+		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
+		s32 delta = sample - reference;
+		int bin = clamp_t(int, (delta + 65536) >> 6,
+				      0, HX_BASELINE_HIST_BINS - 1);
+
+		if (bin == common_bin) {
+			sum += delta;
+			common_count++;
+		}
+	}
+
+	return common_count ? (s32)(sum / common_count) : 0;
+}
+
+static int hx_compare_region(int r, int c)
+{
+	if (r < HX_ROWS / 4)
+		return 1; /* top */
+	if (r >= HX_ROWS * 3 / 4)
+		return 2; /* bottom */
+	if (c < HX_COLS / 4)
+		return 3; /* left */
+	if (c >= HX_COLS * 3 / 4)
+		return 4; /* right */
+	return 0; /* centre */
+}
+
+static u16 hx_compare_build_touch_mask(struct hx_algo *algo, const u16 *raw,
+				       s32 working_common, s32 safe_common,
+				       enum hx_finger_state finger_state)
+{
+	u16 masked = 0;
+	int r, c, i;
+
+	memset(algo->zone_map, 0, sizeof(algo->zone_map));
+	if (finger_state != HX_FINGER_PRESENT)
+		return 0;
+
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample = (s32)le16_to_cpup(raw + i);
+		s32 working = algo->baseline_q8[i] >>
+			HX_BASELINE_FRACTION_BITS;
+		s32 safe = algo->safe_baseline_q8[i] >>
+			HX_BASELINE_FRACTION_BITS;
+		s32 residual = max(sample - working - working_common,
+				   sample - safe - safe_common);
+
+		if (residual >= algo->baseline_peak_threshold)
+			algo->zone_map[i] = 1;
+	}
+	for (i = 1; i < HX_PIXELS; i++) {
+		if (algo->zone_map[i] != 1)
+			continue;
+		r = i / HX_COLS;
+		c = i % HX_COLS;
+		for (int dr = -2; dr <= 2; dr++) {
+			int nr = r + dr;
+
+			if (nr < 0 || nr >= HX_ROWS)
+				continue;
+			for (int dc = -2; dc <= 2; dc++) {
+				int nc = c + dc;
+
+				if (nc >= 0 && nc < HX_COLS &&
+				    !algo->zone_map[nr * HX_COLS + nc])
+					algo->zone_map[nr * HX_COLS + nc] = 2;
+			}
+		}
+	}
+	for (i = 1; i < HX_PIXELS; i++)
+		if (algo->zone_map[i])
+			masked++;
+	return masked;
+}
+
+static void hx_compare_one_baseline(struct hx_algo *algo, const u16 *raw,
+				    const s32 *reference_q8, s32 common,
+				    struct hx_baseline_compare_metrics *metrics)
+{
+	u8 row_bad[HX_ROWS] = { 0 };
+	u8 col_bad[HX_COLS] = { 0 };
+	s32 threshold = max_t(s32, algo->wake_raw_jump_threshold * 2,
+				  algo->baseline_peak_threshold);
+	int r, c, i;
+
+	memset(metrics, 0, sizeof(*metrics));
+	metrics->common = common;
+	metrics->max_positive = INT_MIN;
+	metrics->max_negative = INT_MAX;
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample = (s32)le16_to_cpup(raw + i);
+		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
+		s32 local = sample - reference - common;
+
+		metrics->max_positive = max(metrics->max_positive, local);
+		metrics->max_negative = min(metrics->max_negative, local);
+		if (sample < 0x1000 || sample > 0xf000)
+			metrics->out_of_range++;
+		if (abs(local) <= threshold)
+			continue;
+		if (algo->zone_map[i]) {
+			metrics->masked_bad_nodes++;
+			continue;
+		}
+		r = i / HX_COLS;
+		c = i % HX_COLS;
+		metrics->bad_nodes++;
+		metrics->region_bad[hx_compare_region(r, c)]++;
+		row_bad[r]++;
+		col_bad[c]++;
+		if (local < 0)
+			metrics->negative_nodes++;
+	}
+	for (r = 0; r < HX_ROWS; r++)
+		if (row_bad[r] >= algo->wake_max_unstable_line_nodes)
+			metrics->line_noise++;
+	for (c = 0; c < HX_COLS; c++)
+		if (col_bad[c] >= algo->wake_max_unstable_line_nodes)
+			metrics->line_noise++;
+}
+
+static bool hx_compare_metrics_valid(struct hx_algo *algo,
+				     const struct hx_baseline_compare_metrics *m)
+{
+	return !m->out_of_range &&
+	       abs(m->common) <= algo->cmf_max_correction &&
+	       m->bad_nodes <= algo->wake_max_unstable_nodes &&
+	       m->negative_nodes <= algo->wake_max_unstable_nodes &&
+	       !m->line_noise;
+}
+
+static u32 hx_compare_metrics_score(const struct hx_baseline_compare_metrics *m)
+{
+	return m->bad_nodes + m->negative_nodes * 2 + m->line_noise * 8 +
+	       m->out_of_range * 16;
+}
+
+static enum hx_safe_compare_result
+hx_classify_baselines(struct hx_algo *algo,
+		      const struct hx_baseline_compare_metrics *working,
+		      const struct hx_baseline_compare_metrics *safe,
+		      enum hx_finger_state finger_state)
+{
+	bool working_valid = hx_compare_metrics_valid(algo, working);
+	bool safe_valid = hx_compare_metrics_valid(algo, safe);
+	u32 working_score = hx_compare_metrics_score(working);
+	u32 safe_score = hx_compare_metrics_score(safe);
+
+	/* If firmware still sees a finger but the solver reported none, the
+	 * masked region is useful evidence rather than noise: a safe baseline
+	 * that restores a compact positive residual explains the raw frame better
+	 * than a working baseline which has absorbed that contact.  Require the
+	 * candidate baseline to remain valid outside the mask.
+	 */
+	if (finger_state == HX_FINGER_PRESENT) {
+		bool reported = false;
+		int i;
+
+		for (i = 0; i < HIMAX_MAX_TOUCH; i++)
+			if (algo->tracks[i].active && algo->tracks[i].reported) {
+				reported = true;
+				break;
+			}
+		if (reported)
+			goto compare_validity;
+		if (safe_valid && safe->masked_bad_nodes >=
+		    working->masked_bad_nodes + 3)
+			return HX_SAFE_COMPARE_SAFE_BETTER;
+		if (working_valid && working->masked_bad_nodes >=
+		    safe->masked_bad_nodes + 3)
+			return HX_SAFE_COMPARE_WORKING_BETTER;
+	}
+compare_validity:
+	if (working_valid && !safe_valid)
+		return HX_SAFE_COMPARE_WORKING_BETTER;
+	if (safe_valid && !working_valid)
+		return HX_SAFE_COMPARE_SAFE_BETTER;
+	if (!working_valid && !safe_valid)
+		return HX_SAFE_COMPARE_BOTH_INVALID;
+	if (safe_score + HX_RUNTIME_COMPARE_SCORE_MARGIN <= working_score &&
+	    safe->negative_nodes <= working->negative_nodes &&
+	    safe->line_noise <= working->line_noise)
+		return HX_SAFE_COMPARE_SAFE_BETTER;
+	if (working_score + HX_RUNTIME_COMPARE_SCORE_MARGIN <= safe_score &&
+	    working->negative_nodes <= safe->negative_nodes &&
+	    working->line_noise <= safe->line_noise)
+		return HX_SAFE_COMPARE_WORKING_BETTER;
+	if (working_score == safe_score)
+		return HX_SAFE_COMPARE_BOTH_VALID;
+	return HX_SAFE_COMPARE_AMBIGUOUS;
+}
+
+static bool hx_runtime_compare_triggered(struct hx_algo *algo, const u16 *raw,
+					 enum hx_finger_state finger_state)
+{
+	u8 row_negative[HX_ROWS] = { 0 };
+	u8 col_negative[HX_COLS] = { 0 };
+	s64 sum = 0;
+	s32 common;
+	s32 threshold = max_t(s32, algo->wake_raw_jump_threshold * 2,
+				  algo->baseline_peak_threshold);
+	u16 positive = 0;
+	u16 negative = 0;
+	int r, c, i;
+
+	for (i = 1; i < HX_PIXELS; i++)
+		sum += (s32)le16_to_cpup(raw + i) -
+		       (algo->baseline_q8[i] >> HX_BASELINE_FRACTION_BITS);
+	common = (s32)(sum / (HX_PIXELS - 1));
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 local = (s32)le16_to_cpup(raw + i) -
+			(algo->baseline_q8[i] >> HX_BASELINE_FRACTION_BITS) -
+			common;
+
+		if (local > threshold)
+			positive++;
+		else if (local < -threshold) {
+			r = i / HX_COLS;
+			c = i % HX_COLS;
+			row_negative[r]++;
+			col_negative[c]++;
+			negative++;
+		}
+	}
+	if (negative >= HX_RUNTIME_COMPARE_TRIGGER_NODES)
+		return true;
+	for (r = 0; r < HX_ROWS; r++)
+		if (row_negative[r] >= algo->wake_max_unstable_line_nodes)
+			return true;
+	for (c = 0; c < HX_COLS; c++)
+		if (col_negative[c] >= algo->wake_max_unstable_line_nodes)
+			return true;
+	if (finger_state == HX_FINGER_ABSENT &&
+	    positive >= HX_RUNTIME_COMPARE_TRIGGER_NODES)
+		return true;
+	if (finger_state == HX_FINGER_PRESENT) {
+		for (i = 0; i < HIMAX_MAX_TOUCH; i++)
+			if (algo->tracks[i].active && algo->tracks[i].reported)
+				return false;
+		return true;
+	}
+	return false;
+}
+
+bool hx_safe_baseline_can_recover(const struct hx_algo *algo)
+{
+	if (!algo->safe_baseline_count)
+		return true; /* Legacy/test state with a directly installed safe BL. */
+	if (algo->safe_baseline_selected >= HX_SAFE_BASELINE_SLOTS)
+		return false;
+	return algo->safe_baselines[algo->safe_baseline_selected].valid &&
+	       algo->safe_baselines[algo->safe_baseline_selected].confidence >=
+		HX_SAFE_BASELINE_CONFIRMED;
+}
+
+bool hx_algo_runtime_baseline_process(struct hx_algo *algo, const u16 *raw,
+				      enum hx_finger_state finger_state,
+				      bool force)
+{
+	struct hx_baseline_compare_metrics working;
+	struct hx_baseline_compare_metrics safe;
+	enum hx_safe_compare_result result;
+	bool recommended;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	bool was_recommended = algo->diag_blreset_recommended;
+
+	algo->diag_blreset_recommended = false;
+#endif
+	if (!force && algo->runtime_blreset_cooldown_frames) {
+		algo->runtime_blreset_cooldown_frames--;
+		return false;
+	}
+	if (!algo->baseline_initialized || !algo->safe_baseline_valid ||
+	    algo->wake_qualifying) {
+		algo->runtime_safe_improvement_frames = 0;
+		algo->runtime_safe_regression_frames = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->diag_safe_improvement_frames = 0;
+		algo->diag_safe_regression_frames = 0;
+#endif
+		return false;
+	}
+	if (!force && !hx_runtime_compare_triggered(algo, raw, finger_state)) {
+		algo->runtime_safe_improvement_frames = 0;
+		algo->runtime_safe_regression_frames = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->diag_safe_improvement_frames = 0;
+		algo->diag_safe_regression_frames = 0;
+		algo->diag_safe_compare_result = HX_SAFE_COMPARE_NOT_RUN;
+#endif
+		return false;
+	}
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->diag_baseline_compare_triggers++;
+#endif
+
+	working.common = hx_compare_common_shift(algo, raw,
+						algo->baseline_q8);
+	safe.common = hx_compare_common_shift(algo, raw,
+					     algo->safe_baseline_q8);
+	hx_compare_build_touch_mask(algo, raw,
+		working.common, safe.common, finger_state);
+	hx_compare_one_baseline(algo, raw, algo->baseline_q8, working.common,
+				&working);
+	hx_compare_one_baseline(algo, raw, algo->safe_baseline_q8, safe.common,
+				&safe);
+	result = hx_classify_baselines(algo, &working, &safe, finger_state);
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->diag_touch_mask_nodes = 0;
+	for (int i = 1; i < HX_PIXELS; i++)
+		if (algo->zone_map[i])
+			algo->diag_touch_mask_nodes++;
+	algo->diag_safe_compare_result = result;
+	algo->diag_baseline_compare_runs++;
+	algo->diag_working_common_shift = working.common;
+	algo->diag_safe_common_shift = safe.common;
+	algo->diag_working_max_positive = working.max_positive;
+	algo->diag_working_max_negative = working.max_negative;
+	algo->diag_safe_max_positive = safe.max_positive;
+	algo->diag_safe_max_negative = safe.max_negative;
+	algo->diag_working_bad_nodes = working.bad_nodes;
+	algo->diag_safe_bad_nodes = safe.bad_nodes;
+	algo->diag_working_negative_nodes = working.negative_nodes;
+	algo->diag_safe_negative_nodes = safe.negative_nodes;
+	algo->diag_working_line_noise = working.line_noise;
+	algo->diag_safe_line_noise = safe.line_noise;
+	algo->diag_working_masked_bad_nodes = working.masked_bad_nodes;
+	algo->diag_safe_masked_bad_nodes = safe.masked_bad_nodes;
+	memcpy(algo->diag_working_region_bad, working.region_bad,
+	       sizeof(algo->diag_working_region_bad));
+	memcpy(algo->diag_safe_region_bad, safe.region_bad,
+	       sizeof(algo->diag_safe_region_bad));
+#endif
+
+	if (result == HX_SAFE_COMPARE_SAFE_BETTER) {
+		algo->runtime_safe_improvement_frames = min_t(u8,
+			algo->runtime_safe_improvement_frames + 1, U8_MAX);
+		algo->runtime_safe_regression_frames = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->diag_safe_improvement_frames = min_t(u8,
+			algo->diag_safe_improvement_frames + 1, U8_MAX);
+		algo->diag_safe_regression_frames = 0;
+#endif
+	} else if (result == HX_SAFE_COMPARE_WORKING_BETTER) {
+		algo->runtime_safe_regression_frames = min_t(u8,
+			algo->runtime_safe_regression_frames + 1, U8_MAX);
+		algo->runtime_safe_improvement_frames = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->diag_safe_regression_frames = min_t(u8,
+			algo->diag_safe_regression_frames + 1, U8_MAX);
+		algo->diag_safe_improvement_frames = 0;
+#endif
+	} else {
+		algo->runtime_safe_improvement_frames = 0;
+		algo->runtime_safe_regression_frames = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->diag_safe_improvement_frames = 0;
+		algo->diag_safe_regression_frames = 0;
+#endif
+	}
+	recommended = algo->runtime_safe_improvement_frames >=
+		max_t(u8, algo->runtime_blreset_confirm_frames, 1) &&
+		!safe.bad_nodes && !safe.negative_nodes && !safe.line_noise &&
+		!safe.out_of_range && hx_safe_baseline_can_recover(algo);
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->diag_blreset_recommended = recommended;
+	if (algo->diag_blreset_recommended && !was_recommended)
+		algo->diag_blreset_recommendation_count++;
+#endif
+	if (!recommended)
+		return false;
+	if (!algo->runtime_blreset_enabled) {
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->runtime_blreset_suppressed_count++;
+#endif
+		return false;
+	}
+
+	/* The selected safe grid is immutable recovery authority.  Preserve the
+	 * tracker across a baseline correction: clearing it creates an artificial
+	 * UP/DOWN break even when the raw contact remains continuous.  Touch hold
+	 * prevents the fault frame from being learned back into the restored grid.
+	 */
+	hx_restore_working_from_safe(algo, safe.common, true,
+				      finger_state == HX_FINGER_PRESENT);
+	algo->iir_initialized = false;
+	algo->runtime_blreset_cooldown_frames = algo->runtime_blreset_cooldown;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->runtime_blreset_count++;
+	algo->diag_safe_compare_result = result;
+	algo->diag_safe_common_shift = safe.common;
+	algo->diag_blreset_recommended = false;
+#endif
+	return true;
+}
+
+static void hx_clean_baseline_reset(struct hx_algo *algo)
+{
+	algo->safe_no_finger_frames = 0;
+	algo->safe_candidate_confirming = false;
+	algo->safe_candidate_screen_epoch = 0;
+	algo->safe_confirm_common_sum = 0;
+	algo->safe_confirm_common_last = 0;
+}
+
+static void hx_clean_baseline_record_reject(struct hx_algo *algo,
+					    enum hx_clean_baseline_quality quality)
+{
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	switch (quality) {
+	case HX_CLEAN_BASELINE_TEMPORAL:
+		algo->baseline_safe_temporal_reject_count++;
+		break;
+	case HX_CLEAN_BASELINE_SPATIAL:
+		algo->baseline_safe_spatial_reject_count++;
+		break;
+	case HX_CLEAN_BASELINE_NEGATIVE:
+		algo->baseline_safe_negative_reject_count++;
+		break;
+	case HX_CLEAN_BASELINE_RANGE:
+		algo->baseline_safe_range_reject_count++;
+		break;
+	case HX_CLEAN_BASELINE_GOOD:
+		break;
+	}
+#endif
+}
+
+/* Compare one complete raw grid with a Q8 baseline after removing a robust
+ * panel-wide common shift.  Sparse positive residuals indicate a latent touch
+ * or display island; persistent negative residuals are tracked separately
+ * because Windows BLReset treats them as baseline-trust failures.
+ */
+static enum hx_clean_baseline_quality
+hx_clean_raw_quality(struct hx_algo *algo, const u16 *raw,
+		     const s32 *reference_q8, s32 threshold, s32 *common_out)
+{
+	u8 row_bad[HX_ROWS] = { 0 };
+	u8 col_bad[HX_COLS] = { 0 };
+	u8 row_negative[HX_ROWS] = { 0 };
+	u8 col_negative[HX_COLS] = { 0 };
+	s64 common_sum = 0;
+	s32 common;
+	u16 out_of_range = 0;
+	u16 bad = 0;
+	u16 negative = 0;
+	int common_bin;
+	int common_count = 0;
+	int cumulative = 0;
+	int r, c, i;
+
+	memset(algo->baseline_hist, 0, sizeof(algo->baseline_hist));
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample = (s32)le16_to_cpup(raw + i);
+		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
+		int bin;
+
+		if (sample < 0x1000 || sample > 0xf000)
+			out_of_range++;
+		bin = clamp_t(int, (sample - reference + 65536) >> 6,
+				  0, HX_BASELINE_HIST_BINS - 1);
+		algo->baseline_hist[bin]++;
+	}
+	/* A safe baseline is a recovery authority, not a best-effort runtime
+	 * frame.  Do not persist even a small number of electrically impossible
+	 * cells across the next screen cycle.
+	 */
+	if (out_of_range)
+		return HX_CLEAN_BASELINE_RANGE;
+	for (common_bin = 0; common_bin < HX_BASELINE_HIST_BINS;
+	     common_bin++) {
+		cumulative += algo->baseline_hist[common_bin];
+		if (cumulative >= (HX_PIXELS - 1) / 2)
+			break;
+	}
+	common_bin = min(common_bin, HX_BASELINE_HIST_BINS - 1);
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample = (s32)le16_to_cpup(raw + i);
+		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
+		s32 delta = sample - reference;
+		int bin = clamp_t(int, (delta + 65536) >> 6, 0,
+				      HX_BASELINE_HIST_BINS - 1);
+
+		if (bin == common_bin) {
+			common_sum += delta;
+			common_count++;
+		}
+	}
+	if (!common_count)
+		return HX_CLEAN_BASELINE_TEMPORAL;
+	common = (s32)(common_sum / common_count);
+	if (abs(common) > algo->cmf_max_correction)
+		return HX_CLEAN_BASELINE_TEMPORAL;
+
+	threshold = max_t(s32, threshold, 1);
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample = (s32)le16_to_cpup(raw + i);
+		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
+		s32 local = sample - reference - common;
+
+		if (abs(local) <= threshold)
+			continue;
+		r = i / HX_COLS;
+		c = i % HX_COLS;
+		row_bad[r]++;
+		col_bad[c]++;
+		bad++;
+		if (local < 0) {
+			row_negative[r]++;
+			col_negative[c]++;
+			negative++;
+		}
+	}
+	if (negative > algo->wake_max_unstable_nodes)
+		return HX_CLEAN_BASELINE_NEGATIVE;
+	for (r = 0; r < HX_ROWS; r++)
+		if (row_negative[r] >= algo->wake_max_unstable_line_nodes)
+			return HX_CLEAN_BASELINE_NEGATIVE;
+	for (c = 0; c < HX_COLS; c++)
+		if (col_negative[c] >= algo->wake_max_unstable_line_nodes)
+			return HX_CLEAN_BASELINE_NEGATIVE;
+	if (bad > algo->wake_max_unstable_nodes)
+		return HX_CLEAN_BASELINE_SPATIAL;
+	for (r = 0; r < HX_ROWS; r++)
+		if (row_bad[r] >= algo->wake_max_unstable_line_nodes)
+			return HX_CLEAN_BASELINE_SPATIAL;
+	for (c = 0; c < HX_COLS; c++)
+		if (col_bad[c] >= algo->wake_max_unstable_line_nodes)
+			return HX_CLEAN_BASELINE_SPATIAL;
+
+	*common_out = common;
+	return HX_CLEAN_BASELINE_GOOD;
+}
+
+static void hx_clean_baseline_start(struct hx_algo *algo, const u16 *raw)
+{
+	hx_copy_raw_to_baseline(algo->wake_candidate_q8, raw);
+	algo->safe_no_finger_frames = 1;
+	algo->safe_candidate_confirming = false;
+	algo->safe_candidate_screen_epoch = algo->screen_epoch;
+	algo->safe_confirm_common_sum = 0;
+	algo->safe_confirm_common_last = 0;
+}
+
+static void hx_clean_baseline_accumulate(struct hx_algo *algo,
+					 const u16 *raw)
+{
+	u8 count = min_t(u8, algo->safe_no_finger_frames + 1, U8_MAX);
+	int i;
+
+	for (i = 0; i < HX_PIXELS; i++) {
+		s32 sample_q8 = (s32)le16_to_cpup(raw + i) <<
+				HX_BASELINE_FRACTION_BITS;
+		s32 delta = sample_q8 - algo->wake_candidate_q8[i];
+
+		algo->wake_candidate_q8[i] += delta / count;
+	}
+	algo->safe_no_finger_frames = count;
+}
+
+static void hx_clean_baseline_process(struct hx_algo *algo, const u16 *raw)
+{
+	enum hx_clean_baseline_quality quality;
+	s32 common = 0;
+	s32 threshold;
+	int i;
+
+	/* A SafeBaseline is meant to be an independent wake-time reference.  Do
+	 * not let ordinary touch/release cycles re-arm and rewrite the selected
+	 * slot in the same screen epoch: that slowly promotes display residuals
+	 * (or a missed contact) into the recovery authority.  A new screen epoch
+	 * is the required independent confirmation window.
+	 */
+	if (algo->safe_baseline_valid &&
+	    algo->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS &&
+	    algo->safe_baselines[algo->safe_baseline_selected].valid &&
+	    algo->safe_baselines[algo->safe_baseline_selected].screen_epoch ==
+		algo->screen_epoch) {
+		algo->safe_candidate_armed = false;
+		hx_clean_baseline_reset(algo);
+		return;
+	}
+
+	if (!algo->safe_no_finger_frames &&
+	    !algo->safe_candidate_confirming) {
+		if (!algo->safe_candidate_armed)
+			return;
+		hx_clean_baseline_start(algo, raw);
+		return;
+	}
+	if (algo->safe_candidate_screen_epoch != algo->screen_epoch) {
+		hx_clean_baseline_reset(algo);
+		hx_clean_baseline_start(algo, raw);
+		return;
+	}
+
+	threshold = algo->safe_candidate_confirming ?
+		max_t(s32, algo->wake_raw_jump_threshold * 2,
+		      algo->baseline_peak_threshold) :
+		algo->wake_raw_jump_threshold;
+	quality = hx_clean_raw_quality(algo, raw, algo->wake_candidate_q8,
+				       threshold, &common);
+	if (quality != HX_CLEAN_BASELINE_GOOD ||
+	    (algo->safe_candidate_confirming &&
+	     algo->safe_no_finger_frames &&
+	     abs(common - algo->safe_confirm_common_last) >
+		algo->wake_raw_jump_threshold)) {
+		if (quality == HX_CLEAN_BASELINE_GOOD)
+			quality = HX_CLEAN_BASELINE_TEMPORAL;
+		hx_clean_baseline_record_reject(algo, quality);
+		hx_clean_baseline_reset(algo);
+		return;
+	}
+
+	if (!algo->safe_candidate_confirming) {
+		hx_clean_baseline_accumulate(algo, raw);
+		if (algo->safe_no_finger_frames <
+		    algo->safe_commit_no_finger_frames)
+			return;
+
+		/* The learning grid may itself have absorbed a persistent anomaly.
+		 * A valid prior safe baseline is therefore the final independent
+		 * reference before starting the confirmation window.
+		 */
+		quality = hx_clean_raw_quality(algo, raw,
+			algo->safe_baseline_valid ? algo->safe_baseline_q8 :
+			algo->baseline_q8,
+			max_t(s32, algo->wake_raw_jump_threshold * 2,
+			      algo->baseline_peak_threshold), &common);
+		if (quality != HX_CLEAN_BASELINE_GOOD) {
+			hx_clean_baseline_record_reject(algo, quality);
+			hx_clean_baseline_reset(algo);
+			return;
+		}
+		algo->safe_candidate_confirming = true;
+		algo->safe_no_finger_frames = 0;
+		algo->safe_confirm_common_sum = 0;
+		algo->safe_confirm_common_last = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->baseline_safe_confirm_count++;
+#endif
+		return;
+	}
+
+	algo->safe_confirm_common_sum += common;
+	algo->safe_confirm_common_last = common;
+	if (algo->safe_no_finger_frames < U8_MAX)
+		algo->safe_no_finger_frames++;
+	if (algo->safe_no_finger_frames < algo->safe_commit_no_finger_frames)
+		return;
+
+	common = algo->safe_confirm_common_sum / algo->safe_no_finger_frames;
+	for (i = 0; i < HX_PIXELS; i++)
+		algo->wake_candidate_q8[i] = clamp_t(s32,
+			algo->wake_candidate_q8[i] +
+			common * (1 << HX_BASELINE_FRACTION_BITS),
+			0, 0xffff << HX_BASELINE_FRACTION_BITS);
+	hx_safe_baseline_commit(algo, algo->wake_candidate_q8);
+	algo->baseline_reacquire_pending = false;
+	algo->safe_candidate_armed = false;
+	hx_clean_baseline_reset(algo);
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->baseline_safe_commit_count++;
+#endif
+}
+
+struct hx_baseline_frame_observation {
+	u16 safe_bad_nodes;
+	u16 safe_negative_nodes;
+	u16 operational_bad_nodes;
+	u16 operational_negative_nodes;
+	u16 out_of_range;
+	u16 line_noise;
+};
+
+static void hx_baseline_observe_frame(struct hx_algo *algo, const u16 *raw,
+				      s32 common_diff,
+				      struct hx_baseline_frame_observation *obs)
+{
+	u8 row_bad[HX_ROWS] = { 0 };
+	u8 col_bad[HX_COLS] = { 0 };
+	int i, r, c;
+
+	memset(obs, 0, sizeof(*obs));
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 sample = (s32)le16_to_cpup(raw + i);
+		s32 baseline = algo->baseline_q8[i] >>
+			HX_BASELINE_FRACTION_BITS;
+		s32 local = sample - baseline - common_diff;
+
+		if (sample < 0x1000 || sample > 0xf000) {
+			obs->out_of_range++;
+			continue;
+		}
+		if (abs(local) > HX_BASELINE_CLEAN_LOCAL_THRESHOLD) {
+			obs->safe_bad_nodes++;
+			if (local < 0)
+				obs->safe_negative_nodes++;
+		}
+		if (abs(local) <= algo->wake_raw_jump_threshold)
+			continue;
+		obs->operational_bad_nodes++;
+		if (local < 0)
+			obs->operational_negative_nodes++;
+		r = i / HX_COLS;
+		c = i % HX_COLS;
+		row_bad[r]++;
+		col_bad[c]++;
+	}
+	for (r = 0; r < HX_ROWS; r++)
+		if (row_bad[r] >= algo->wake_max_unstable_line_nodes)
+			obs->line_noise++;
+	for (c = 0; c < HX_COLS; c++)
+		if (col_bad[c] >= algo->wake_max_unstable_line_nodes)
+			obs->line_noise++;
+}
+
+static bool hx_baseline_guard_process(struct hx_algo *algo, bool frame_clean,
+				      bool touch_evidence)
+{
+	u8 required = max_t(u8, algo->safe_commit_no_finger_frames, 1);
+	if (algo->baseline_reacquire_pending)
+		required = max_t(u8, required, 90);
+
+	/* Windows keeps the held-in-hand path out of ordinary BLIIR updates for
+	 * a substantially longer release qualification.  The short normal guard
+	 * is sufficient for an ordinary touch, but a palm present during screen
+	 * on leaves a slow electrical rebound after lift-off.
+	 */
+	if (algo->baseline_held_in_hand)
+		required = max_t(u8, required, 120);
+
+	if (!algo->baseline_touch_hold) {
+		algo->baseline_guard_state = HX_BASELINE_GUARD_NORMAL;
+		algo->baseline_guard_clean_frames = 0;
+		return false;
+	}
+
+	if (touch_evidence || !frame_clean) {
+		if (algo->baseline_guard_state != HX_BASELINE_GUARD_PROTECTED) {
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+			algo->baseline_guard_restart_count++;
+#endif
+		}
+		algo->baseline_touch_seen = true;
+		algo->baseline_guard_state = HX_BASELINE_GUARD_PROTECTED;
+		algo->baseline_guard_clean_frames = 0;
+		algo->baseline_touch_release_frames = 0;
+		return false;
+	}
+	/* A wake which looked clean from its first frame may still contain a
+	 * stationary broad contact.  Do not age out protection until some
+	 * independent touch/spatial evidence has first been observed.
+	 */
+	if (!algo->baseline_touch_seen)
+		return false;
+
+	if (algo->baseline_guard_state == HX_BASELINE_GUARD_PROTECTED) {
+		algo->baseline_guard_state = HX_BASELINE_GUARD_RELEASE_SETTLE;
+		algo->baseline_guard_clean_frames = 1;
+	} else if (algo->baseline_guard_clean_frames < U8_MAX) {
+		algo->baseline_guard_clean_frames++;
+	}
+	algo->baseline_touch_release_frames =
+		algo->baseline_guard_clean_frames;
+
+	if (algo->baseline_guard_state == HX_BASELINE_GUARD_RELEASE_SETTLE &&
+	    algo->baseline_guard_clean_frames >= required) {
+		algo->baseline_guard_state = HX_BASELINE_GUARD_CLEAN_QUALIFY;
+		algo->baseline_guard_clean_frames = 0;
+		algo->baseline_touch_release_frames = 0;
+		return false;
+	}
+	if (algo->baseline_guard_state != HX_BASELINE_GUARD_CLEAN_QUALIFY ||
+	    algo->baseline_guard_clean_frames < required)
+		return false;
+
+	algo->baseline_touch_hold = false;
+	algo->baseline_touch_seen = false;
+	algo->baseline_held_in_hand = false;
+	algo->baseline_touch_release_frames = 0;
+	algo->baseline_guard_state = HX_BASELINE_GUARD_NORMAL;
+	algo->baseline_guard_clean_frames = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->baseline_touch_release_count++;
+#endif
+	return true;
+}
+
 static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 				      enum hx_finger_state finger_state)
 {
 	s64 common_sum = 0;
+	s64 working_safe_sum_q8 = 0;
 	s32 common_diff;
+	s32 working_safe_common_q8 = 0;
 	s32 max_delta = INT_MIN;
 	int common_bin = 0;
 	int common_count = 0;
@@ -37,6 +878,14 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	bool has_signal = false;
 	bool recovery;
 	bool found_freeze = false;
+	bool touch_hold_released = false;
+	bool safe_frame_clean;
+	bool operational_clean;
+	bool spatial_update_allowed;
+	bool stable_no_touch;
+	bool release_candidate;
+	bool no_active_tracks = true;
+	struct hx_baseline_frame_observation observation;
 	int r, c;
 
 	if (!algo->baseline_initialized) {
@@ -57,6 +906,13 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 		algo->baseline_initialized = true;
 	}
 	memset(algo->baseline_hist, 0, sizeof(algo->baseline_hist));
+	if (algo->safe_baseline_valid) {
+		for (r = 1; r < HX_PIXELS; r++)
+			working_safe_sum_q8 += algo->baseline_q8[r] -
+				algo->safe_baseline_q8[r];
+		working_safe_common_q8 = working_safe_sum_q8 /
+			(HX_PIXELS - 1);
+	}
 
 	/* Estimate panel-wide VCOM/temperature drift before classifying cells. */
 	for (r = 1; r < HX_PIXELS; r++) {
@@ -111,8 +967,57 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 				break;
 			}
 	}
+	hx_baseline_observe_frame(algo, raw, common_diff, &observation);
+	for (r = 0; r < HIMAX_MAX_TOUCH; r++)
+		if (algo->tracks[r].active) {
+			no_active_tracks = false;
+			break;
+		}
+	safe_frame_clean = !observation.out_of_range &&
+		observation.safe_bad_nodes <= HX_BASELINE_CLEAN_MAX_NODES;
+	operational_clean = !observation.out_of_range &&
+		observation.operational_bad_nodes <=
+			algo->wake_max_unstable_nodes &&
+		!observation.line_noise;
+	/* Match BLSM's stage-0 debounce: a single apparently clean frame is
+	 * not enough to authorize per-cell BLIIR tracking.  Touch/noise resets
+	 * the stage; only a stable no-touch run can advance it.
+	 */
+	if (has_signal || !operational_clean)
+		algo->baseline_no_touch_stable_frames = 0;
+	else if (algo->baseline_no_touch_stable_frames < U8_MAX)
+		algo->baseline_no_touch_stable_frames++;
+	stable_no_touch = algo->baseline_no_touch_stable_frames >= 10;
+	/* Firmware no-finger plus no active track is the authoritative release
+	 * indication for a held-in-hand wake.  Residual spatial rebound is the
+	 * reason reacquire exists; it must not keep the guard in PROTECTED forever. */
+	release_candidate = algo->baseline_held_in_hand &&
+		algo->baseline_touch_seen &&
+		finger_state == HX_FINGER_ABSENT && no_active_tracks &&
+		!observation.out_of_range && !observation.line_noise &&
+		observation.safe_bad_nodes <= HX_BASELINE_CLEAN_MAX_NODES;
+	touch_hold_released = hx_baseline_guard_process(algo,
+		release_candidate ? true : operational_clean,
+		release_candidate ? false : has_signal || !operational_clean);
+	/* After a held-in-hand wake, the old no-palm grid may be permanently
+	 * offset even when the release window is clean.  Reacquire one complete
+	 * raw grid at the release boundary instead of letting the ordinary BLIIR
+	 * integrator crawl toward it and potentially absorb residual artifacts. */
+	if (touch_hold_released && algo->baseline_enabled &&
+		(!has_signal || release_candidate) &&
+		(operational_clean || release_candidate)) {
+		algo->baseline_reacquire_pending = true;
+		hx_copy_raw_to_baseline(algo->baseline_q8, raw);
+		algo->baseline_prev_had_signal = false;
+		algo->baseline_had_freeze = false;
+		algo->baseline_recovery_frames = 0;
+		algo->baseline_no_touch_stable_frames = 0;
+	}
+	spatial_update_allowed = !algo->baseline_touch_hold &&
+		operational_clean && !has_signal && stable_no_touch;
 
-	recovery = has_signal && (!algo->baseline_prev_had_signal ||
+	recovery = !algo->baseline_touch_hold && has_signal &&
+		   (!algo->baseline_prev_had_signal ||
 				    !algo->baseline_had_freeze) &&
 		   algo->baseline_recovery_frames <
 				algo->baseline_recovery_max_frames;
@@ -130,8 +1035,30 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 			s32 local = delta - common_diff;
 			s32 step_q8 = 0;
 
-			if (!algo->baseline_enabled) {
+			if (!algo->baseline_enabled ||
+			    algo->baseline_update_suppressed_once) {
 				delta = sample - algo->baseline_initial;
+				goto store;
+			}
+			if (!spatial_update_allowed) {
+				/* Touch, wake protection, or a globally unclean frame may
+				 * follow only a robust panel-wide shift.  No cell is allowed
+				 * to learn the current spatial shape.
+				 */
+				if (abs(common_diff) > algo->baseline_noise_deadband)
+					step_q8 = hx_baseline_step_q8(common_diff,
+						algo->baseline_background_alpha_shift,
+						algo->baseline_background_max_step);
+				algo->baseline_q8[idx] = clamp_t(s32,
+					algo->baseline_q8[idx] + step_q8, 0,
+					0xffff << HX_BASELINE_FRACTION_BITS);
+				delta = local >= algo->baseline_peak_threshold ?
+					local : 0;
+				if (delta) {
+					algo->baseline_release_hold[idx] =
+						algo->baseline_release_hold_frames;
+					found_freeze = true;
+				}
 				goto store;
 			}
 
@@ -189,10 +1116,28 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 					algo->baseline_negative_alpha_shift,
 					algo->baseline_negative_max_step);
 
-			algo->baseline_q8[idx] = clamp_t(s32,
-				algo->baseline_q8[idx] + step_q8, 0,
-				0xffff << HX_BASELINE_FRACTION_BITS);
+			if (algo->safe_baseline_valid &&
+			    hx_safe_baseline_can_recover(algo) && step_q8) {
+				s32 safe_centre = algo->safe_baseline_q8[idx] +
+					working_safe_common_q8;
+				s32 safe_limit = HX_BASELINE_CLEAN_LOCAL_THRESHOLD <<
+					HX_BASELINE_FRACTION_BITS;
+				s32 proposed = algo->baseline_q8[idx] + step_q8;
+				s32 clamped = clamp_t(s32, proposed,
+					safe_centre - safe_limit,
+					safe_centre + safe_limit);
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+				if (clamped != proposed)
+					algo->baseline_safe_clamp_count++;
+#endif
+				algo->baseline_q8[idx] = clamp_t(s32, clamped, 0,
+					0xffff << HX_BASELINE_FRACTION_BITS);
+			} else {
+				algo->baseline_q8[idx] = clamp_t(s32,
+					algo->baseline_q8[idx] + step_q8, 0,
+					0xffff << HX_BASELINE_FRACTION_BITS);
+			}
 			/* Match v1.1.2 ProcessNoFinger/ProcessFinger background
 			 * semantics: only frozen candidate cells reach the solver.
 			 * Passing every local residual fills the fixed zone arena with
@@ -203,60 +1148,44 @@ store:
 			algo->frame[r][c] = clamp_t(s32, delta, SHRT_MIN, SHRT_MAX);
 		}
 	}
+	/* The wake qualification frame is still sent through detection/tracking,
+	 * but cannot become a second baseline-learning sample. */
+	algo->baseline_update_suppressed_once = false;
 	algo->baseline_prev_had_signal = has_signal;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	algo->diag_has_signal = has_signal;
 #endif
 	algo->baseline_had_freeze = found_freeze;
-	if (finger_state == HX_FINGER_ABSENT && !has_signal && !found_freeze) {
-		u8 row_unstable[HX_ROWS] = { 0 };
-		u8 col_unstable[HX_COLS] = { 0 };
-		u16 unstable = 0;
-
-		if (!algo->safe_no_finger_frames) {
-			hx_copy_raw_to_baseline(algo->wake_candidate_q8, raw);
-			algo->safe_no_finger_frames = 1;
-		} else {
-			for (r = 1; r < HX_PIXELS; r++) {
-				s32 candidate = algo->wake_candidate_q8[r] >>
-						HX_BASELINE_FRACTION_BITS;
-				s32 sample = (s32)le16_to_cpup(raw + r);
-
-				if (abs(sample - candidate) >
-				    algo->wake_raw_jump_threshold) {
-					row_unstable[r / HX_COLS]++;
-					col_unstable[r % HX_COLS]++;
-					unstable++;
-				}
-			}
-			for (r = 0; r < HX_ROWS; r++)
-				if (row_unstable[r] >=
-				    algo->wake_max_unstable_line_nodes)
-					unstable = algo->wake_max_unstable_nodes + 1;
-			for (r = 0; r < HX_COLS; r++)
-				if (col_unstable[r] >=
-				    algo->wake_max_unstable_line_nodes)
-					unstable = algo->wake_max_unstable_nodes + 1;
-			if (unstable > algo->wake_max_unstable_nodes) {
-				hx_copy_raw_to_baseline(algo->wake_candidate_q8,
-							raw);
-				algo->safe_no_finger_frames = 1;
-			} else if (algo->safe_no_finger_frames < U8_MAX) {
-				algo->safe_no_finger_frames++;
-			}
-		}
-		if (algo->safe_no_finger_frames >=
-		    algo->safe_commit_no_finger_frames) {
-			memcpy(algo->safe_baseline_q8, algo->wake_candidate_q8,
-			       sizeof(algo->safe_baseline_q8));
-			algo->safe_baseline_valid = true;
-			algo->safe_no_finger_frames = 0;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
-			algo->baseline_safe_commit_count++;
+	if (spatial_update_allowed)
+		algo->baseline_spatial_update_count++;
+	else
+		algo->baseline_spatial_block_count++;
 #endif
-		}
-	} else {
-		algo->safe_no_finger_frames = 0;
+	/* Safe history must never be collected while a safe-backed wake guard is
+	 * active.  A stationary palm can look electrically clean and would
+	 * otherwise gain false confidence.  Also skip the exact release frame;
+	 * cell release-hold protects its rebound before a new candidate starts.
+	 */
+	if (algo->baseline_touch_hold || touch_hold_released) {
+		if (has_signal || finger_state == HX_FINGER_PRESENT)
+			algo->safe_candidate_armed = true;
+		hx_clean_baseline_reset(algo);
+	} else if (safe_frame_clean && finger_state == HX_FINGER_ABSENT &&
+		   !has_signal && !found_freeze)
+		hx_clean_baseline_process(algo, raw);
+	else {
+		if (!safe_frame_clean && (algo->safe_no_finger_frames ||
+		    algo->safe_candidate_confirming))
+			hx_clean_baseline_record_reject(algo,
+				observation.safe_negative_nodes >
+					HX_BASELINE_CLEAN_MAX_NODES ?
+				HX_CLEAN_BASELINE_NEGATIVE :
+				HX_CLEAN_BASELINE_SPATIAL);
+		if (!safe_frame_clean || has_signal ||
+		    finger_state == HX_FINGER_PRESENT)
+			algo->safe_candidate_armed = true;
+		hx_clean_baseline_reset(algo);
 	}
 
 	/* pixel [0][0] is always invalid on this panel layout */

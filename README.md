@@ -19,7 +19,9 @@
 
 实现边界与并发约束见 [驱动架构](docs/architecture.md)，已审计的热路径与待验证候选
 见 [性能审计](docs/performance.md)，后续选择性移植顺序见
-[逆向证据与移植路线图](docs/windows-porting-roadmap.md)。
+[逆向证据与移植路线图](docs/windows-porting-roadmap.md)。若未来把完整 raw matrix 求解
+迁移到 native daemon，接口边界、实时性和 fallback 要求见
+[触控算法 Offload 架构参考](docs/touch-offload.md)。
 
 ## 仓库结构
 
@@ -125,10 +127,3 @@ make check
 充电/未充电、快速边缘手势和多指交叉。一次正常唤醒不能证明恢复路径已经稳定。
 
 开发规范和提交边界见 [CONTRIBUTING.md](CONTRIBUTING.md)。
-
-## 来源与许可
-
-代码采用 GPL-2.0。底层驱动最初参考 Himax/`linux-gaokun` 的 SPI 实现；手指算法与
-恢复策略参考 EGoTouchRev Windows 驱动、厂商 Android 内核代码及对 Gaokun 原厂栈
-的逆向分析。新增代码必须保留可追溯来源并遵守对应许可证，不能把反编译伪代码或
-专有二进制直接复制进内核。

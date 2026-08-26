@@ -177,6 +177,9 @@ HX_ALGO_ATTR_S16_RW(wake_raw_jump_threshold, 1, 4095);
 HX_ALGO_ATTR_U16_RW(wake_max_unstable_nodes, 0, HX_PIXELS);
 HX_ALGO_ATTR_U8_RW(wake_max_unstable_line_nodes, 1, HX_ROWS);
 HX_ALGO_ATTR_U8_RW(safe_commit_no_finger_frames, 1, 240);
+HX_ALGO_ATTR_BOOL_RW(runtime_blreset_enabled);
+HX_ALGO_ATTR_U8_RW(runtime_blreset_confirm_frames, 1, 30);
+HX_ALGO_ATTR_U16_RW(runtime_blreset_cooldown, 0, 3600);
 HX_ALGO_ATTR_S16_RW(runtime_noise_threshold, 1, 8192);
 HX_ALGO_ATTR_U8_RW(runtime_noise_line_nodes, 1, HX_COLS);
 HX_ALGO_ATTR_U16_RW(runtime_noise_total_nodes, 1, HX_PIXELS);
@@ -257,14 +260,56 @@ HX_ALGO_ATTR_U8_RW(euro_alpha_max_q8, 1, 255);
 HX_ALGO_ATTR_U16_RW(euro_speed_threshold, 1, 4096);
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+static const char *hx_safe_compare_result_name(enum hx_safe_compare_result result)
+{
+	switch (result) {
+	case HX_SAFE_COMPARE_WORKING_BETTER:
+		return "WORKING_BETTER";
+	case HX_SAFE_COMPARE_SAFE_BETTER:
+		return "SAFE_BETTER";
+	case HX_SAFE_COMPARE_BOTH_VALID:
+		return "BOTH_VALID";
+	case HX_SAFE_COMPARE_BOTH_INVALID:
+		return "BOTH_INVALID";
+	case HX_SAFE_COMPARE_AMBIGUOUS:
+		return "AMBIGUOUS";
+	case HX_SAFE_COMPARE_NOT_RUN:
+	default:
+		return "NOT_RUN";
+	}
+}
+
 static ssize_t diagnostics_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	struct himax_ts_data *ts = dev_get_drvdata(dev);
 	struct hx_algo *a = ts->algo;
+	u32 working_hash = 2166136261U;
+	u32 safe_hash = 2166136261U;
+	s64 baseline_common_sum = 0;
+	s32 baseline_common;
+	u16 baseline_divergent = 0;
 	ssize_t len = 0;
+	int i;
 
 	mutex_lock(&ts->op_lock);
+	for (i = 1; i < HX_PIXELS; i++) {
+		working_hash = (working_hash ^ (u32)a->baseline_q8[i]) *
+			16777619U;
+		safe_hash = (safe_hash ^ (u32)a->safe_baseline_q8[i]) *
+			16777619U;
+		baseline_common_sum += (a->baseline_q8[i] -
+			a->safe_baseline_q8[i]) >> HX_BASELINE_FRACTION_BITS;
+	}
+	baseline_common = (s32)(baseline_common_sum / (HX_PIXELS - 1));
+	for (i = 1; i < HX_PIXELS; i++) {
+		s32 local = ((a->baseline_q8[i] -
+			a->safe_baseline_q8[i]) >> HX_BASELINE_FRACTION_BITS) -
+			baseline_common;
+
+		if (abs(local) > HX_BASELINE_CLEAN_LOCAL_THRESHOLD)
+			baseline_divergent++;
+	}
 	len += sysfs_emit_at(buf, len, "frame=%u common=%d max=%d signal=%u ",
 			     a->diag_frame_seq, a->diag_common_diff,
 			     a->diag_frame_max, a->diag_has_signal);
@@ -302,6 +347,120 @@ static ssize_t diagnostics_show(struct device *dev,
 			     "wake_safe_divergences=%u safe_baseline_commits=%u ",
 			     a->wake_safe_divergence_count,
 			     a->baseline_safe_commit_count);
+	len += sysfs_emit_at(buf, len,
+			     "wake_finger_mask_accepts=%u wake_finger_mask_rejects=%u ",
+			     a->wake_finger_mask_accept_count,
+			     a->wake_finger_mask_reject_count);
+	len += sysfs_emit_at(buf, len,
+			     "wake_finger_degraded_fallbacks=%u ",
+			     a->wake_finger_degraded_fallback_count);
+	len += sysfs_emit_at(buf, len,
+			     "wake_raw_finger_inferred=%u wake_raw_finger_releases=%u ",
+			     a->wake_raw_finger_inferred_count,
+			     a->wake_raw_finger_release_count);
+	len += sysfs_emit_at(buf, len,
+			     "wake_ambiguous_fallbacks=%u wake_safe_preserved=%u ",
+			     a->wake_ambiguous_safe_fallback_count,
+			     a->wake_safe_preserved_count);
+	len += sysfs_emit_at(buf, len, "wake_clean_safe_restores=%u ",
+			     a->wake_clean_safe_restore_count);
+	len += sysfs_emit_at(buf, len,
+			     "wake_raw_override=%u wake_raw_release_frames=%u ",
+			     a->wake_raw_finger_override,
+			     a->wake_raw_finger_release_frames);
+	len += sysfs_emit_at(buf, len,
+			     "safe_confirms=%u safe_temporal_rejects=%u ",
+			     a->baseline_safe_confirm_count,
+			     a->baseline_safe_temporal_reject_count);
+	len += sysfs_emit_at(buf, len,
+			     "safe_spatial_rejects=%u safe_negative_rejects=%u ",
+			     a->baseline_safe_spatial_reject_count,
+			     a->baseline_safe_negative_reject_count);
+	len += sysfs_emit_at(buf, len, "safe_range_rejects=%u ",
+			     a->baseline_safe_range_reject_count);
+	len += sysfs_emit_at(buf, len,
+			     "safe_slots=%u safe_selected=%u safe_confidence=%u screen_epoch=%u ",
+			     a->safe_baseline_count, a->safe_baseline_selected,
+			     a->safe_baseline_count ?
+				a->safe_baselines[a->safe_baseline_selected].confidence : 0,
+			     a->screen_epoch);
+	len += sysfs_emit_at(buf, len,
+			     "safe_deduplications=%u safe_evictions=%u runtime_blresets=%u runtime_blreset_suppressed=%u ",
+			     a->baseline_safe_dedup_count,
+			     a->baseline_safe_eviction_count,
+			     a->runtime_blreset_count,
+			     a->runtime_blreset_suppressed_count);
+	len += sysfs_emit_at(buf, len,
+			     "baseline_touch_hold=%u baseline_touch_seen=%u baseline_touch_release_frames=%u baseline_guard_state=%u baseline_guard_clean_frames=%u baseline_touch_holds=%u baseline_touch_releases=%u baseline_guard_restarts=%u baseline_spatial_updates=%u baseline_spatial_blocks=%u baseline_safe_clamps=%u ",
+			     a->baseline_touch_hold,
+			     a->baseline_touch_seen,
+			     a->baseline_touch_release_frames,
+			     a->baseline_guard_state,
+			     a->baseline_guard_clean_frames,
+			     a->baseline_touch_hold_count,
+			     a->baseline_touch_release_count,
+			     a->baseline_guard_restart_count,
+			     a->baseline_spatial_update_count,
+			     a->baseline_spatial_block_count,
+			     a->baseline_safe_clamp_count);
+	len += sysfs_emit_at(buf, len,
+			     "working_hash=%08x safe_hash=%08x working_safe_common=%d working_safe_divergent=%u ",
+			     working_hash, safe_hash, baseline_common,
+			     baseline_divergent);
+	len += sysfs_emit_at(buf, len,
+			     "safe_compare_result=%s compare_triggers=%u compare_runs=%u ",
+			     hx_safe_compare_result_name(a->diag_safe_compare_result),
+			     a->diag_baseline_compare_triggers,
+			     a->diag_baseline_compare_runs);
+	len += sysfs_emit_at(buf, len,
+			     "working_bad_nodes=%u safe_bad_nodes=%u ",
+			     a->diag_working_bad_nodes,
+			     a->diag_safe_bad_nodes);
+	len += sysfs_emit_at(buf, len,
+			     "working_negative_nodes=%u safe_negative_nodes=%u ",
+			     a->diag_working_negative_nodes,
+			     a->diag_safe_negative_nodes);
+	len += sysfs_emit_at(buf, len,
+			     "working_line_noise=%u safe_line_noise=%u ",
+			     a->diag_working_line_noise,
+			     a->diag_safe_line_noise);
+	len += sysfs_emit_at(buf, len,
+			     "working_common_shift=%d safe_common_shift=%d ",
+			     a->diag_working_common_shift,
+			     a->diag_safe_common_shift);
+	len += sysfs_emit_at(buf, len,
+			     "working_max_positive=%d working_max_negative=%d ",
+			     a->diag_working_max_positive,
+			     a->diag_working_max_negative);
+	len += sysfs_emit_at(buf, len,
+			     "safe_max_positive=%d safe_max_negative=%d ",
+			     a->diag_safe_max_positive,
+			     a->diag_safe_max_negative);
+	len += sysfs_emit_at(buf, len,
+			     "touch_mask_nodes=%u working_masked_bad=%u safe_masked_bad=%u ",
+			     a->diag_touch_mask_nodes,
+			     a->diag_working_masked_bad_nodes,
+			     a->diag_safe_masked_bad_nodes);
+	len += sysfs_emit_at(buf, len,
+			     "working_regions=%u,%u,%u,%u,%u safe_regions=%u,%u,%u,%u,%u ",
+			     a->diag_working_region_bad[0],
+			     a->diag_working_region_bad[1],
+			     a->diag_working_region_bad[2],
+			     a->diag_working_region_bad[3],
+			     a->diag_working_region_bad[4],
+			     a->diag_safe_region_bad[0],
+			     a->diag_safe_region_bad[1],
+			     a->diag_safe_region_bad[2],
+			     a->diag_safe_region_bad[3],
+			     a->diag_safe_region_bad[4]);
+	len += sysfs_emit_at(buf, len,
+			     "safe_improvement_frames=%u safe_regression_frames=%u ",
+			     a->diag_safe_improvement_frames,
+			     a->diag_safe_regression_frames);
+	len += sysfs_emit_at(buf, len,
+			     "runtime_blreset_recommended=%u blreset_recommendations=%u ",
+			     a->diag_blreset_recommended,
+			     a->diag_blreset_recommendation_count);
 	len += sysfs_emit_at(buf, len,
 			     "noise_frame_holds=%u small_peak_continued=%u ",
 			     a->noise_frame_hold_count,
@@ -561,6 +720,9 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_wake_max_unstable_nodes.attr,
 	&dev_attr_wake_max_unstable_line_nodes.attr,
 	&dev_attr_safe_commit_no_finger_frames.attr,
+	&dev_attr_runtime_blreset_enabled.attr,
+	&dev_attr_runtime_blreset_confirm_frames.attr,
+	&dev_attr_runtime_blreset_cooldown.attr,
 	&dev_attr_runtime_noise_threshold.attr,
 	&dev_attr_runtime_noise_line_nodes.attr,
 	&dev_attr_runtime_noise_total_nodes.attr,
