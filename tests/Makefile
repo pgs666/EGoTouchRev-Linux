@@ -7,6 +7,8 @@ all: hx-algo-test
 
 ALGO_DIR := ../touchscreen-hx83121a-dkms
 ALGO_SOURCES := $(ALGO_DIR)/hx-algo.c $(ALGO_DIR)/hx-algo-preprocess.c \
+	$(ALGO_DIR)/hx-baseline-state.c \
+	$(ALGO_DIR)/hx-safe-baseline.c \
 	$(ALGO_DIR)/hx-algo-detect.c $(ALGO_DIR)/hx-algo-resolve.c \
 	$(ALGO_DIR)/hx-algo-track.c
 TEST_SOURCES := hx-algo-test.c hx-algo-detection-test.c \

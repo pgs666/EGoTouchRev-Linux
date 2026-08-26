@@ -48,12 +48,25 @@ enum hx_safe_baseline_confidence {
 	HX_SAFE_BASELINE_CROSS_WAKE,
 };
 
+enum hx_safe_baseline_state {
+	HX_SAFE_SLOT_EMPTY,
+	HX_SAFE_SLOT_PROVISIONAL,
+	HX_SAFE_SLOT_CONFIRMED,
+	HX_SAFE_SLOT_CROSS_WAKE,
+	HX_SAFE_SLOT_RESET,
+};
+
 struct hx_safe_baseline_entry {
 	s32 baseline_q8[HX_PIXELS];
 	u32 generation;
 	u32 screen_epoch;
 	u32 captured_frame;
 	u8 confidence;
+	u8 state;
+	u16 stable_frames;
+	u32 use_count;
+	bool reset_pending;
+	bool pushed;
 	bool valid;
 };
 
@@ -71,6 +84,31 @@ enum hx_baseline_guard_state {
 	HX_BASELINE_GUARD_PROTECTED,
 	HX_BASELINE_GUARD_RELEASE_SETTLE,
 	HX_BASELINE_GUARD_CLEAN_QUALIFY,
+};
+
+/* Compact equivalent of the vendor BLSM stage field.  The vendor has
+ * additional product-specific flags, but these stages preserve the
+ * externally relevant update/hold/reset decisions. */
+enum hx_baseline_stage {
+	HX_BLSM_NO_TOUCH_STABLE = 0,
+	HX_BLSM_TOUCH = 1,
+	HX_BLSM_MILD_NOISE = 2,
+	HX_BLSM_SEVERE_NOISE = 3,
+	HX_BLSM_SPECIAL = 9,
+};
+
+enum hx_screen_on_hand_state {
+	HX_HAND_NONE,
+	HX_HAND_SUSPECTED,
+	HX_HAND_PROTECTED,
+	HX_HAND_RELEASE_PENDING,
+	HX_HAND_REACQUIRE,
+};
+
+enum hx_safe_reset_action {
+	HX_SAFE_RESET_NONE,
+	HX_SAFE_RESET_WORKING,
+	HX_SAFE_RESET_INVALIDATE,
 };
 
 /* Maximum simultaneous reported contacts. */
@@ -246,6 +284,12 @@ struct hx_algo {
 	 */
 	s32 safe_baseline_q8[HX_PIXELS];
 	s32 wake_candidate_q8[HX_PIXELS];
+	/* SafeBaseline_BufferComparison outputs, retained for the post-tracker
+	 * touch/side-area checks and diagnostics. */
+	s16 safe_bl2bl_dif[HX_PIXELS];
+	s16 safe_bl2raw_dif[HX_PIXELS];
+	s16 safe_bl2bl_dif_cmf[HX_PIXELS];
+	s16 safe_bl2raw_dif_cmf[HX_PIXELS];
 	struct hx_safe_baseline_entry safe_baselines[HX_SAFE_BASELINE_SLOTS];
 	u8  baseline_release_hold[HX_PIXELS];
 	u16 baseline_hist[HX_BASELINE_HIST_BINS];
@@ -253,6 +297,7 @@ struct hx_algo {
 	bool safe_baseline_valid;
 	u8 safe_baseline_count;
 	u8 safe_baseline_selected;
+	u16 safe_baseline_selected_score;
 	u8 safe_baseline_next;
 	u32 safe_baseline_generation;
 	u32 screen_epoch;
@@ -275,6 +320,13 @@ struct hx_algo {
 	s32 safe_confirm_common_last;
 	u8 runtime_safe_improvement_frames;
 	u8 runtime_safe_regression_frames;
+	u8 safe_baseline_invalid_frames;
+	u8 safe_side_reset_frames;
+	bool safe_reset_in_debounce;
+	bool safe_sync_reset_side_area;
+	u8 safe_signal_stable_frames;
+	u8 safe_valid_touch_count;
+	u8 safe_abnormal_touch_count;
 	u16 runtime_blreset_cooldown_frames;
 	bool baseline_prev_had_signal;
 	bool baseline_had_freeze;
@@ -283,10 +335,16 @@ struct hx_algo {
 	 * allowing BLIIR-style per-cell baseline tracking.
 	 */
 	u8 baseline_no_touch_stable_frames;
+	u8 baseline_stage;
+	u8 baseline_stage_frames;
 	bool baseline_touch_hold;
 	bool baseline_touch_seen;
 	bool baseline_held_in_hand;
 	bool baseline_reacquire_pending;
+	u8 baseline_screen_on_hand_state;
+	/* Number of clean frames for which a newly reacquired baseline remains
+	 * protected from ordinary BLIIR spatial learning. */
+	u16 baseline_post_reacquire_hold;
 	u8 baseline_touch_release_frames;
 	u8 baseline_guard_state;
 	u8 baseline_guard_clean_frames;
@@ -367,6 +425,12 @@ struct hx_algo {
 	u32 baseline_spatial_update_count;
 	u32 baseline_spatial_block_count;
 	u32 baseline_safe_clamp_count;
+	u32 baseline_safe_slot_switch_count;
+	u32 baseline_safe_slot_reject_count;
+	u32 baseline_safe_reset_count;
+	u32 baseline_safe_side_reset_count;
+	u32 baseline_safe_abnormal_max_count;
+	u32 baseline_safe_abnormal_min_count;
 	u32 noise_frame_hold_count;
 #endif
 
@@ -531,6 +595,8 @@ bool hx_algo_is_exception_frame(struct hx_algo *algo, const u16 *raw);
 bool hx_algo_runtime_baseline_process(struct hx_algo *algo, const u16 *raw,
 				      enum hx_finger_state finger_state,
 				      bool force);
+bool hx_safe_baseline_postprocess(struct hx_algo *algo, const u16 *raw,
+				  enum hx_finger_state finger_state);
 int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
 				enum hx_finger_state finger_state);
 

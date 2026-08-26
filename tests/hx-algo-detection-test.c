@@ -1063,6 +1063,21 @@ static void test_safe_baseline_store_selects_best_history(void)
 	assert(algo.safe_baseline_q8[110] == (s32)0x7fee << 8);
 }
 
+static void test_safe_baseline_queue_accepts_distinct_same_epoch_state(void)
+{
+	struct hx_algo algo = {};
+	s32 baseline[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	for (int i = 0; i < HX_PIXELS; i++)
+		baseline[i] = (s32)0x7fee << 8;
+	hx_safe_baseline_bootstrap(&algo, baseline);
+	for (int i = 0; i < HX_PIXELS; i++)
+		baseline[i] += (s32)300 << 8;
+	hx_safe_baseline_commit(&algo, baseline);
+	assert(algo.safe_baseline_count == 2);
+}
+
 static void test_safe_baseline_selection_prefers_spatial_fit(void)
 {
 	struct hx_algo algo = {};
@@ -1368,7 +1383,121 @@ static void test_hungarian_keeps_two_ids(void)
 	assert(algo.tracks[left].active && algo.tracks[right].active);
 	assert(algo.tracks[left].x > algo.tracks[right].x);
 }
+static void test_safe_slot_runtime_selection_and_reacquire_hold(void)
+{
+	struct hx_algo algo = { 0 };
+	u16 raw[HX_PIXELS] = { 0 };
+	s32 first[HX_PIXELS];
+	s32 second[HX_PIXELS];
 
+	hx_algo_init_defaults(&algo);
+	for (int i = 0; i < HX_PIXELS; i++) {
+		raw[i] = 0x7fee;
+		first[i] = (s32)0x7fee << HX_BASELINE_FRACTION_BITS;
+		second[i] = (s32)0x7fee << HX_BASELINE_FRACTION_BITS;
+	}
+	/* Two electrical states with a spatially distinct panel offset must
+	 * occupy separate history slots. */
+	for (int i = HX_COLS * 4; i < HX_COLS * 6; i++)
+		second[i] += 800 << HX_BASELINE_FRACTION_BITS;
+	hx_safe_baseline_bootstrap(&algo, first);
+	algo.screen_epoch = 1;
+	hx_safe_baseline_commit(&algo, second);
+	assert(algo.safe_baseline_count == 2);
+	for (int i = HX_COLS * 4; i < HX_COLS * 6; i++)
+		raw[i] = 0x7fee + 800;
+	hx_safe_baseline_select_for_raw(&algo, raw);
+	assert(algo.safe_baseline_selected == 1);
+	algo.baseline_reacquire_pending = true;
+	algo.safe_candidate_armed = true;
+	/* The hold is installed by the clean-baseline commit path; this check
+	 * documents that the field is available and starts clear otherwise. */
+	assert(algo.baseline_post_reacquire_hold == 0);
+}
+
+static void test_baseline_stage_machine(void)
+{
+	struct hx_algo algo = { 0 };
+
+	hx_algo_init_defaults(&algo);
+	assert(hx_baseline_stage_update(&algo, true, false, false, false) ==
+	       HX_BLSM_TOUCH);
+	assert(hx_baseline_stage_update(&algo, false, false, true, false) ==
+	       HX_BLSM_SEVERE_NOISE);
+	algo.baseline_no_touch_stable_frames = 10;
+	assert(hx_baseline_stage_update(&algo, false, false, false, false) ==
+	       HX_BLSM_NO_TOUCH_STABLE);
+}
+
+static void test_screen_on_hand_state_transitions(void)
+{
+	struct hx_algo algo = { 0 };
+
+	hx_algo_init_defaults(&algo);
+	hx_restore_working_from_safe(&algo, 0, true, true);
+	assert(algo.baseline_screen_on_hand_state == HX_HAND_PROTECTED);
+	algo.baseline_touch_hold = true;
+	algo.baseline_touch_seen = true;
+	algo.baseline_guard_state = HX_BASELINE_GUARD_CLEAN_QUALIFY;
+	algo.baseline_guard_clean_frames = 255;
+	algo.safe_commit_no_finger_frames = 1;
+	assert(hx_baseline_guard_process(&algo, true, false));
+	assert(algo.baseline_screen_on_hand_state == HX_HAND_RELEASE_PENDING);
+}
+
+static void test_safe_reset_policy_debounces_and_separates_side_reset(void)
+{
+	struct hx_algo algo = { 0 };
+	enum hx_safe_reset_action action = HX_SAFE_RESET_NONE;
+
+	hx_algo_init_defaults(&algo);
+	algo.runtime_blreset_confirm_frames = 3;
+	for (int i = 0; i < 2; i++)
+		action = hx_safe_baseline_reset_policy(&algo,
+			HX_SAFE_COMPARE_BOTH_INVALID, false, HX_FINGER_ABSENT);
+	assert(action == HX_SAFE_RESET_NONE);
+	assert(algo.safe_reset_in_debounce);
+	action = hx_safe_baseline_reset_policy(&algo,
+		HX_SAFE_COMPARE_BOTH_INVALID, false, HX_FINGER_ABSENT);
+	assert(action == HX_SAFE_RESET_INVALIDATE);
+
+	action = hx_safe_baseline_reset_policy(&algo,
+		HX_SAFE_COMPARE_BOTH_VALID, true, HX_FINGER_PRESENT);
+	assert(action == HX_SAFE_RESET_NONE);
+	for (int i = 0; i < 3; i++)
+		action = hx_safe_baseline_reset_policy(&algo,
+			HX_SAFE_COMPARE_BOTH_VALID, false, HX_FINGER_ABSENT);
+	assert(action == HX_SAFE_RESET_WORKING);
+	assert(!algo.safe_sync_reset_side_area);
+}
+
+static void test_safe_side_postprocess_restores_after_release(void)
+{
+	struct hx_algo algo = { 0 };
+	u16 raw[HX_PIXELS];
+	int idx = 5;
+
+	hx_algo_init_defaults(&algo);
+	algo.baseline_initialized = true;
+	algo.safe_baseline_valid = true;
+	algo.runtime_blreset_confirm_frames = 3;
+	for (int i = 0; i < HX_PIXELS; i++) {
+		raw[i] = 0x7fee;
+		algo.safe_baseline_q8[i] = (s32)0x7fee << 8;
+		algo.baseline_q8[i] = (s32)0x7fee << 8;
+	}
+	algo.baseline_q8[idx] += 500 << 8;
+	algo.peak_count = 1;
+	algo.peaks[0].r = 0;
+	algo.peaks[0].c = 5;
+	for (int i = 0; i < 5; i++)
+		hx_safe_baseline_postprocess(&algo, raw, HX_FINGER_PRESENT);
+	assert(algo.safe_sync_reset_side_area);
+	algo.peak_count = 0;
+	for (int i = 0; i < 3; i++)
+		hx_safe_baseline_postprocess(&algo, raw, HX_FINGER_ABSENT);
+	assert(algo.baseline_q8[idx] == algo.safe_baseline_q8[idx]);
+}
 
 void run_detection_tests(void)
 {
@@ -1410,6 +1539,7 @@ void run_detection_tests(void)
 	test_runtime_comparator_detects_absorbed_touch();
 	test_safe_baseline_store_deduplicates_across_wakes();
 	test_safe_baseline_store_selects_best_history();
+	test_safe_baseline_queue_accepts_distinct_same_epoch_state();
 	test_safe_baseline_selection_prefers_spatial_fit();
 	test_runtime_blreset_restores_only_working_baseline();
 	test_touch_hold_blocks_spatial_learning_until_clean_release();
@@ -1421,4 +1551,9 @@ void run_detection_tests(void)
 	test_line_noise_is_held_but_compact_touch_is_not();
 	test_reported_track_survives_silent_gap();
 	test_hungarian_keeps_two_ids();
+	test_safe_slot_runtime_selection_and_reacquire_hold();
+	test_baseline_stage_machine();
+	test_screen_on_hand_state_transitions();
+	test_safe_reset_policy_debounces_and_separates_side_reset();
+	test_safe_side_postprocess_restores_after_release();
 }

@@ -5,6 +5,7 @@ MODVER = 0.1
 obj-m += $(MODNAME).o
 $(MODNAME)-y := himax-spi-core.o himax-spi-hw.o himax-spi-sysfs.o \
 		hx-algo.o hx-algo-preprocess.o \
+		hx-baseline-state.o hx-safe-baseline.o \
 		hx-algo-detect.o hx-algo-resolve.o hx-algo-track.o
 
 # Full-rate diagnostic capture is deliberately excluded from normal builds.
@@ -22,7 +23,7 @@ DKMS_SOURCES = Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
 	       himax-spi-sysfs.c \
 	       himax-spi.h hx-algo.c \
 	       hx-algo-preprocess.c hx-algo-detect.c hx-algo-resolve.c \
-	       hx-algo-track.c \
+	       hx-baseline-state.c hx-safe-baseline.c hx-algo-track.c \
 	       hx-algo.h hx-algo-internal.h hx-frame-status.h
 
 .PHONY: all clean test deploy-local dkmsinstall dkmsremove

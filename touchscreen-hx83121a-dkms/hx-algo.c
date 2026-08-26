@@ -161,10 +161,15 @@ static void hx_algo_clear_transient_state(struct hx_algo *algo)
 	algo->baseline_had_freeze = algo->baseline_initialized;
 	algo->baseline_recovery_frames = 0;
 	algo->baseline_no_touch_stable_frames = 0;
+	algo->baseline_stage = HX_BLSM_NO_TOUCH_STABLE;
+	algo->baseline_stage_frames = 0;
 	algo->baseline_touch_hold = false;
 	algo->baseline_touch_seen = false;
 	algo->baseline_held_in_hand = false;
 	algo->baseline_touch_release_frames = 0;
+	algo->baseline_post_reacquire_hold = 0;
+	algo->baseline_reacquire_pending = false;
+	algo->baseline_screen_on_hand_state = HX_HAND_NONE;
 	algo->baseline_guard_state = HX_BASELINE_GUARD_NORMAL;
 	algo->baseline_guard_clean_frames = 0;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
@@ -204,6 +209,13 @@ static void hx_algo_clear_transient_state(struct hx_algo *algo)
 	algo->safe_confirm_common_last = 0;
 	algo->runtime_safe_improvement_frames = 0;
 	algo->runtime_safe_regression_frames = 0;
+	algo->safe_baseline_invalid_frames = 0;
+	algo->safe_side_reset_frames = 0;
+	algo->safe_reset_in_debounce = false;
+	algo->safe_sync_reset_side_area = false;
+	algo->safe_signal_stable_frames = 0;
+	algo->safe_valid_touch_count = 0;
+	algo->safe_abnormal_touch_count = 0;
 	algo->runtime_blreset_cooldown_frames = 0;
 }
 
@@ -227,6 +239,7 @@ void hx_algo_full_reset(struct hx_algo *algo)
 	algo->safe_baseline_valid = false;
 	algo->safe_baseline_count = 0;
 	algo->safe_baseline_selected = 0;
+	algo->safe_baseline_selected_score = 0;
 	algo->safe_baseline_next = 0;
 	algo->safe_baseline_generation = 0;
 	algo->screen_epoch = 0;
@@ -247,11 +260,22 @@ void hx_algo_full_reset(struct hx_algo *algo)
 	algo->safe_confirm_common_last = 0;
 	algo->runtime_safe_improvement_frames = 0;
 	algo->runtime_safe_regression_frames = 0;
+	algo->safe_baseline_invalid_frames = 0;
+	algo->safe_side_reset_frames = 0;
+	algo->safe_reset_in_debounce = false;
+	algo->safe_sync_reset_side_area = false;
+	algo->safe_signal_stable_frames = 0;
+	algo->safe_valid_touch_count = 0;
+	algo->safe_abnormal_touch_count = 0;
 	algo->runtime_blreset_cooldown_frames = 0;
 	algo->baseline_prev_had_signal = false;
 	algo->baseline_had_freeze = false;
 	algo->baseline_recovery_frames = 0;
 	algo->baseline_no_touch_stable_frames = 0;
+	algo->baseline_stage = HX_BLSM_NO_TOUCH_STABLE;
+	algo->baseline_stage_frames = 0;
+	algo->baseline_post_reacquire_hold = 0;
+	algo->baseline_screen_on_hand_state = HX_HAND_NONE;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	algo->baseline_generation++;
 	algo->full_reset_count++;
@@ -293,6 +317,8 @@ void hx_restore_working_from_safe(struct hx_algo *algo, s32 common,
 	algo->baseline_touch_release_frames = 0;
 	algo->baseline_guard_state = touch_hold ?
 		HX_BASELINE_GUARD_PROTECTED : HX_BASELINE_GUARD_NORMAL;
+	algo->baseline_screen_on_hand_state = touch_hold ?
+		HX_HAND_PROTECTED : HX_HAND_NONE;
 	algo->baseline_guard_clean_frames = 0;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	if (touch_hold)
@@ -313,6 +339,8 @@ static bool hx_safe_baselines_compatible(const s32 *first_q8,
 		sum += (first_q8[i] - second_q8[i]) >>
 			HX_BASELINE_FRACTION_BITS;
 	common = (s32)(sum / (HX_PIXELS - 1));
+	if (abs(common) > HX_BASELINE_CLEAN_LOCAL_THRESHOLD)
+		return false;
 	for (i = 1; i < HX_PIXELS; i++) {
 		s32 local = ((first_q8[i] - second_q8[i]) >>
 			HX_BASELINE_FRACTION_BITS) - common;
@@ -327,13 +355,34 @@ static bool hx_safe_baselines_compatible(const s32 *first_q8,
 static void hx_safe_baseline_select_slot(struct hx_algo *algo, u8 slot)
 {
 	if (slot >= HX_SAFE_BASELINE_SLOTS ||
-	    !algo->safe_baselines[slot].valid)
+	    !algo->safe_baselines[slot].valid ||
+	    algo->safe_baselines[slot].reset_pending)
 		return;
 	memcpy(algo->safe_baseline_q8,
 	       algo->safe_baselines[slot].baseline_q8,
 	       sizeof(algo->safe_baseline_q8));
 	algo->safe_baseline_selected = slot;
 	algo->safe_baseline_valid = true;
+	algo->safe_baselines[slot].pushed = true;
+	algo->safe_baselines[slot].use_count++;
+}
+
+void hx_safe_baseline_reset_selected(struct hx_algo *algo)
+{
+	struct hx_safe_baseline_entry *entry;
+
+	if (algo->safe_baseline_selected >= HX_SAFE_BASELINE_SLOTS)
+		return;
+	entry = &algo->safe_baselines[algo->safe_baseline_selected];
+	if (!entry->valid)
+		return;
+	entry->reset_pending = true;
+	entry->state = HX_SAFE_SLOT_RESET;
+	entry->pushed = false;
+	algo->safe_baseline_valid = false;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->baseline_safe_reset_count++;
+#endif
 }
 
 void hx_safe_baseline_bootstrap(struct hx_algo *algo, const s32 *baseline_q8)
@@ -350,6 +399,10 @@ void hx_safe_baseline_bootstrap(struct hx_algo *algo, const s32 *baseline_q8)
 	memcpy(entry->baseline_q8, baseline_q8, sizeof(entry->baseline_q8));
 	entry->valid = true;
 	entry->confidence = HX_SAFE_BASELINE_BOOTSTRAP;
+	entry->state = HX_SAFE_SLOT_PROVISIONAL;
+	entry->stable_frames = 1;
+	entry->reset_pending = false;
+	entry->pushed = false;
 	entry->generation = ++algo->safe_baseline_generation;
 	entry->screen_epoch = algo->screen_epoch;
 	entry->captured_frame = algo->frame_sequence;
@@ -367,7 +420,8 @@ void hx_safe_baseline_commit(struct hx_algo *algo, const s32 *baseline_q8)
 	if (!algo->baseline_enabled)
 		return;
 	for (i = 0; i < HX_SAFE_BASELINE_SLOTS; i++) {
-		if (!algo->safe_baselines[i].valid)
+		if (!algo->safe_baselines[i].valid ||
+		    algo->safe_baselines[i].reset_pending)
 			continue;
 		if (hx_safe_baselines_compatible(
 			algo->safe_baselines[i].baseline_q8, baseline_q8)) {
@@ -387,7 +441,13 @@ void hx_safe_baseline_commit(struct hx_algo *algo, const s32 *baseline_q8)
 			else
 				entry->confidence = HX_SAFE_BASELINE_CROSS_WAKE;
 			entry->screen_epoch = algo->screen_epoch;
+			entry->state = entry->confidence >= HX_SAFE_BASELINE_CROSS_WAKE ?
+				HX_SAFE_SLOT_CROSS_WAKE : HX_SAFE_SLOT_CONFIRMED;
+			entry->stable_frames = 0;
 		}
+		entry->stable_frames = min_t(u16, entry->stable_frames + 1,
+						U16_MAX);
+		entry->reset_pending = false;
 		entry->generation = ++algo->safe_baseline_generation;
 		entry->captured_frame = algo->frame_sequence;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
@@ -405,11 +465,14 @@ void hx_safe_baseline_commit(struct hx_algo *algo, const s32 *baseline_q8)
 			}
 		algo->safe_baseline_count++;
 	} else {
-		u8 lowest = 0;
+		u8 lowest = HX_SAFE_BASELINE_SLOTS;
 
-		for (i = 1; i < HX_SAFE_BASELINE_SLOTS; i++) {
+		for (i = 0; i < HX_SAFE_BASELINE_SLOTS; i++) {
 			entry = &algo->safe_baselines[i];
-			if (entry->confidence <
+			if (!entry->valid || entry->reset_pending)
+				continue;
+			if (lowest == HX_SAFE_BASELINE_SLOTS ||
+			    entry->confidence <
 			    algo->safe_baselines[lowest].confidence ||
 			    (entry->confidence ==
 			     algo->safe_baselines[lowest].confidence &&
@@ -417,6 +480,8 @@ void hx_safe_baseline_commit(struct hx_algo *algo, const s32 *baseline_q8)
 			     algo->safe_baselines[lowest].generation))
 				lowest = i;
 		}
+		if (lowest == HX_SAFE_BASELINE_SLOTS)
+			lowest = algo->safe_baseline_selected;
 		slot = lowest;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 		algo->baseline_safe_eviction_count++;
@@ -430,6 +495,10 @@ void hx_safe_baseline_commit(struct hx_algo *algo, const s32 *baseline_q8)
 	 * runtime window into the next wake's recovery authority.
 	 */
 	entry->confidence = HX_SAFE_BASELINE_BOOTSTRAP;
+	entry->state = HX_SAFE_SLOT_PROVISIONAL;
+	entry->stable_frames = 1;
+	entry->reset_pending = false;
+	entry->pushed = false;
 	entry->generation = ++algo->safe_baseline_generation;
 	entry->screen_epoch = algo->screen_epoch;
 	entry->captured_frame = algo->frame_sequence;
@@ -538,6 +607,9 @@ static bool hx_wake_safe_common_shift(struct hx_algo *algo, const u16 *raw,
 
 void hx_safe_baseline_select_for_raw(struct hx_algo *algo, const u16 *raw)
 {
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	u8 old_selected = algo->safe_baseline_selected;
+#endif
 	u32 best_score = ~0U;
 	u8 best_confidence = HX_SAFE_BASELINE_EMPTY;
 	u8 best = HX_SAFE_BASELINE_SLOTS;
@@ -552,7 +624,7 @@ void hx_safe_baseline_select_for_raw(struct hx_algo *algo, const u16 *raw)
 		u32 score = 0;
 		int i;
 
-		if (!entry->valid)
+		if (!entry->valid || entry->reset_pending)
 			continue;
 		if (!hx_wake_reference_common_shift(algo, raw,
 			entry->baseline_q8, &common))
@@ -582,8 +654,17 @@ void hx_safe_baseline_select_for_raw(struct hx_algo *algo, const u16 *raw)
 			best = slot;
 		}
 	}
-	if (best < HX_SAFE_BASELINE_SLOTS)
+	if (best < HX_SAFE_BASELINE_SLOTS) {
 		hx_safe_baseline_select_slot(algo, best);
+		algo->safe_baseline_selected_score = min_t(u32, best_score,
+							  U16_MAX);
+	}
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	else
+		algo->baseline_safe_slot_reject_count++;
+	if (best < HX_SAFE_BASELINE_SLOTS && old_selected != best)
+		algo->baseline_safe_slot_switch_count++;
+#endif
 }
 
 /*
@@ -913,7 +994,19 @@ int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
 
 			average = algo->wake_finger_common_sum /
 				  algo->wake_finger_frames;
+		/* The vendor held-in-hand path reconstructs BL from the latest
+		 * safe snapshot and BL2BL difference buffers.  On first boot there
+		 * is no working BL history yet, so use the safe grid plus CM shift. */
+		if (algo->baseline_initialized) {
+			hx_safe_baseline_buffer_comparison(algo, raw);
+			hx_safe_baseline_replace_working_from_history(algo, average);
+		} else {
 			hx_restore_working_from_safe(algo, average, true, true);
+		}
+			algo->baseline_touch_hold = true;
+			algo->baseline_touch_seen = true;
+			algo->baseline_held_in_hand = true;
+			algo->baseline_guard_state = HX_BASELINE_GUARD_PROTECTED;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 			algo->wake_finger_mask_accept_count++;
 #endif

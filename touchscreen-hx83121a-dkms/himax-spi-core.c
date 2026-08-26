@@ -671,6 +671,9 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 			"restored working baseline from validated safe history\n");
 
 	stable_cnt = hx_algo_process_frame_state(algo, ptr, effective_finger);
+	if (hx_safe_baseline_postprocess(algo, ptr, effective_finger))
+		dev_warn_ratelimited(ts->dev,
+			"synchronized side-area working baseline from safe history\n");
 	himax_trace_record_irq(ts, 0, true, &frame_status, false);
 
 report:

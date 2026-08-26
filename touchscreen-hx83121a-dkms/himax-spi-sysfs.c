@@ -365,6 +365,17 @@ static ssize_t diagnostics_show(struct device *dev,
 	len += sysfs_emit_at(buf, len, "wake_clean_safe_restores=%u ",
 			     a->wake_clean_safe_restore_count);
 	len += sysfs_emit_at(buf, len,
+			     "safe_slot=%u safe_slot_score=%u safe_slot_switches=%u safe_slot_rejects=%u post_reacquire_hold=%u ",
+			     a->safe_baseline_selected,
+			     a->safe_baseline_selected_score,
+			     a->baseline_safe_slot_switch_count,
+			     a->baseline_safe_slot_reject_count,
+			     a->baseline_post_reacquire_hold);
+	len += sysfs_emit_at(buf, len,
+			     "baseline_stage=%u stage_frames=%u screen_on_hand_state=%u ",
+			     a->baseline_stage, a->baseline_stage_frames,
+			     a->baseline_screen_on_hand_state);
+	len += sysfs_emit_at(buf, len,
 			     "wake_raw_override=%u wake_raw_release_frames=%u ",
 			     a->wake_raw_finger_override,
 			     a->wake_raw_finger_release_frames);
@@ -381,15 +392,46 @@ static ssize_t diagnostics_show(struct device *dev,
 	len += sysfs_emit_at(buf, len,
 			     "safe_slots=%u safe_selected=%u safe_confidence=%u screen_epoch=%u ",
 			     a->safe_baseline_count, a->safe_baseline_selected,
-			     a->safe_baseline_count ?
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
 				a->safe_baselines[a->safe_baseline_selected].confidence : 0,
 			     a->screen_epoch);
 	len += sysfs_emit_at(buf, len,
-			     "safe_deduplications=%u safe_evictions=%u runtime_blresets=%u runtime_blreset_suppressed=%u ",
+			     "safe_state=%u safe_reset=%u safe_stable_frames=%u safe_uses=%u ",
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
+			     a->safe_baselines[a->safe_baseline_selected].state :
+			     HX_SAFE_SLOT_EMPTY,
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
+			     a->safe_baselines[a->safe_baseline_selected].reset_pending : 0,
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
+			     a->safe_baselines[a->safe_baseline_selected].stable_frames : 0,
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
+			     a->safe_baselines[a->safe_baseline_selected].use_count : 0);
+	len += sysfs_emit_at(buf, len,
+			     "safe_deduplications=%u safe_evictions=%u safe_resets=%u safe_side_resets=%u runtime_blresets=%u runtime_blreset_suppressed=%u ",
 			     a->baseline_safe_dedup_count,
 			     a->baseline_safe_eviction_count,
+			     a->baseline_safe_reset_count,
+			     a->baseline_safe_side_reset_count,
 			     a->runtime_blreset_count,
 			     a->runtime_blreset_suppressed_count);
+	len += sysfs_emit_at(buf, len,
+			     "safe_abnormal_max=%u safe_abnormal_min=%u ",
+			     a->baseline_safe_abnormal_max_count,
+			     a->baseline_safe_abnormal_min_count);
+	len += sysfs_emit_at(buf, len,
+			     "safe_reset_debounce=%u safe_invalid_frames=%u safe_side_sync=%u safe_side_frames=%u safe_signal_stable=%u safe_valid_touches=%u safe_abnormal_touches=%u ",
+			     a->safe_reset_in_debounce,
+			     a->safe_baseline_invalid_frames,
+			     a->safe_sync_reset_side_area,
+			     a->safe_side_reset_frames,
+			     a->safe_signal_stable_frames,
+			     a->safe_valid_touch_count,
+			     a->safe_abnormal_touch_count);
 	len += sysfs_emit_at(buf, len,
 			     "baseline_touch_hold=%u baseline_touch_seen=%u baseline_touch_release_frames=%u baseline_guard_state=%u baseline_guard_clean_frames=%u baseline_touch_holds=%u baseline_touch_releases=%u baseline_guard_restarts=%u baseline_spatial_updates=%u baseline_spatial_blocks=%u baseline_safe_clamps=%u ",
 			     a->baseline_touch_hold,
