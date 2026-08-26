@@ -1499,6 +1499,25 @@ static void test_safe_side_postprocess_restores_after_release(void)
 	assert(algo.baseline_q8[idx] == algo.safe_baseline_q8[idx]);
 }
 
+static void test_safe_buffer_comparison_tracks_common_mode(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	algo.safe_baseline_valid = true;
+	for (int i = 0; i < HX_PIXELS; i++) {
+		algo.safe_baseline_q8[i] = (s32)1000 << 8;
+		algo.baseline_q8[i] = (s32)1020 << 8;
+		raw[i] = 1040;
+	}
+	hx_safe_baseline_buffer_comparison(&algo, raw);
+	assert(algo.safe_bl2bl_dif[100] == 20);
+	assert(algo.safe_bl2raw_dif[100] == 40);
+	assert(algo.safe_bl2bl_dif_cmf[100] == 0);
+	assert(algo.safe_bl2raw_dif_cmf[100] == 0);
+}
+
 void run_detection_tests(void)
 {
 	test_strongest_candidates_survive();
@@ -1556,4 +1575,5 @@ void run_detection_tests(void)
 	test_screen_on_hand_state_transitions();
 	test_safe_reset_policy_debounces_and_separates_side_reset();
 	test_safe_side_postprocess_restores_after_release();
+	test_safe_buffer_comparison_tracks_common_mode();
 }
