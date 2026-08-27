@@ -12,15 +12,6 @@
 
 #include "hx-algo-internal.h"
 
-static s32 hx_bliir_fixed_step_q8(s32 delta, s16 step)
-{
-	s32 step_q8 = max_t(s32, step, 0) << HX_BASELINE_FRACTION_BITS;
-
-	if (!step_q8 || abs(delta) < step)
-		return 0;
-	return delta > 0 ? step_q8 : -step_q8;
-}
-
 enum hx_clean_baseline_quality {
 	HX_CLEAN_BASELINE_GOOD = 0,
 	HX_CLEAN_BASELINE_TEMPORAL,
@@ -54,7 +45,7 @@ static s32 hx_compare_common_shift(struct hx_algo *algo, const u16 *raw,
 	int i;
 
 	memset(algo->baseline_hist, 0, sizeof(algo->baseline_hist));
-	for (i = 1; i < HX_PIXELS; i++) {
+	for (i = 0; i < HX_PIXELS; i++) {
 		s32 sample = (s32)le16_to_cpup(raw + i);
 		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
 		int bin = clamp_t(int, (sample - reference + 65536) >> 6,
@@ -65,11 +56,11 @@ static s32 hx_compare_common_shift(struct hx_algo *algo, const u16 *raw,
 	for (common_bin = 0; common_bin < HX_BASELINE_HIST_BINS;
 	     common_bin++) {
 		cumulative += algo->baseline_hist[common_bin];
-		if (cumulative >= (HX_PIXELS - 1) / 2)
+		if (cumulative >= HX_PIXELS / 2)
 			break;
 	}
 	common_bin = min(common_bin, HX_BASELINE_HIST_BINS - 1);
-	for (i = 1; i < HX_PIXELS; i++) {
+	for (i = 0; i < HX_PIXELS; i++) {
 		s32 sample = (s32)le16_to_cpup(raw + i);
 		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
 		s32 delta = sample - reference;
@@ -109,7 +100,7 @@ static u16 hx_compare_build_touch_mask(struct hx_algo *algo, const u16 *raw,
 	if (finger_state != HX_FINGER_PRESENT)
 		return 0;
 
-	for (i = 1; i < HX_PIXELS; i++) {
+	for (i = 0; i < HX_PIXELS; i++) {
 		s32 sample = (s32)le16_to_cpup(raw + i);
 		s32 working = algo->baseline_q8[i] >>
 			HX_BASELINE_FRACTION_BITS;
@@ -121,7 +112,7 @@ static u16 hx_compare_build_touch_mask(struct hx_algo *algo, const u16 *raw,
 		if (residual >= algo->baseline_peak_threshold)
 			algo->zone_map[i] = 1;
 	}
-	for (i = 1; i < HX_PIXELS; i++) {
+	for (i = 0; i < HX_PIXELS; i++) {
 		if (algo->zone_map[i] != 1)
 			continue;
 		r = i / HX_COLS;
@@ -140,7 +131,7 @@ static u16 hx_compare_build_touch_mask(struct hx_algo *algo, const u16 *raw,
 			}
 		}
 	}
-	for (i = 1; i < HX_PIXELS; i++)
+	for (i = 0; i < HX_PIXELS; i++)
 		if (algo->zone_map[i])
 			masked++;
 	return masked;
@@ -160,7 +151,7 @@ static void hx_compare_one_baseline(struct hx_algo *algo, const u16 *raw,
 	metrics->common = common;
 	metrics->max_positive = INT_MIN;
 	metrics->max_negative = INT_MAX;
-	for (i = 1; i < HX_PIXELS; i++) {
+	for (i = 0; i < HX_PIXELS; i++) {
 		s32 sample = (s32)le16_to_cpup(raw + i);
 		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
 		s32 local = sample - reference - common;
@@ -276,11 +267,11 @@ static bool hx_runtime_compare_triggered(struct hx_algo *algo, const u16 *raw,
 	u16 negative = 0;
 	int r, c, i;
 
-	for (i = 1; i < HX_PIXELS; i++)
+	for (i = 0; i < HX_PIXELS; i++)
 		sum += (s32)le16_to_cpup(raw + i) -
 		       (algo->baseline_q8[i] >> HX_BASELINE_FRACTION_BITS);
-	common = (s32)(sum / (HX_PIXELS - 1));
-	for (i = 1; i < HX_PIXELS; i++) {
+	common = (s32)(sum / HX_PIXELS);
+	for (i = 0; i < HX_PIXELS; i++) {
 		s32 local = (s32)le16_to_cpup(raw + i) -
 			(algo->baseline_q8[i] >> HX_BASELINE_FRACTION_BITS) -
 			common;
@@ -318,6 +309,7 @@ static bool hx_runtime_compare_triggered(struct hx_algo *algo, const u16 *raw,
 bool hx_safe_baseline_can_recover(const struct hx_algo *algo)
 {
 	u8 i;
+
 	if (!algo->safe_baseline_count)
 		return true; /* Legacy/test state with a directly installed safe BL. */
 	if (algo->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS &&
@@ -375,7 +367,8 @@ bool hx_algo_runtime_baseline_process(struct hx_algo *algo, const u16 *raw,
 	/* Runtime faults can occur in an electrical state represented by a
 	 * different safe slot than the one selected at wake.  Re-score every
 	 * valid slot before comparing working data; this is the multi-baseline
-	 * behaviour missing from the original two-slot implementation. */
+	 * behaviour missing from the original two-slot implementation.
+	 */
 	if (algo->safe_baseline_count > 1)
 		hx_safe_baseline_select_for_raw(algo, raw);
 	if (!hx_safe_baseline_can_recover(algo))
@@ -396,11 +389,18 @@ bool hx_algo_runtime_baseline_process(struct hx_algo *algo, const u16 *raw,
 	hx_compare_one_baseline(algo, raw, algo->safe_baseline_q8, safe.common,
 				&safe);
 	result = hx_classify_baselines(algo, &working, &safe, finger_state);
+	hx_safe_baseline_check_with_state(algo, finger_state,
+		result != HX_SAFE_COMPARE_BOTH_INVALID,
+		working.line_noise || safe.line_noise ||
+		working.bad_nodes > algo->wake_max_unstable_nodes * 2,
+		working.negative_nodes > algo->wake_max_unstable_nodes,
+		result == HX_SAFE_COMPARE_BOTH_INVALID,
+		working.out_of_range || safe.out_of_range);
 	reset_action = hx_safe_baseline_reset_policy(algo, result,
 		false, HX_FINGER_UNKNOWN);
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	algo->diag_touch_mask_nodes = 0;
-	for (int i = 1; i < HX_PIXELS; i++)
+	for (int i = 0; i < HX_PIXELS; i++)
 		if (algo->zone_map[i])
 			algo->diag_touch_mask_nodes++;
 	algo->diag_safe_compare_result = result;
@@ -557,7 +557,7 @@ hx_clean_raw_quality(struct hx_algo *algo, const u16 *raw,
 	int r, c, i;
 
 	memset(algo->baseline_hist, 0, sizeof(algo->baseline_hist));
-	for (i = 1; i < HX_PIXELS; i++) {
+	for (i = 0; i < HX_PIXELS; i++) {
 		s32 sample = (s32)le16_to_cpup(raw + i);
 		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
 		int bin;
@@ -577,11 +577,11 @@ hx_clean_raw_quality(struct hx_algo *algo, const u16 *raw,
 	for (common_bin = 0; common_bin < HX_BASELINE_HIST_BINS;
 	     common_bin++) {
 		cumulative += algo->baseline_hist[common_bin];
-		if (cumulative >= (HX_PIXELS - 1) / 2)
+		if (cumulative >= HX_PIXELS / 2)
 			break;
 	}
 	common_bin = min(common_bin, HX_BASELINE_HIST_BINS - 1);
-	for (i = 1; i < HX_PIXELS; i++) {
+	for (i = 0; i < HX_PIXELS; i++) {
 		s32 sample = (s32)le16_to_cpup(raw + i);
 		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
 		s32 delta = sample - reference;
@@ -600,16 +600,20 @@ hx_clean_raw_quality(struct hx_algo *algo, const u16 *raw,
 		return HX_CLEAN_BASELINE_TEMPORAL;
 	/* The vendor rejects even a small compact positive island as a ghost
 	 * candidate.  Without this check 1-3 cells fall below the generic spatial
-	 * count and can be absorbed into a new safe baseline. */
+	 * count and can be absorbed into a new safe baseline.
+	 */
 	if (hx_safe_baseline_check_ghost(algo, raw, reference_q8, common,
 					 NULL))
 		return HX_CLEAN_BASELINE_SPATIAL;
 	if (hx_safe_baseline_check_side_touch(algo, raw, reference_q8,
 					      common))
 		return HX_CLEAN_BASELINE_SPATIAL;
+	if (hx_safe_baseline_check_side_very_negative(algo, raw, reference_q8,
+						      common))
+		return HX_CLEAN_BASELINE_NEGATIVE;
 
 	threshold = max_t(s32, threshold, 1);
-	for (i = 1; i < HX_PIXELS; i++) {
+	for (i = 0; i < HX_PIXELS; i++) {
 		s32 sample = (s32)le16_to_cpup(raw + i);
 		s32 reference = reference_q8[i] >> HX_BASELINE_FRACTION_BITS;
 		s32 local = sample - reference - common;
@@ -737,6 +741,12 @@ static void hx_clean_baseline_process(struct hx_algo *algo, const u16 *raw)
 		if (algo->safe_no_finger_frames <
 		    algo->safe_commit_no_finger_frames)
 			return;
+		if (!hx_safe_baseline_is_ok_to_update(algo)) {
+			hx_clean_baseline_record_reject(algo,
+				HX_CLEAN_BASELINE_SPATIAL);
+			hx_clean_baseline_reset(algo);
+			return;
+		}
 
 		/* The learning grid may itself have absorbed a persistent anomaly.
 		 * A valid prior safe baseline is therefore the final independent
@@ -790,13 +800,15 @@ static void hx_clean_baseline_process(struct hx_algo *algo, const u16 *raw)
 	 * reference.  The official path keeps the newly accepted safe baseline
 	 * under observation while the AFE settles; otherwise the first residual
 	 * display frames are integrated back into the grid and the user sees a
-	 * slow post-release degradation. */
+	 * slow post-release degradation.
+	 */
 	if (reacquiring)
 		algo->baseline_post_reacquire_hold = 120;
 	/* A committed observation disarms the collector until a new wake or an
 	 * explicit reacquire arms it.  This prevents duplicate queue entries from
 	 * a stationary panel while direct commits can still represent distinct
-	 * same-epoch electrical states. */
+	 * same-epoch electrical states.
+	 */
 	algo->safe_candidate_armed = false;
 	hx_clean_baseline_reset(algo);
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
@@ -808,64 +820,13 @@ static void hx_clean_baseline_process(struct hx_algo *algo, const u16 *raw)
 #endif
 }
 
-struct hx_baseline_frame_observation {
-	u16 safe_bad_nodes;
-	u16 safe_negative_nodes;
-	u16 operational_bad_nodes;
-	u16 operational_negative_nodes;
-	u16 out_of_range;
-	u16 line_noise;
-};
-
-static void hx_baseline_observe_frame(struct hx_algo *algo, const u16 *raw,
-				      s32 common_diff,
-				      struct hx_baseline_frame_observation *obs)
-{
-	u8 row_bad[HX_ROWS] = { 0 };
-	u8 col_bad[HX_COLS] = { 0 };
-	int i, r, c;
-
-	memset(obs, 0, sizeof(*obs));
-	for (i = 1; i < HX_PIXELS; i++) {
-		s32 sample = (s32)le16_to_cpup(raw + i);
-		s32 baseline = algo->baseline_q8[i] >>
-			HX_BASELINE_FRACTION_BITS;
-		s32 local = sample - baseline - common_diff;
-
-		if (sample < 0x1000 || sample > 0xf000) {
-			obs->out_of_range++;
-			continue;
-		}
-		if (abs(local) > HX_BASELINE_CLEAN_LOCAL_THRESHOLD) {
-			obs->safe_bad_nodes++;
-			if (local < 0)
-				obs->safe_negative_nodes++;
-		}
-		if (abs(local) <= algo->wake_raw_jump_threshold)
-			continue;
-		obs->operational_bad_nodes++;
-		if (local < 0)
-			obs->operational_negative_nodes++;
-		r = i / HX_COLS;
-		c = i % HX_COLS;
-		row_bad[r]++;
-		col_bad[c]++;
-	}
-	for (r = 0; r < HX_ROWS; r++)
-		if (row_bad[r] >= algo->wake_max_unstable_line_nodes)
-			obs->line_noise++;
-	for (c = 0; c < HX_COLS; c++)
-		if (col_bad[c] >= algo->wake_max_unstable_line_nodes)
-			obs->line_noise++;
-}
-
 static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 				      enum hx_finger_state finger_state)
 {
+	const u16 *bliir_raw = algo->bliir_use_pre_cmf_raw ?
+		algo->pre_cmf_raw : raw;
 	s64 common_sum = 0;
-	s64 working_safe_sum_q8 = 0;
 	s32 common_diff;
-	s32 working_safe_common_q8 = 0;
 	s32 max_delta = INT_MIN;
 	int common_bin = 0;
 	int common_count = 0;
@@ -876,9 +837,19 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	bool safe_frame_clean;
 	bool operational_clean;
 	bool spatial_update_allowed;
+	bool stage_quality_allowed;
 	bool stable_no_touch;
 	bool release_candidate;
+	bool blrecal_request;
+	bool shb_noisy_action;
 	bool no_active_tracks = true;
+	bool blreset_touch_protected = false;
+	u8 active_tracks = 0;
+	u16 blsm_property = 0;
+	u16 blreset_flags;
+	u16 signal_flags;
+	u16 ghost_nodes = 0;
+	bool ghost_max = false;
 	struct hx_baseline_frame_observation observation;
 	int r, c;
 
@@ -893,21 +864,13 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 					(s32)algo->baseline_initial <<
 					HX_BASELINE_FRACTION_BITS;
 		} else {
-			hx_copy_raw_to_baseline(algo->baseline_q8, raw);
+			hx_copy_raw_to_baseline(algo->baseline_q8, bliir_raw);
 		}
 		memset(algo->baseline_release_hold, 0,
 		       sizeof(algo->baseline_release_hold));
 		algo->baseline_initialized = true;
 	}
 	memset(algo->baseline_hist, 0, sizeof(algo->baseline_hist));
-	if (algo->safe_baseline_valid) {
-		for (r = 1; r < HX_PIXELS; r++)
-			working_safe_sum_q8 += algo->baseline_q8[r] -
-				algo->safe_baseline_q8[r];
-		working_safe_common_q8 = working_safe_sum_q8 /
-			(HX_PIXELS - 1);
-	}
-
 	/* Estimate panel-wide VCOM/temperature drift before classifying cells. */
 	for (r = 1; r < HX_PIXELS; r++) {
 		s32 sample = (s32)le16_to_cpup(raw + r);
@@ -962,11 +925,90 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 			}
 	}
 	hx_baseline_observe_frame(algo, raw, common_diff, &observation);
+	blrecal_request = hx_blrecal_process(algo, raw, observation.max_signal,
+		observation.min_signal, false, false);
+	blreset_flags = hx_blreset_classify_frame(algo, raw, common_diff,
+		observation.max_signal, observation.min_signal, has_signal,
+		observation.line_noise, observation.out_of_range);
+	/* BLSM_GetProperty and SafeBaseline_CheckWithState must consume the same
+	 * BLReset result.  Keep platform-originated flags in addition to the
+	 * frame-local predicates; the latter are replaced after postprocess with
+	 * the richer touch-aware view.
+	 */
+	algo->safe_prev_flags = algo->safe_flags;
+	algo->safe_flags = blreset_flags;
+	if (algo->platform.charger_noise)
+		algo->safe_flags |= HX_SAFE_FLAG_VERY_NOISY;
+	if (algo->platform.panel_sd)
+		algo->safe_flags |= HX_SAFE_FLAG_SENSOR_BAD;
+	if (algo->platform.smart_cover)
+		algo->safe_flags |= HX_SAFE_FLAG_ALL_TOUCH_BAD;
 	for (r = 0; r < HIMAX_MAX_TOUCH; r++)
 		if (algo->tracks[r].active) {
 			no_active_tracks = false;
-			break;
+			active_tracks++;
+			/* BLReset_BaselineStateUpdate protects a young, valid touch in
+			 * the panel interior.  Tracks use normalized coordinates, so a
+			 * one-grid-cell-equivalent margin provides the same exclusion of
+			 * the outer sensor ring.
+			 */
+			if (algo->tracks[r].reported && algo->tracks[r].age < 12 &&
+			    algo->tracks[r].x > 4096 && algo->tracks[r].x < 61439 &&
+			    algo->tracks[r].y > 4096 && algo->tracks[r].y < 61439)
+				blreset_touch_protected = true;
 		}
+	hx_blreset_baseline_state_update(algo, false,
+		blreset_touch_protected, observation.operational_bad_nodes);
+	/* The vendor runs three independent abnormal-baseline timers after the
+	 * baseline-state update.  Keep their classification separate from the
+	 * generic reset gate; only a vote that survives the vendor-sized 300 ms
+	 * window is promoted to a reset reason below.
+	 */
+	(void)hx_blreset_abnormal_types(algo, observation.max_signal,
+		observation.min_signal, observation.operational_bad_nodes,
+		observation.operational_negative_nodes, has_signal,
+		blreset_touch_protected, false);
+	if (algo->blreset_abnormal_type_elapsed[0] > 300)
+		algo->safe_flags |= HX_SAFE_FLAG_VERY_NEGATIVE;
+	if (algo->blreset_abnormal_type_elapsed[1] > 300)
+		algo->safe_flags |= HX_SAFE_FLAG_VERY_NOISY;
+	if (algo->blreset_abnormal_type_elapsed[2] > 300)
+		algo->safe_flags |= HX_SAFE_FLAG_SENSOR_BAD;
+	/* SafeBaseline_CheckWithState/CheckWithSignal are part of the normal
+	 * BLSM pre-process path in TSACore, not an optional runtime-comparison
+	 * pass.  Feed their signal predicates before selecting the BLIIR action so
+	 * a noisy/negative/silent-ghost frame cannot be learned as baseline.
+	 */
+	/* The full BL2RAW buffer comparison is intentionally deferred to the
+	 * postprocess path, but the signal predicates still need current-frame
+	 * population counts.  Seed the counters from the observation rather than
+	 * reusing the previous frame's values (which could otherwise keep a stale
+	 * VERY_NOISY/VERY_NEGATIVE flag alive).
+	 */
+	algo->safe_current_negative_nodes = observation.safe_negative_nodes;
+	algo->safe_current_positive_nodes = observation.safe_bad_nodes >
+		observation.safe_negative_nodes ?
+		observation.safe_bad_nodes - observation.safe_negative_nodes : 0;
+	signal_flags = hx_safe_baseline_signal_flags(algo,
+		observation.max_signal, observation.min_signal,
+		finger_state == HX_FINGER_PRESENT || active_tracks != 0);
+	if (algo->safe_baseline_valid)
+		ghost_max = hx_safe_baseline_check_ghost(algo, raw,
+			algo->safe_baseline_q8, common_diff, &ghost_nodes);
+	algo->safe_flags |= signal_flags;
+	if (ghost_max)
+		algo->safe_flags |= HX_SAFE_FLAG_GHOST_MAX;
+	hx_safe_baseline_check_with_state(algo, finger_state,
+		/* No BL2BL/BL2RAW comparison was performed in this lightweight
+		 * per-frame path.  Passing ``true`` merely because a safe slot exists
+		 * would claim the vendor SafeDiff check completed and allow learning
+		 * during a touch.  The dedicated runtime comparator passes its actual
+		 * result separately.
+		 */
+		false, !!(signal_flags &
+		HX_SAFE_FLAG_VERY_NOISY), !!(signal_flags &
+		HX_SAFE_FLAG_VERY_NEGATIVE), ghost_max,
+		observation.out_of_range);
 	safe_frame_clean = !observation.out_of_range &&
 		observation.safe_bad_nodes <= HX_BASELINE_CLEAN_MAX_NODES;
 	operational_clean = !observation.out_of_range &&
@@ -974,7 +1016,8 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 			algo->wake_max_unstable_nodes &&
 		!observation.line_noise &&
 		/* BLSM_GetMinSig rejects negative excursions from BLIIR updates;
-		 * otherwise a display-induced dip is slowly learned as baseline. */
+		 * otherwise a display-induced dip is slowly learned as baseline.
+		 */
 		!observation.operational_negative_nodes;
 	/* Match BLSM's stage-0 debounce: a single apparently clean frame is
 	 * not enough to authorize per-cell BLIIR tracking.  Touch/noise resets
@@ -985,17 +1028,29 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	else if (algo->baseline_no_touch_stable_frames < U8_MAX)
 		algo->baseline_no_touch_stable_frames++;
 	stable_no_touch = algo->baseline_no_touch_stable_frames >= 10;
+	shb_noisy_action = hx_blsm_shb_consume_action(algo) != 0;
 	/* BLSM consumes the frame classification before BLIIR is allowed to
 	 * update.  Keep the stage explicit so touch, mild noise and severe line
-	 * noise cannot accidentally share the same learning path. */
-	hx_baseline_stage_update(algo, has_signal,
-		!operational_clean && !observation.line_noise &&
-		!observation.out_of_range,
-		observation.line_noise || observation.out_of_range,
-		algo->wake_qualifying);
+	 * noise cannot accidentally share the same learning path.
+	 */
+	/* BLRecal only raises the vendor recalibration request bit here.  The
+	 * hardware calibration command is owned by the SPI layer; treating the
+	 * request as BLIIR_Reset would incorrectly snapshot a noisy frame.
+	 */
+	blsm_property = hx_baseline_get_property(algo, observation.max_signal,
+		has_signal, operational_clean, blrecal_request,
+		shb_noisy_action, observation.line_noise,
+		observation.out_of_range);
+	hx_baseline_stage_update(algo, blsm_property,
+		observation.max_signal, observation.min_signal,
+		active_tracks == 1);
+	hx_baseline_stage_process(algo, raw, bliir_raw,
+		observation.max_signal, observation.min_signal,
+		has_signal, operational_clean);
 	/* Firmware no-finger plus no active track is the authoritative release
 	 * indication for a held-in-hand wake.  Residual spatial rebound is the
-	 * reason reacquire exists; it must not keep the guard in PROTECTED forever. */
+	 * reason reacquire exists; it must not keep the guard in PROTECTED forever.
+	 */
 	release_candidate = algo->baseline_held_in_hand &&
 		algo->baseline_touch_seen &&
 		finger_state == HX_FINGER_ABSENT && no_active_tracks &&
@@ -1007,7 +1062,8 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	/* After a held-in-hand wake, the old no-palm grid may be permanently
 	 * offset even when the release window is clean.  Reacquire one complete
 	 * raw grid at the release boundary instead of letting the ordinary BLIIR
-	 * integrator crawl toward it and potentially absorb residual artifacts. */
+	 * integrator crawl toward it and potentially absorb residual artifacts.
+	 */
 	if (touch_hold_released && algo->baseline_enabled &&
 		(!has_signal || release_candidate) &&
 		(operational_clean || release_candidate)) {
@@ -1019,9 +1075,21 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 		algo->baseline_recovery_frames = 0;
 		algo->baseline_no_touch_stable_frames = 0;
 	}
+	/* Stages 7/8/9 already applied the vendor BLIIR_Update signal gate.
+	 * Requiring the generic operational-clean predicate a second time would
+	 * suppress the negative-recovery behavior for which those stages exist.
+	 */
+	stage_quality_allowed = operational_clean ||
+		algo->baseline_stage == HX_BLSM_POST_TOUCH ||
+		algo->baseline_stage == HX_BLSM_POST_TOUCH_ALT ||
+		algo->baseline_stage == HX_BLSM_DEBOUNCE;
 	spatial_update_allowed = !algo->baseline_touch_hold &&
-		algo->baseline_stage == HX_BLSM_NO_TOUCH_STABLE &&
-		operational_clean && !has_signal && stable_no_touch;
+		algo->baseline_stage_allows_update && stage_quality_allowed &&
+		(algo->baseline_stage_force_update || !has_signal) &&
+		(stable_no_touch ||
+		algo->baseline_stage == HX_BLSM_POST_TOUCH ||
+		algo->baseline_stage == HX_BLSM_POST_TOUCH_ALT ||
+		algo->baseline_stage == HX_BLSM_DEBOUNCE);
 	if (algo->baseline_post_reacquire_hold) {
 		spatial_update_allowed = false;
 		if (!has_signal && operational_clean &&
@@ -1038,17 +1106,21 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 					HX_BASELINE_FRACTION_BITS;
 			s32 delta = sample - baseline;
 			s32 local = delta - common_diff;
-			s32 step_q8 = 0;
 
-			if (!algo->baseline_enabled ||
-			    algo->baseline_update_suppressed_once) {
+			if (!algo->baseline_enabled) {
 				delta = sample - algo->baseline_initial;
+				goto store;
+			}
+			if (algo->baseline_stage_reset ||
+			    algo->baseline_update_suppressed_once) {
+				delta = 0;
 				goto store;
 			}
 			if (!spatial_update_allowed) {
 				/* Vendor BLSM hold stages do not update BL.  CMF handles
 				 * common-mode signal; letting the baseline follow common_diff
-				 * during a touch slowly absorbs a held palm. */
+				 * during a touch slowly absorbs a held palm.
+				 */
 				delta = local >= algo->baseline_peak_threshold ?
 					local : 0;
 				if (delta) {
@@ -1073,31 +1145,22 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 				goto store;
 			}
 
-			step_q8 = hx_bliir_fixed_step_q8(delta,
+			/* Official BLIIR selects raw or pre-CMF raw independently of
+			 * the signal frame sent to detection.
+			 */
+			if (algo->bliir_use_pre_cmf_raw)
+				delta = (s32)le16_to_cpup(bliir_raw + idx) - baseline;
+			/* BLIIR_DoUpdate is deliberately independent of SafeBaseline:
+			 * it moves the working grid by exactly one bounded step.  Safe
+			 * history judges or resets a bad working grid afterwards; it does
+			 * not clamp every BLIIR cell update.
+			 */
+			algo->baseline_q8[idx] = hx_bliir_update_cell_q8(
+				algo->baseline_q8[idx],
+				le16_to_cpup(bliir_raw + idx),
+				algo->baseline_stage_update_step > 0 ?
+				algo->baseline_stage_update_step :
 				algo->baseline_no_finger_max_step);
-
-			if (algo->safe_baseline_valid &&
-			    hx_safe_baseline_can_recover(algo) && step_q8) {
-				s32 safe_centre = algo->safe_baseline_q8[idx] +
-					working_safe_common_q8;
-				s32 safe_limit = HX_BASELINE_CLEAN_LOCAL_THRESHOLD <<
-					HX_BASELINE_FRACTION_BITS;
-				s32 proposed = algo->baseline_q8[idx] + step_q8;
-				s32 clamped = clamp_t(s32, proposed,
-					safe_centre - safe_limit,
-					safe_centre + safe_limit);
-
-#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
-				if (clamped != proposed)
-					algo->baseline_safe_clamp_count++;
-#endif
-				algo->baseline_q8[idx] = clamp_t(s32, clamped, 0,
-					0xffff << HX_BASELINE_FRACTION_BITS);
-			} else {
-				algo->baseline_q8[idx] = clamp_t(s32,
-					algo->baseline_q8[idx] + step_q8, 0,
-					0xffff << HX_BASELINE_FRACTION_BITS);
-			}
 			/* Match v1.1.2 ProcessNoFinger/ProcessFinger background
 			 * semantics: only frozen candidate cells reach the solver.
 			 * Passing every local residual fills the fixed zone arena with
@@ -1108,9 +1171,22 @@ store:
 			algo->frame[r][c] = clamp_t(s32, delta, SHRT_MIN, SHRT_MAX);
 		}
 	}
+	/* BLSM_SaveNormalBl keeps a separate no-touch reference.  It is updated
+	 * only after the stage-0 action has accepted the frame, so a touch/noise
+	 * frame can never become the normal baseline authority.
+	 */
+	if (algo->baseline_stage == HX_BLSM_NO_TOUCH_STABLE &&
+		spatial_update_allowed && !has_signal && operational_clean &&
+		!algo->baseline_hw_reset && !algo->baseline_touch_latched) {
+		memcpy(algo->normal_baseline_q8, algo->baseline_q8,
+		       sizeof(algo->normal_baseline_q8));
+		algo->normal_baseline_valid = true;
+	}
 	/* The wake qualification frame is still sent through detection/tracking,
-	 * but cannot become a second baseline-learning sample. */
+	 * but cannot become a second baseline-learning sample.
+	 */
 	algo->baseline_update_suppressed_once = false;
+	algo->baseline_stage_reset = false;
 	algo->baseline_prev_had_signal = has_signal;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	algo->diag_has_signal = has_signal;
@@ -1352,7 +1428,10 @@ void hx_preprocess_frame(struct hx_algo *algo, const u16 *raw)
 void hx_preprocess_frame_state(struct hx_algo *algo, const u16 *raw,
 			       enum hx_finger_state finger_state)
 {
-	hx_prepare_frame_baseline(algo, raw, finger_state);
+	memcpy(algo->pre_cmf_raw, raw, sizeof(algo->pre_cmf_raw));
+	hx_prepare_frame_baseline(algo,
+		algo->bliir_use_pre_cmf_raw ? algo->pre_cmf_raw : raw,
+		finger_state);
 
 	if (algo->cmf_enabled)
 		hx_apply_cmf(algo);
@@ -1360,6 +1439,13 @@ void hx_preprocess_frame_state(struct hx_algo *algo, const u16 *raw,
 	hx_edge_boost(algo);
 
 	hx_apply_iir(algo);
+	/* Commit raw history only after all classifiers have consumed the previous
+	 * frame.  A partial/SPI-failed frame never reaches this function.
+	 */
+	hx_blsm_shb_process(algo, algo->pre_cmf_raw,
+		algo->baseline_stage == HX_BLSM_RESET);
+	memcpy(algo->prev_raw, raw, sizeof(algo->prev_raw));
+	algo->prev_raw_valid = true;
 }
 
 /*

@@ -4,6 +4,7 @@ import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
 import android.os.Bundle;
+import android.os.CountDownTimer;
 import android.os.Environment;
 import android.text.InputType;
 import android.view.Gravity;
@@ -15,6 +16,7 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.appcompat.app.AlertDialog;
 import androidx.activity.EdgeToEdge;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -62,6 +64,11 @@ public final class MainActivity extends AppCompatActivity {
     private volatile boolean diagnosticChecked;
     private volatile boolean diagnosticSupported;
     private volatile boolean resetSupported;
+    private volatile boolean baselineFullResetSupported;
+    private volatile boolean baselineResetInProgress;
+    private String baselineFullResetPath;
+    private AlertDialog baselineResetDialog;
+    private CountDownTimer baselineResetTimer;
     private volatile String diagnosticMessage = "正在检查当前内核的诊断能力…";
     private String lastCaptureDir = Environment.getExternalStorageDirectory().getPath() + "/HimaxTouchDiag";
 
@@ -239,6 +246,20 @@ public final class MainActivity extends AppCompatActivity {
         TextView immediateHint = body("选择预设或调整参数后会立即写入当前内核；无需另行保存。");
         immediateHint.setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall);
         page.addView(immediateHint);
+        MaterialButton baselineReset = new MaterialButton(this, null,
+                com.google.android.material.R.attr.materialButtonOutlinedStyle);
+        baselineReset.setText("完整重建 Baseline");
+        baselineReset.setIconResource(R.drawable.ic_restart_alt);
+        baselineReset.setEnabled(!connectionBusy && !connectionFailed
+                && baselineFullResetSupported && !baselineResetInProgress);
+        baselineReset.setOnClickListener(v -> confirmBaselineFullReset());
+        page.addView(baselineReset);
+        if (!connectionBusy && !connectionFailed && !baselineFullResetSupported) {
+            TextView resetHint = body("当前内核没有 baseline_full_reset 节点，完整重建功能不可用。");
+            resetHint.setTextAppearance(com.google.android.material.R.style.TextAppearance_Material3_BodySmall);
+            resetHint.setEnabled(false);
+            page.addView(resetHint);
+        }
         ChipGroup modes = new ChipGroup(this); modes.setSingleSelection(true); modes.setSelectionRequired(false);
         Chip daily=chip("应用日用预设"), game=chip("应用游戏预设");
         daily.setId(View.generateViewId()); game.setId(View.generateViewId());
@@ -257,9 +278,9 @@ public final class MainActivity extends AppCompatActivity {
 
     private void discoverAndLoad() {
         final int generation = operationGeneration.incrementAndGet();
-        connectionBusy = true; connectionFailed = false; algoPath = null;
+        connectionBusy = true; connectionFailed = false; algoPath = null; baselineFullResetPath = null;
         values = Collections.emptyMap(); diagnosticChecked = false;
-        diagnosticSupported = false; resetSupported = false;
+        diagnosticSupported = false; resetSupported = false; baselineFullResetSupported = false;
         diagnosticMessage = "正在检查当前内核的诊断能力…";
         connectionMessage = "正在请求 root 权限…";
         refreshVisiblePage();
@@ -275,21 +296,24 @@ public final class MainActivity extends AppCompatActivity {
                 for(String line:out.split("\\n")){int p=line.indexOf('='); if(p>0) try{snapshot.put(line.substring(0,p),Integer.parseInt(line.substring(p+1).trim()));}catch(Exception ignored){}}
             }
             String capabilities = RootShell.run(
-                    "for n in diagnostics event_stack event_trace; do p=$(find /sys/devices -name $n -type f 2>/dev/null|head -1); [ -n \"$p\" ] && echo $n=1 || echo $n=0; done; " +
+                    "for n in diagnostics event_stack event_trace baseline_full_reset; do p=$(find /sys/devices -name $n -type f 2>/dev/null|head -1); [ -n \"$p\" ] && echo $n=$p || echo $n=0; done; " +
                     "p=$(find /sys/devices -name inplace_reset -type f 2>/dev/null|head -1); [ -n \"$p\" ] && echo inplace_reset=1 || echo inplace_reset=0; " +
                     "ok=0; for n in /sys/class/input/event*/device/name; do [ -f \"$n\" ] || continue; case $(cat \"$n\" 2>/dev/null) in *Himax*Touch*) ok=1; break;; esac; done; echo himax_input=$ok");
             if (!isCurrent(generation)) return;
-            boolean hasDiagnostics=capabilities.contains("diagnostics=1");
-            boolean hasStack=capabilities.contains("event_stack=1");
-            boolean hasTrace=capabilities.contains("event_trace=1");
+            boolean hasDiagnostics=!capabilityValue(capabilities,"diagnostics").equals("0");
+            boolean hasStack=!capabilityValue(capabilities,"event_stack").equals("0");
+            boolean hasTrace=!capabilityValue(capabilities,"event_trace").equals("0");
             boolean hasInput=capabilities.contains("himax_input=1");
             boolean hasReset=capabilities.contains("inplace_reset=1");
+            String fullResetPath=capabilityValue(capabilities,"baseline_full_reset");
             List<String> missing = new ArrayList<>();
             if(!hasDiagnostics)missing.add("diagnostics"); if(!hasStack)missing.add("event_stack");
             if(!hasTrace)missing.add("event_trace"); if(!hasInput)missing.add("Himax input");
             Map<String,Integer> published=Collections.unmodifiableMap(snapshot);
             postIfCurrent(generation, () -> {
                 algoPath=foundPath.isEmpty()?null:foundPath; values=published;
+                baselineFullResetPath="0".equals(fullResetPath)?null:fullResetPath;
+                baselineFullResetSupported=baselineFullResetPath!=null;
                 connectionBusy=false; connectionFailed=foundPath.isEmpty();
                 connectionMessage=foundPath.isEmpty()?"Root 已授权，但未找到 Himax 驱动调参节点":"已获得 root 权限 · 已连接驱动\n"+foundPath;
                 diagnosticChecked=true; diagnosticSupported=missing.isEmpty(); resetSupported=hasReset;
@@ -300,6 +324,7 @@ public final class MainActivity extends AppCompatActivity {
             String detail = ex.getMessage() == null ? ex.toString() : ex.getMessage();
             postIfCurrent(generation, () -> {
                 connectionBusy=false; connectionFailed=true; algoPath=null; values=Collections.emptyMap();
+                baselineFullResetPath=null; baselineFullResetSupported=false;
                 diagnosticChecked=true; diagnosticSupported=false; resetSupported=false;
                 diagnosticMessage="无法检查诊断能力：root 不可用";
                 if (detail.contains("Cannot run program \"su\"") || detail.contains("Permission denied")) connectionMessage="Root 授权失败\n请在 KernelSU/Magisk 中允许 EGoTouch 调参器获得超级用户权限。";
@@ -310,6 +335,7 @@ public final class MainActivity extends AppCompatActivity {
     }
 
     private boolean isCurrent(int generation){return !destroyed&&operationGeneration.get()==generation;}
+    private String capabilityValue(String capabilities,String key){for(String line:capabilities.split("\\n")){int p=line.indexOf('=');if(p>0&&line.substring(0,p).equals(key))return line.substring(p+1).trim();}return "0";}
     private void postIfCurrent(int generation,Runnable action){if(!isCurrent(generation))return;runOnUiThread(()->{if(isCurrent(generation))action.run();});}
     private void refreshVisiblePage(){if(destroyed||content==null)return;if(tunerVisible)showTuner();else showDiagnostic();}
 
@@ -371,6 +397,55 @@ public final class MainActivity extends AppCompatActivity {
         }catch(Exception ex){postIfCurrent(generation,()->{connectionBusy=false;connectionFailed=false;connectionMessage="模式切换失败，驱动仍保持连接\n"+ex.getMessage();refreshVisiblePage();});}});
     }
 
+    private void confirmBaselineFullReset(){
+        if(!baselineFullResetSupported||baselineFullResetPath==null||connectionBusy||baselineResetInProgress){toast("当前内核不支持完整重建 Baseline");return;}
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("确认完整重建 Baseline？")
+                .setMessage("此操作会重新初始化触控硬件并清空当前 Baseline。重建期间请勿点击或触摸屏幕。")
+                .setNegativeButton("取消",null)
+                .setPositiveButton("确认重建",(dialog,which)->startBaselineFullReset())
+                .show();
+    }
+
+    private void startBaselineFullReset(){
+        final int generation=operationGeneration.get();
+        final String path=baselineFullResetPath;
+        baselineResetInProgress=true;
+        baselineResetDialog=new MaterialAlertDialogBuilder(this)
+                .setTitle("正在完整重建 Baseline")
+                .setMessage("正在重新初始化，请勿点击或触摸屏幕…")
+                .setCancelable(false)
+                .create();
+        baselineResetDialog.setCanceledOnTouchOutside(false);
+        baselineResetDialog.show();
+        worker.execute(()->{try{
+            RootShell.run("printf '%s' 1 > "+RootShell.quote(path));
+            postIfCurrent(generation,()->startBaselineResetCountdown());
+        }catch(Exception ex){
+            String detail=ex.getMessage()==null?ex.toString():ex.getMessage();
+            postIfCurrent(generation,()->{
+                baselineResetInProgress=false;
+                if(baselineResetDialog!=null)baselineResetDialog.dismiss();
+                baselineResetDialog=null;
+                refreshVisiblePage();
+                new MaterialAlertDialogBuilder(this).setTitle("Baseline 重建失败").setMessage(detail).setPositiveButton("确定",null).show();
+            });
+        }});
+    }
+
+    private void startBaselineResetCountdown(){
+        baselineResetTimer=new CountDownTimer(3000,1000){
+            public void onTick(long remaining){
+                if(baselineResetDialog!=null)baselineResetDialog.setMessage("请勿点击或触摸屏幕\n\n"+Math.max(1,(remaining+999)/1000)+" 秒后完成");
+            }
+            public void onFinish(){
+                if(baselineResetDialog!=null)baselineResetDialog.dismiss();
+                baselineResetDialog=null;baselineResetTimer=null;baselineResetInProgress=false;
+                refreshVisiblePage();toast("Baseline 已完整重建");
+            }
+        }.start();
+    }
+
     private void showDiagnostic(){
         tunerVisible=false;
         toolbar.setTitle("Himax 断触诊断"); ScrollView scroll=new ScrollView(this); LinearLayout page=vertical(); page.setPadding(dp(16),dp(16),dp(16),dp(32)); scroll.addView(page);
@@ -394,5 +469,5 @@ public final class MainActivity extends AppCompatActivity {
     private MaterialButton button(String text,int icon){MaterialButton b=new MaterialButton(this);b.setText(text);b.setIconResource(icon);LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(-1,-2);lp.topMargin=dp(12);b.setLayoutParams(lp);return b;}
     private void toast(String text){Snackbar.make(content,text,Snackbar.LENGTH_LONG).show();}
     private int dp(int value){return Math.round(value*getResources().getDisplayMetrics().density);}
-    @Override protected void onDestroy(){destroyed=true;operationGeneration.incrementAndGet();worker.shutdownNow();super.onDestroy();}
+    @Override protected void onDestroy(){destroyed=true;operationGeneration.incrementAndGet();if(baselineResetTimer!=null)baselineResetTimer.cancel();if(baselineResetDialog!=null)baselineResetDialog.dismiss();worker.shutdownNow();super.onDestroy();}
 }

@@ -2,17 +2,35 @@
 MODNAME = himax-spi
 MODVER = 0.1
 
+# Active-pen support is intentionally isolated from the finger path. There is
+# no pen parser in this tree yet, so production builds do not compile stylus
+# code.
+HIMAX_STYLUS ?= 0
+
 obj-m += $(MODNAME).o
 $(MODNAME)-y := himax-spi-core.o himax-spi-hw.o himax-spi-sysfs.o \
-		hx-algo.o hx-algo-preprocess.o \
-		hx-baseline-state.o hx-safe-baseline.o \
-		hx-algo-detect.o hx-algo-resolve.o hx-algo-track.o
+	hx-algo.o hx-algo-preprocess.o hx-algo-detect.o hx-algo-resolve.o \
+	hx-algo-track.o hx-baseline-state.o hx-baseline-property.o \
+	hx-baseline-observe.o hx-baseline-update.o hx-blreset.o \
+	hx-blreset-abnormal.o hx-blreset-state.o hx-blrecal.o hx-blsm-shb.o \
+	hx-safe-baseline.o hx-safe-baseline-signal.o hx-safe-baseline-stats.o \
+	hx-safe-baseline-judge.o hx-safe-baseline-queue.o
+
+$(MODNAME)-y += hx-panel-profile.o
 
 # Full-rate diagnostic capture is deliberately excluded from normal builds.
 # Build an instrumented module with: make HIMAX_DIAGNOSTICS=1
 HIMAX_DIAGNOSTICS ?= 0
 ifeq ($(HIMAX_DIAGNOSTICS),1)
 ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS=1
+endif
+
+ifeq ($(HIMAX_STYLUS),1)
+ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_STYLUS=1
+$(MODNAME)-y += hx-stylus.o
+DKMS_SOURCES += hx-stylus.c
+else
+ccflags-y += -DHIMAX_STYLUS_DISABLED=1
 endif
 
 KVER = $(shell uname -r)
@@ -23,8 +41,13 @@ DKMS_SOURCES = Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
 	       himax-spi-sysfs.c \
 	       himax-spi.h hx-algo.c \
 	       hx-algo-preprocess.c hx-algo-detect.c hx-algo-resolve.c \
-	       hx-baseline-state.c hx-safe-baseline.c hx-algo-track.c \
-	       hx-algo.h hx-algo-internal.h hx-frame-status.h
+	       hx-baseline-state.c hx-baseline-property.c hx-baseline-observe.c \
+	       hx-baseline-update.c hx-blreset.c hx-blreset-abnormal.c \
+	       hx-blreset-state.c hx-blrecal.c hx-blsm-shb.c hx-safe-baseline.c \
+	       hx-safe-baseline-signal.c hx-safe-baseline-stats.c \
+	       hx-safe-baseline-judge.c hx-safe-baseline-queue.c hx-algo-track.c \
+	       hx-algo.h hx-algo-internal.h hx-frame-status.h hx-stylus.h \
+	       hx-panel-profile.c hx-panel-profile.h
 
 .PHONY: all clean test deploy-local dkmsinstall dkmsremove
 

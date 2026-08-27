@@ -58,6 +58,13 @@ bool himax_restore_afe_enabled(void)
 static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on);
 static int hx83121a_gaokun_read_event_stack(struct himax_ts_data *ts);
 static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts);
+
+static void himax_reset_frame_health(struct himax_ts_data *ts)
+{
+	ts->consecutive_invalid_frames = 0;
+	ts->consecutive_retry_frames = 0;
+}
+
 static int himax_input_dev_config(struct himax_ts_data *ts)
 {
 	struct input_dev *input_dev;
@@ -116,6 +123,7 @@ static int himax_warm_resume(struct himax_ts_data *ts)
 	int ret;
 
 	himax_release_all_touches(ts);
+	ts->algo->baseline_hw_reset = false;
 	hx_algo_begin_wake(ts->algo);
 	ret = himax_verify_running_ic(ts);
 	if (ret)
@@ -155,6 +163,7 @@ static int himax_hw_reinit(struct himax_ts_data *ts, bool check_crc)
 	ts->controller_initialized = false;
 	ts->retained_suspend = false;
 	himax_release_all_touches(ts);
+	ts->algo->baseline_hw_reset = true;
 	hx_algo_begin_wake(ts->algo);
 
 	ret = hx83121a_chip_detect(ts);
@@ -203,6 +212,7 @@ static int himax_hw_reinit(struct himax_ts_data *ts, bool check_crc)
 out_enable_irq:
 	if (!ret) {
 		ts->controller_initialized = true;
+		himax_reset_frame_health(ts);
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 		ts->cold_init_count++;
 #endif
@@ -235,7 +245,7 @@ static int himax_hw_reinit_retry(struct himax_ts_data *ts, bool check_crc,
 	return ret;
 }
 
-int himax_manual_reset(struct himax_ts_data *ts)
+static int himax_manual_reset_common(struct himax_ts_data *ts, bool full_baseline)
 {
 	int ret;
 
@@ -254,9 +264,21 @@ int himax_manual_reset(struct himax_ts_data *ts)
 				    HIMAX_PANEL_REINIT_RETRIES,
 				    HIMAX_PANEL_REINIT_DELAY_MS,
 				    "manual");
+	if (!ret && full_baseline)
+		hx_algo_full_reset(ts->algo);
 out_unlock:
 	himax_unlock(ts);
 	return ret;
+}
+
+int himax_manual_reset(struct himax_ts_data *ts)
+{
+	return himax_manual_reset_common(ts, false);
+}
+
+int himax_manual_full_baseline_reset(struct himax_ts_data *ts)
+{
+	return himax_manual_reset_common(ts, true);
 }
 
 static void himax_power_down(struct himax_ts_data *ts)
@@ -348,6 +370,12 @@ static int himax_panel_enabled(struct drm_panel_follower *follower)
 	}
 
 	ts->panel_enabled = true;
+	if (ts->algo) {
+		struct hx_baseline_platform_state state = ts->algo->platform;
+
+		state.idle_transition = false;
+		hx_safe_baseline_set_platform_state(ts->algo, &state);
+	}
 	himax_unlock(ts);
 
 	mod_delayed_work(system_wq, &ts->panel_reinit_work,
@@ -364,6 +392,12 @@ static int himax_panel_disabling(struct drm_panel_follower *follower)
 
 	himax_lock(ts);
 	ts->panel_enabled = false;
+	if (ts->algo) {
+		struct hx_baseline_platform_state state = ts->algo->platform;
+
+		state.idle_transition = true;
+		hx_safe_baseline_set_platform_state(ts->algo, &state);
+	}
 	if (ts->panel_prepared)
 		himax_retain_for_suspend(ts);
 	himax_unlock(ts);
@@ -381,6 +415,12 @@ static int himax_panel_unpreparing(struct drm_panel_follower *follower)
 	himax_lock(ts);
 	ts->panel_enabled = false;
 	ts->panel_prepared = false;
+	if (ts->algo) {
+		struct hx_baseline_platform_state state = ts->algo->platform;
+
+		state.idle_transition = true;
+		hx_safe_baseline_set_platform_state(ts->algo, &state);
+	}
 	himax_retain_for_suspend(ts);
 	himax_unlock(ts);
 
@@ -496,10 +536,12 @@ static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts)
 				stable_cnt = hx_algo_process_frame_state(ts->algo,
 					/* qualify_wake_frame() already consumed this raw
 					 * grid for wake validation; process it once for
-					 * tracking, without a second baseline update. */
+					 * tracking, without a second baseline update.
+					 */
 					(const u16 *)(ts->event_buf +
 					 HX_FRAME_HEADER_BYTES),
 					effective_finger);
+				himax_process_blrecal_request(ts);
 				himax_report_tracked_state(ts, stable_cnt > 0);
 				return 0;
 			}
@@ -584,6 +626,10 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 
 	read_ret = hx83121a_gaokun_read_event_stack(ts);
 	if (read_ret) {
+		/* A transport failure carries no frame classification.  Do not let an
+		 * older invalid/retry streak combine with a later, unrelated stream.
+		 */
+		himax_reset_frame_health(ts);
 		himax_trace_record_irq(ts, read_ret, false, &frame_status, false);
 		/* AFE transitions can transiently lose one or two frames.  Resetting
 		 * the controller on the first miss creates a long, user-visible UP/
@@ -627,20 +673,53 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 		 * retain and re-report current tracks without feeding garbage into the
 		 * baseline or advancing tracker miss counters.
 		 */
+		if (master_valid)
+			ts->consecutive_retry_frames = min_t(u8,
+				ts->consecutive_retry_frames + 1, U8_MAX);
+		else
+			ts->consecutive_invalid_frames = min_t(u8,
+				ts->consecutive_invalid_frames + 1, U8_MAX);
 		dev_warn_ratelimited(ts->dev,
-			"discarding invalid/retry master event-stack frame\n");
+			"discarding invalid/retry master event-stack frame (%u/%u)\n",
+			master_valid ? ts->consecutive_retry_frames :
+			ts->consecutive_invalid_frames,
+			HIMAX_MAX_CONSECUTIVE_INVALID_FRAMES);
 		stable_cnt = hx_count_stable_tracks(algo);
 		himax_trace_record_irq(ts, 0, master_valid, &frame_status, false);
+		if ((master_valid && ts->consecutive_retry_frames >=
+			 HIMAX_MAX_CONSECUTIVE_INVALID_FRAMES) ||
+		    (!master_valid && ts->consecutive_invalid_frames >=
+			 HIMAX_MAX_CONSECUTIVE_INVALID_FRAMES)) {
+			int recovery_ret;
+
+			dev_err(ts->dev,
+				"persistent %s frames, reinitializing controller\n",
+				master_valid ? "retry" : "invalid");
+			himax_int_enable(ts, false);
+			recovery_ret = himax_hw_reinit_retry(ts, false,
+				HIMAX_PANEL_REINIT_RETRIES,
+				HIMAX_PANEL_REINIT_DELAY_MS, "frame-health");
+			if (recovery_ret)
+				dev_err(ts->dev,
+					"frame-health recovery failed; touch IRQ remains disabled\n");
+		}
 		goto report;
 	}
+	ts->consecutive_invalid_frames = 0;
+	ts->consecutive_retry_frames = 0;
 	effective_finger = hx_algo_resolve_finger_state(algo, ptr,
 		frame_status.has_finger ? HX_FINGER_PRESENT : HX_FINGER_ABSENT);
 	/* Classify electrical exceptions against the baseline that was active
 	 * when this frame arrived.  Runtime BLReset must not rewrite that
 	 * reference before the exception decision, otherwise a fault frame can
-	 * be normalized away and bypass the noise-hold/reinit path. */
+	 * be normalized away and bypass the noise-hold/reinit path.
+	 */
 	if (hx_algo_is_exception_frame(algo, ptr)) {
 		int recovery_ret;
+		struct hx_baseline_platform_state state = algo->platform;
+
+		state.charger_noise = state.charger_connected;
+		hx_safe_baseline_set_platform_state(algo, &state);
 
 		stable_cnt = hx_count_stable_tracks(algo);
 		himax_trace_record_irq(ts, 0, true, &frame_status, true);
@@ -665,6 +744,12 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 		goto out_unlock;
 	}
 	ts->consecutive_noise_frames = 0;
+	if (algo->platform.charger_noise) {
+		struct hx_baseline_platform_state state = algo->platform;
+
+		state.charger_noise = false;
+		hx_safe_baseline_set_platform_state(algo, &state);
+	}
 	if (hx_algo_runtime_baseline_process(algo, ptr, effective_finger,
 					     false))
 		dev_warn_ratelimited(ts->dev,
@@ -674,6 +759,13 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 	if (hx_safe_baseline_postprocess(algo, ptr, effective_finger))
 		dev_warn_ratelimited(ts->dev,
 			"synchronized side-area working baseline from safe history\n");
+	/* BLRecal requests are produced by the algorithm but owned by the SPI
+	 * layer.  Keep this after frame classification so a command cannot race
+	 * the raw snapshot used for the current baseline decision.
+	 */
+	if (himax_process_blrecal_request(ts))
+		dev_warn_ratelimited(ts->dev,
+			"BLRecal request remains pending after transport failure\n");
 	himax_trace_record_irq(ts, 0, true, &frame_status, false);
 
 report:

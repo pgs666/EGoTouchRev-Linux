@@ -99,6 +99,8 @@ README 不复制一份容易过期的参数表。修改参数只能用于受控 
 模块参数：
 
 - `disable_pressure=true`：不注册 pressure/touch-major 轴；
+- 主动笔支持默认关闭（`HIMAX_STYLUS=0`）；当前 mutual-cap 数据不会被当作笔
+  事件解析。`HIMAX_STYLUS=1` 仅编译独立的预留钩子，尚不提供笔设备；
 - `restore_afe_runtime=true`：硬件初始化后重放 120 Hz AFE 命令；
 - `full_resume_on_panel_enable=true`：每次 panel enable 走完整恢复和 wake qualification。
 

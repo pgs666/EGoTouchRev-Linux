@@ -18,6 +18,25 @@
 #define HIMAX_WAKE_TOUCH_MASK_RADIUS 2
 #define HIMAX_WAKE_MAX_TOUCH_CELLS   (HX_PIXELS / 3)
 
+/* Exported TSACore globals from the Gaokun Windows build.  The first seven
+ * entries are the common reset reasons; the remaining entries cover the
+ * less frequent side/special reasons.  Keep these as data, rather than
+ * scattering magic values through the policy implementation.
+ */
+static const u16 hx_safe_reset_time_default[10] = {
+	500, 500, 500, 500, 500, 500, 500, 500, 2000, 500,
+};
+static const u8 hx_safe_reset_push_default[10] = {
+	1, 1, 1, 1, 1, 1, 1, 0, 0, 0,
+};
+static const u8 hx_safe_reset_trigger_default[10] = {
+	5, 5, 5, 5, 5, 5, 50, 5, 5, 5,
+};
+static const u32 hx_safe_reset_screen_on_default[10] = {
+	300000, 300000, 300000, 300000, 300000,
+	300000, 300000, 600000, 600000, 600000,
+};
+
 void hx_algo_init_defaults(struct hx_algo *algo)
 {
 	/* Values track the current Windows solver defaults.  The baseline is
@@ -25,7 +44,16 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	 * of weak-frame loss after temperature/VCOM/common-mode drift.
 	 */
 	algo->baseline_enabled              = true;
-	algo->baseline_initial              = 0x7fee;
+	/* The Gaokun path normally runs at 120 Hz (about 8 ms/frame). */
+	algo->frame_interval_ms              = 8;
+	algo->safe_baseline_replace_enabled = false;
+	/* Gaokun g_tsaPrmtFlash + 0x5fc, used by BLIIR_Reset in raw-unified
+	 * mode.  Ordinary reset still copies the pre-CMF raw snapshot.
+	 */
+	algo->baseline_initial              = 0x7fff;
+	algo->blrecal_raw_center             = 0x8000;
+	algo->blrecal_raw_span               = 8000;
+	algo->blrecal_signal_threshold       = 600;
 	algo->baseline_noise_deadband       = 90;
 	algo->baseline_positive_deadband    = 14;
 	algo->baseline_negative_deadband    = 13;
@@ -60,8 +88,33 @@ void hx_algo_init_defaults(struct hx_algo *algo)
 	algo->runtime_noise_threshold = 1800;
 	algo->runtime_noise_line_nodes = 20;
 	algo->runtime_noise_total_nodes = 180;
+	for (int i = 0; i < 10; i++) {
+		algo->safe_reset_push_threshold[i] =
+			hx_safe_reset_push_default[i];
+		algo->safe_reset_time_threshold[i] =
+			hx_safe_reset_time_default[i];
+		algo->safe_reset_trigger_count[i] =
+			hx_safe_reset_trigger_default[i];
+		algo->safe_reset_screen_on_window[i] =
+			hx_safe_reset_screen_on_default[i];
+		algo->safe_reset_push_threshold_side[i] =
+			hx_safe_reset_push_default[i];
+		algo->safe_reset_time_threshold_side[i] =
+			hx_safe_reset_time_default[i];
+		algo->safe_reset_trigger_count_side[i] =
+			hx_safe_reset_trigger_default[i];
+		algo->safe_reset_screen_on_window_side[i] =
+			hx_safe_reset_screen_on_default[i];
+	}
 	algo->safe_candidate_armed = true;
+	algo->safe_queue_full_pushes = 0;
+	algo->safe_prev_flags = algo->safe_flags;
+	algo->safe_flags = 0;
 	algo->cmf_enabled        = true;
+	/* HX83121A firmware uses flash[0x69] = 1: BLIIR consumes the
+	 * pre-CMF snapshot, while detection continues to use the CMF output.
+	 */
+	algo->bliir_use_pre_cmf_raw = true;
 	algo->cmf_exclusion      = 2000;
 	algo->cmf_max_correction = 2000;
 	/* v1.1.2 removed GridIIR from the active pipeline.  Keep the compatible
@@ -153,6 +206,37 @@ static void hx_algo_clear_transient_state(struct hx_algo *algo)
 	 * seed the complete buffer before it is read.
 	 */
 	algo->iir_initialized = false;
+	algo->prev_raw_valid = false;
+	memset(algo->prev_raw, 0, sizeof(algo->prev_raw));
+	algo->blreset_raw_jump_frames = 0;
+	algo->blreset_raw_jump_elapsed_ms = 0;
+	algo->blreset_over_noise_frames = 0;
+	algo->blreset_state = HX_BLRESET_IDLE;
+	algo->blreset_reason_mask = 0;
+	algo->blreset_reason_elapsed_ms = 0;
+	algo->blreset_abnormal_type_flags = 0;
+	memset(algo->blreset_abnormal_type_elapsed, 0,
+	       sizeof(algo->blreset_abnormal_type_elapsed));
+	algo->blreset_triggered = false;
+	algo->blreset_all_touch_abnormal = false;
+	algo->blreset_concurrent_touch = false;
+	algo->blreset_baseline_state = 0;
+	algo->blreset_baseline_stable_frames = 0;
+	algo->blreset_baseline_elapsed_ms = 0;
+	algo->blreset_normal_baseline_ready = false;
+	algo->blreset_clean_baseline_captured = false;
+	algo->blreset_wake_abnormal_frames = 0;
+	algo->blreset_wake_abnormal_elapsed_ms = 0;
+	algo->blreset_wake_triggered = false;
+	algo->blreset_dirty_elapsed_ms = 0;
+	algo->blreset_dirty_triggered = false;
+	algo->shb_state = 0;
+	algo->shb_flags = 0;
+	algo->shb_capture_frame = 0;
+	memset(algo->shb_raw_capture, 0, sizeof(algo->shb_raw_capture));
+	algo->blrecal_frame = 0;
+	algo->blrecal_abnormal_count = 0;
+	algo->blrecal_requested = false;
 	/* Preserve the converged per-cell baseline across display/lid/idle and
 	 * hardware reinitialisation.  Force the next valid frame to re-evaluate
 	 * recovery instead of inheriting a stale touch/freeze transition.
@@ -162,7 +246,21 @@ static void hx_algo_clear_transient_state(struct hx_algo *algo)
 	algo->baseline_recovery_frames = 0;
 	algo->baseline_no_touch_stable_frames = 0;
 	algo->baseline_stage = HX_BLSM_NO_TOUCH_STABLE;
+	algo->baseline_prev_stage = HX_BLSM_NO_TOUCH_STABLE;
 	algo->baseline_stage_frames = 0;
+	algo->baseline_stage_elapsed_ms = 0;
+	algo->baseline_touch_latched = false;
+	algo->baseline_stage_allows_update = false;
+	algo->baseline_stage_force_update = false;
+	algo->baseline_stage_reset = false;
+	algo->baseline_stage_update_step = 0;
+	algo->baseline_stage_action = 0;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	algo->baseline_stage_update_count = 0;
+	algo->baseline_stage_reset_action_count = 0;
+	algo->baseline_stage_hold_count = 0;
+	algo->baseline_stage_force_count = 0;
+#endif
 	algo->baseline_touch_hold = false;
 	algo->baseline_touch_seen = false;
 	algo->baseline_held_in_hand = false;
@@ -218,10 +316,6 @@ static void hx_algo_clear_transient_state(struct hx_algo *algo)
 	algo->safe_abnormal_touch_count = 0;
 	algo->safe_current_positive_nodes = 0;
 	algo->safe_current_negative_nodes = 0;
-	memset(algo->safe_reset_reason_frames, 0,
-	       sizeof(algo->safe_reset_reason_frames));
-	algo->safe_reset_reason_mask = 0;
-	algo->safe_reset_reason_trigger_frames = 5;
 	algo->runtime_blreset_cooldown_frames = 0;
 }
 
@@ -241,10 +335,56 @@ void hx_algo_full_reset(struct hx_algo *algo)
 	memset(algo->wake_candidate_q8, 0,
 	       sizeof(algo->wake_candidate_q8));
 	memset(algo->safe_baselines, 0, sizeof(algo->safe_baselines));
+	memset(&algo->platform, 0, sizeof(algo->platform));
+	hx_safe_baseline_queue_reset(algo);
+	hx_safe_baseline_temp_reset(algo);
+	/* TSACore_ResetInit owns these statistics.  A display/idle live-clear
+	 * must not erase accumulated abnormal-duration evidence.
+	 */
+	memset(algo->safe_reset_reason_frames, 0,
+	       sizeof(algo->safe_reset_reason_frames));
+	memset(algo->safe_reset_reason_last_frame, 0,
+	       sizeof(algo->safe_reset_reason_last_frame));
+	memset(algo->safe_reset_reason_frames_side, 0,
+	       sizeof(algo->safe_reset_reason_frames_side));
+	memset(algo->safe_reset_reason_last_frame_side, 0,
+	       sizeof(algo->safe_reset_reason_last_frame_side));
+	for (int i = 0; i < 10; i++)
+		algo->safe_reset_push_count[i] = 0;
+	for (int i = 0; i < 10; i++)
+		algo->safe_reset_push_count_side[i] = 0;
+	algo->safe_reset_reason_mask = 0;
+	algo->safe_reset_reason_mask_side = 0;
+	/* Zero means use the per-reason official time threshold.  Host tests may
+	 * set this explicitly as a deterministic threshold override.
+	 */
+	algo->safe_reset_reason_trigger_frames = 0;
 	algo->baseline_initialized = false;
+	algo->blreset_state = HX_BLRESET_IDLE;
+	algo->blreset_reason_mask = 0;
+	algo->blreset_reason_elapsed_ms = 0;
+	algo->blreset_trigger_count = 0;
+	algo->blreset_clear_count = 0;
+	algo->blreset_triggered = false;
+	algo->blreset_baseline_state = 0;
+	algo->blreset_baseline_stable_frames = 0;
+	algo->blreset_baseline_elapsed_ms = 0;
+	algo->blreset_normal_baseline_ready = false;
+	algo->blreset_clean_baseline_captured = false;
+	algo->blreset_wake_abnormal_frames = 0;
+	algo->blreset_wake_abnormal_elapsed_ms = 0;
+	algo->blreset_wake_triggered = false;
+	algo->blreset_dirty_elapsed_ms = 0;
+	algo->blreset_dirty_triggered = false;
+	algo->normal_baseline_valid = false;
+	memset(algo->normal_baseline_q8, 0,
+	       sizeof(algo->normal_baseline_q8));
+	algo->baseline_hw_reset = false;
 	algo->safe_baseline_valid = false;
 	algo->safe_baseline_count = 0;
 	algo->safe_baseline_selected = 0;
+	algo->safe_flags = 0;
+	algo->safe_prev_flags = 0;
 	algo->safe_baseline_selected_score = 0;
 	algo->safe_baseline_next = 0;
 	algo->safe_baseline_generation = 0;
@@ -275,17 +415,22 @@ void hx_algo_full_reset(struct hx_algo *algo)
 	algo->safe_abnormal_touch_count = 0;
 	algo->safe_current_positive_nodes = 0;
 	algo->safe_current_negative_nodes = 0;
-	memset(algo->safe_reset_reason_frames, 0,
-	       sizeof(algo->safe_reset_reason_frames));
-	algo->safe_reset_reason_mask = 0;
-	algo->safe_reset_reason_trigger_frames = 5;
+	algo->safe_reset_reason_trigger_frames = 0;
 	algo->runtime_blreset_cooldown_frames = 0;
 	algo->baseline_prev_had_signal = false;
 	algo->baseline_had_freeze = false;
 	algo->baseline_recovery_frames = 0;
 	algo->baseline_no_touch_stable_frames = 0;
 	algo->baseline_stage = HX_BLSM_NO_TOUCH_STABLE;
+	algo->baseline_prev_stage = HX_BLSM_NO_TOUCH_STABLE;
 	algo->baseline_stage_frames = 0;
+	algo->baseline_stage_elapsed_ms = 0;
+	algo->baseline_touch_latched = false;
+	algo->baseline_stage_allows_update = false;
+	algo->baseline_stage_force_update = false;
+	algo->baseline_stage_reset = false;
+	algo->baseline_stage_update_step = 0;
+	algo->baseline_stage_action = 0;
 	algo->baseline_post_reacquire_hold = 0;
 	algo->baseline_screen_on_hand_state = HX_HAND_NONE;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
@@ -309,7 +454,8 @@ void hx_restore_working_from_safe(struct hx_algo *algo, s32 common,
 	int i;
 
 	/* Diagnostics can freeze the working grid.  Wake fallback and runtime
-	 * BLReset must obey the same switch as ordinary per-frame learning. */
+	 * BLReset must obey the same switch as ordinary per-frame learning.
+	 */
 	if (!algo->baseline_enabled)
 		return;
 	for (i = 0; i < HX_PIXELS; i++)
@@ -391,6 +537,7 @@ void hx_safe_baseline_reset_selected(struct hx_algo *algo)
 	entry->reset_pending = true;
 	entry->state = HX_SAFE_SLOT_RESET;
 	entry->pushed = false;
+	hx_safe_baseline_queue_remove(algo, algo->safe_baseline_selected);
 	algo->safe_baseline_valid = false;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	algo->baseline_safe_reset_count++;
@@ -400,20 +547,24 @@ void hx_safe_baseline_reset_selected(struct hx_algo *algo)
 bool hx_safe_baseline_promote_latest_confirmed(struct hx_algo *algo)
 {
 	u8 best = HX_SAFE_BASELINE_SLOTS;
-	u32 generation = 0;
 	u8 i;
 
-	for (i = 0; i < HX_SAFE_BASELINE_SLOTS; i++) {
-		struct hx_safe_baseline_entry *entry = &algo->safe_baselines[i];
+	/* BaselineQueue_GetLatestBuf walks the queue in reverse chronological
+	 * order.  Do not select by confidence/generation: those fields describe
+	 * trust, not recency.
+	 */
+	for (i = 0; i < algo->safe_queue_count; i++) {
+		u8 offset = algo->safe_queue_count - 1 - i;
+		u8 index = (algo->safe_queue_tail + offset) %
+			HX_SAFE_BASELINE_SLOTS;
+		u8 slot = algo->safe_queue_order[index];
+		struct hx_safe_baseline_entry *entry = &algo->safe_baselines[slot];
 
 		if (!entry->valid || entry->reset_pending ||
 		    entry->confidence < HX_SAFE_BASELINE_CONFIRMED)
 			continue;
-		if (best == HX_SAFE_BASELINE_SLOTS ||
-		    entry->generation > generation) {
-			best = i;
-			generation = entry->generation;
-		}
+		best = slot;
+		break;
 	}
 	if (best == HX_SAFE_BASELINE_SLOTS)
 		return false;
@@ -442,8 +593,9 @@ void hx_safe_baseline_bootstrap(struct hx_algo *algo, const s32 *baseline_q8)
 	entry->generation = ++algo->safe_baseline_generation;
 	entry->screen_epoch = algo->screen_epoch;
 	entry->captured_frame = algo->frame_sequence;
-	algo->safe_baseline_count = 1;
-	algo->safe_baseline_next = 1;
+	hx_safe_baseline_queue_record(algo, 0);
+	algo->safe_baseline_pushes = min_t(u8,
+		algo->safe_baseline_pushes + 1, U8_MAX);
 	hx_safe_baseline_select_slot(algo, 0);
 }
 
@@ -492,6 +644,16 @@ void hx_safe_baseline_commit(struct hx_algo *algo, const s32 *baseline_q8)
 		hx_safe_baseline_select_slot(algo, slot);
 		return;
 	}
+	/* SafeBaseline_IsOKToPush limits replacements once the normal queue is
+	 * full; this prevents a noisy screen-on epoch from cycling all history.
+	 */
+	if (algo->safe_queue_count == HX_SAFE_BASELINE_SLOTS &&
+	    algo->safe_queue_full_pushes >= 3) {
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		algo->baseline_safe_temporal_reject_count++;
+#endif
+		return;
+	}
 
 	if (algo->safe_baseline_count < HX_SAFE_BASELINE_SLOTS) {
 		for (i = 0; i < HX_SAFE_BASELINE_SLOTS; i++)
@@ -501,24 +663,14 @@ void hx_safe_baseline_commit(struct hx_algo *algo, const s32 *baseline_q8)
 			}
 		algo->safe_baseline_count++;
 	} else {
-		u8 lowest = HX_SAFE_BASELINE_SLOTS;
-
-		for (i = 0; i < HX_SAFE_BASELINE_SLOTS; i++) {
-			entry = &algo->safe_baselines[i];
-			if (!entry->valid || entry->reset_pending)
-				continue;
-			if (lowest == HX_SAFE_BASELINE_SLOTS ||
-			    entry->confidence <
-			    algo->safe_baselines[lowest].confidence ||
-			    (entry->confidence ==
-			     algo->safe_baselines[lowest].confidence &&
-			     entry->generation <
-			     algo->safe_baselines[lowest].generation))
-				lowest = i;
-		}
-		if (lowest == HX_SAFE_BASELINE_SLOTS)
-			lowest = algo->safe_baseline_selected;
-		slot = lowest;
+		/* BaselineQueue_Push is chronological: a full queue replaces the
+		 * oldest unit, irrespective of confidence.
+		 */
+		slot = hx_safe_baseline_queue_oldest(algo);
+		if (slot >= HX_SAFE_BASELINE_SLOTS)
+			slot = algo->safe_baseline_selected;
+		algo->safe_queue_full_pushes = min_t(u8,
+			algo->safe_queue_full_pushes + 1, U8_MAX);
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 		algo->baseline_safe_eviction_count++;
 #endif
@@ -538,7 +690,9 @@ void hx_safe_baseline_commit(struct hx_algo *algo, const s32 *baseline_q8)
 	entry->generation = ++algo->safe_baseline_generation;
 	entry->screen_epoch = algo->screen_epoch;
 	entry->captured_frame = algo->frame_sequence;
-	algo->safe_baseline_next = (slot + 1) % HX_SAFE_BASELINE_SLOTS;
+	hx_safe_baseline_queue_record(algo, slot);
+	algo->safe_baseline_pushes = min_t(u8,
+		algo->safe_baseline_pushes + 1, U8_MAX);
 	if (algo->safe_baseline_valid &&
 	    algo->safe_baseline_selected == slot &&
 	    algo->safe_baseline_count > 1) {
@@ -569,7 +723,11 @@ void hx_algo_begin_wake(struct hx_algo *algo)
 {
 	hx_algo_clear_transient_state(algo);
 	algo->screen_epoch++;
+	algo->screen_on_frame_sequence = algo->frame_sequence;
 	algo->safe_candidate_armed = true;
+	algo->safe_queue_full_pushes = 0;
+	algo->safe_prev_flags = algo->safe_flags;
+	algo->safe_flags = 0;
 	algo->wake_qualifying = true;
 	algo->wake_candidate_valid = false;
 	algo->wake_needs_double_confirm = false;
@@ -1036,10 +1194,14 @@ int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
 				  algo->wake_finger_frames;
 		/* The vendor held-in-hand path reconstructs BL from the latest
 		 * safe snapshot and BL2BL difference buffers.  On first boot there
-		 * is no working BL history yet, so use the safe grid plus CM shift. */
+		 * is no working BL history yet, so use the safe grid plus CM shift.
+		 */
 		if (algo->baseline_initialized) {
 			hx_safe_baseline_buffer_comparison(algo, raw);
-			hx_safe_baseline_replace_working_from_history(algo, average);
+			if (hx_safe_baseline_should_replace_wake(algo))
+				hx_safe_baseline_replace_working_from_history(algo, average);
+			else
+				hx_restore_working_from_safe(algo, average, true, true);
 		} else {
 			hx_restore_working_from_safe(algo, average, true, true);
 		}
