@@ -1,5 +1,6 @@
 #include "hx-algo-test-common.h"
 #include "../touchscreen-hx83121a-dkms/hx-algo-internal.h"
+#include "../touchscreen-hx83121a-dkms/hx-panel-profile.h"
 
 static void test_strongest_candidates_survive(void)
 {
@@ -10,6 +11,9 @@ static void test_strongest_candidates_survive(void)
 	hx_algo_init_defaults(&algo);
 	algo.cmf_enabled = false;
 	algo.iir_enabled = false;
+	/* This test exercises candidate capacity, not BLSM noise-reset policy. */
+	algo.baseline_enabled = false;
+	algo.baseline_initial = 0x7fee;
 	algo.palm_enabled = false;
 	init_raw(raw, 0x7fee);
 	for (int i = 0; i < 12; i++)
@@ -222,6 +226,7 @@ static void test_background_residuals_do_not_exhaust_zones_after_idle(void)
 	init_raw(raw, 0x7fee);
 	for (int i = 0; i < 600; i++)
 		hx_algo_process_frame(&algo, raw);
+	assert(algo.normal_baseline_valid);
 
 	/* Residual islands below the Windows freeze threshold must not consume
 	 * all 20 macro-zone slots before the real contact later in scan order. */
@@ -1013,6 +1018,7 @@ static void test_safe_baseline_store_deduplicates_across_wakes(void)
 	for (int i = 0; i < HX_PIXELS; i++)
 		baseline[i] = (s32)0x7fee << 8;
 	hx_safe_baseline_bootstrap(&algo, baseline);
+	memcpy(algo.baseline_q8, baseline, sizeof(baseline));
 	assert(algo.safe_baseline_count == 1);
 	assert(algo.safe_baselines[0].confidence ==
 	       HX_SAFE_BASELINE_BOOTSTRAP);
@@ -1061,6 +1067,21 @@ static void test_safe_baseline_store_selects_best_history(void)
 	hx_safe_baseline_select_for_raw(&algo, raw);
 	assert(algo.safe_baseline_selected == 0);
 	assert(algo.safe_baseline_q8[110] == (s32)0x7fee << 8);
+}
+
+static void test_safe_baseline_queue_accepts_distinct_same_epoch_state(void)
+{
+	struct hx_algo algo = {};
+	s32 baseline[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	for (int i = 0; i < HX_PIXELS; i++)
+		baseline[i] = (s32)0x7fee << 8;
+	hx_safe_baseline_bootstrap(&algo, baseline);
+	for (int i = 0; i < HX_PIXELS; i++)
+		baseline[i] += (s32)300 << 8;
+	hx_safe_baseline_commit(&algo, baseline);
+	assert(algo.safe_baseline_count == 2);
 }
 
 static void test_safe_baseline_selection_prefers_spatial_fit(void)
@@ -1220,7 +1241,7 @@ static void test_small_panel_residual_updates_working_but_not_safe(void)
 	assert(!algo.safe_candidate_confirming);
 }
 
-static void test_working_baseline_cannot_drift_past_safe_envelope(void)
+static void test_bliir_updates_independently_of_safe_history(void)
 {
 	struct hx_algo algo = {};
 	u16 raw[HX_PIXELS];
@@ -1240,15 +1261,19 @@ static void test_working_baseline_cannot_drift_past_safe_envelope(void)
 		algo.safe_baseline_q8[i] = (s32)0x7fee << 8;
 		algo.safe_baselines[0].baseline_q8[i] = (s32)0x7fee << 8;
 	}
-	raw[cell] += 200;
+	/* A panel-wide common shift is a valid idle baseline movement.  A single
+	 * sparse +200 cell is now correctly classified as a silent ghost by the
+	 * vendor SafeBaseline path and must not be used to test ordinary BLIIR. */
+	for (int i = 0; i < HX_PIXELS; i++)
+		raw[i] += 200;
 	safe = algo.safe_baseline_q8[cell];
 	for (int frame = 0; frame < 240; frame++)
 		hx_preprocess_frame_state(&algo, raw, HX_FINGER_ABSENT);
-	assert(algo.baseline_q8[cell] <= safe +
-	       ((HX_BASELINE_CLEAN_LOCAL_THRESHOLD + 1) << 8));
-	assert(algo.baseline_safe_clamp_count > 0);
+	assert(algo.baseline_q8[cell] == (s32)raw[cell] << 8);
+	assert(algo.baseline_safe_clamp_count == 0);
 	assert(algo.safe_baseline_q8[cell] == safe);
 }
+
 
 static void test_negative_residual_restarts_guard_qualification(void)
 {
@@ -1368,6 +1393,508 @@ static void test_hungarian_keeps_two_ids(void)
 	assert(algo.tracks[left].active && algo.tracks[right].active);
 	assert(algo.tracks[left].x > algo.tracks[right].x);
 }
+static void test_safe_slot_runtime_selection_and_reacquire_hold(void)
+{
+	struct hx_algo algo = { 0 };
+	u16 raw[HX_PIXELS] = { 0 };
+	s32 first[HX_PIXELS];
+	s32 second[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	for (int i = 0; i < HX_PIXELS; i++) {
+		raw[i] = 0x7fee;
+		first[i] = (s32)0x7fee << HX_BASELINE_FRACTION_BITS;
+		second[i] = (s32)0x7fee << HX_BASELINE_FRACTION_BITS;
+	}
+	/* Two electrical states with a spatially distinct panel offset must
+	 * occupy separate history slots. */
+	for (int i = HX_COLS * 4; i < HX_COLS * 6; i++)
+		second[i] += 800 << HX_BASELINE_FRACTION_BITS;
+	hx_safe_baseline_bootstrap(&algo, first);
+	algo.screen_epoch = 1;
+	hx_safe_baseline_commit(&algo, second);
+	assert(algo.safe_baseline_count == 2);
+	for (int i = HX_COLS * 4; i < HX_COLS * 6; i++)
+		raw[i] = 0x7fee + 800;
+	hx_safe_baseline_select_for_raw(&algo, raw);
+	assert(algo.safe_baseline_selected == 1);
+	algo.baseline_reacquire_pending = true;
+	algo.safe_candidate_armed = true;
+	/* The hold is installed by the clean-baseline commit path; this check
+	 * documents that the field is available and starts clear otherwise. */
+	assert(algo.baseline_post_reacquire_hold == 0);
+}
+
+static void test_baseline_stage_machine(void)
+{
+	struct hx_algo algo = { 0 };
+	int i;
+
+	hx_algo_init_defaults(&algo);
+	assert(hx_baseline_stage_update(&algo, HX_BLSM_PRPT_TOUCH,
+		1000, -1000, false) ==
+	       HX_BLSM_TOUCH);
+	/* Stage 5 uses the previous-frame single-touch latch.  With no latch a
+	 * lift enters stage 6, then the official 408ms timer advances to 7. */
+	assert(hx_baseline_stage_update(&algo, 0, 1000, -1000, false) ==
+	       HX_BLSM_TOUCH_RELEASE);
+	for (i = 0; i < 50; i++)
+		hx_baseline_stage_update(&algo, 0, 1000, -1000, false);
+	assert(algo.baseline_stage == HX_BLSM_POST_TOUCH);
+	assert(hx_baseline_stage_update(&algo, 0, 0, 0, false) ==
+	       HX_BLSM_NO_TOUCH_STABLE);
+
+	/* Reset/noisy/forced/debounce properties have the same priority and
+	 * stage numbering as the TSACore jump table. */
+	assert(hx_baseline_stage_update(&algo, HX_BLSM_PRPT_NOISY,
+		0, 0, false) == HX_BLSM_NOISY_RESET);
+	assert(hx_baseline_stage_update(&algo, 0, 0, 0, false) ==
+	       HX_BLSM_NO_TOUCH_STABLE);
+	assert(hx_baseline_stage_update(&algo, HX_BLSM_PRPT_FORCED,
+		0, 0, false) == HX_BLSM_FORCED);
+	assert(hx_baseline_stage_update(&algo, 0, 0, 0, false) ==
+	       HX_BLSM_NO_TOUCH_STABLE);
+	assert(hx_baseline_stage_update(&algo, HX_BLSM_PRPT_DEBOUNCE,
+		0, 0, false) == HX_BLSM_DEBOUNCE);
+}
+
+static void test_screen_on_hand_state_transitions(void)
+{
+	struct hx_algo algo = { 0 };
+
+	hx_algo_init_defaults(&algo);
+	hx_restore_working_from_safe(&algo, 0, true, true);
+	assert(algo.baseline_screen_on_hand_state == HX_HAND_PROTECTED);
+	algo.baseline_touch_hold = true;
+	algo.baseline_touch_seen = true;
+	algo.baseline_guard_state = HX_BASELINE_GUARD_CLEAN_QUALIFY;
+	algo.baseline_guard_clean_frames = 255;
+	algo.safe_commit_no_finger_frames = 1;
+	assert(hx_baseline_guard_process(&algo, true, false));
+	assert(algo.baseline_screen_on_hand_state == HX_HAND_RELEASE_PENDING);
+}
+
+static void test_safe_reset_policy_debounces_and_separates_side_reset(void)
+{
+	struct hx_algo algo = { 0 };
+	enum hx_safe_reset_action action = HX_SAFE_RESET_NONE;
+
+	hx_algo_init_defaults(&algo);
+	algo.runtime_blreset_confirm_frames = 3;
+	for (int i = 0; i < 2; i++)
+		action = hx_safe_baseline_reset_policy(&algo,
+			HX_SAFE_COMPARE_BOTH_INVALID, false, HX_FINGER_ABSENT);
+	assert(action == HX_SAFE_RESET_NONE);
+	assert(algo.safe_reset_in_debounce);
+	action = hx_safe_baseline_reset_policy(&algo,
+		HX_SAFE_COMPARE_BOTH_INVALID, false, HX_FINGER_ABSENT);
+	assert(action == HX_SAFE_RESET_INVALIDATE);
+
+	action = hx_safe_baseline_reset_policy(&algo,
+		HX_SAFE_COMPARE_BOTH_VALID, true, HX_FINGER_PRESENT);
+	assert(action == HX_SAFE_RESET_NONE);
+	for (int i = 0; i < 3; i++)
+		action = hx_safe_baseline_reset_policy(&algo,
+			HX_SAFE_COMPARE_BOTH_VALID, false, HX_FINGER_ABSENT);
+	assert(action == HX_SAFE_RESET_WORKING);
+	assert(!algo.safe_sync_reset_side_area);
+}
+
+static void test_safe_side_postprocess_restores_after_release(void)
+{
+	struct hx_algo algo = { 0 };
+	u16 raw[HX_PIXELS];
+	int idx = 5;
+
+	hx_algo_init_defaults(&algo);
+	algo.baseline_initialized = true;
+	algo.safe_baseline_valid = true;
+	algo.runtime_blreset_confirm_frames = 3;
+	for (int i = 0; i < HX_PIXELS; i++) {
+		raw[i] = 0x7fee;
+		algo.safe_baseline_q8[i] = (s32)0x7fee << 8;
+		algo.baseline_q8[i] = (s32)0x7fee << 8;
+	}
+	algo.baseline_q8[idx] += 500 << 8;
+	algo.peak_count = 1;
+	algo.peaks[0].r = 0;
+	algo.peaks[0].c = 5;
+	algo.contact_count = 1;
+	algo.contacts[0].peak_index = 0;
+	algo.contacts[0].is_edge = true;
+	for (int i = 0; i < 5; i++)
+		hx_safe_baseline_postprocess(&algo, raw, HX_FINGER_PRESENT);
+	assert(algo.safe_sync_reset_side_area);
+	algo.peak_count = 0;
+	for (int i = 0; i < 3; i++)
+		hx_safe_baseline_postprocess(&algo, raw, HX_FINGER_ABSENT);
+	assert(algo.baseline_q8[idx] == algo.safe_baseline_q8[idx]);
+}
+
+static void test_safe_buffer_comparison_tracks_common_mode(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	algo.safe_baseline_valid = true;
+	for (int i = 0; i < HX_PIXELS; i++) {
+		algo.safe_baseline_q8[i] = (s32)1000 << 8;
+		algo.baseline_q8[i] = (s32)1020 << 8;
+		raw[i] = 1040;
+	}
+	hx_safe_baseline_buffer_comparison(&algo, raw);
+	assert(algo.safe_bl2bl_dif[100] == 20);
+	assert(algo.safe_bl2raw_dif[100] == 40);
+	assert(algo.safe_bl2bl_dif_cmf[100] == 0);
+	assert(algo.safe_bl2raw_dif_cmf[100] == 0);
+}
+
+static void test_safe_reset_statistics_decay_and_trigger(void)
+{
+	struct hx_algo algo = {};
+
+	hx_algo_init_defaults(&algo);
+	algo.frame_interval_ms = 1;
+	algo.safe_reset_reason_trigger_frames = 3;
+	assert(!hx_safe_baseline_reset_statistics(&algo, 1U << 5, false));
+	assert(!hx_safe_baseline_reset_statistics(&algo, 1U << 5, false));
+	assert(hx_safe_baseline_reset_statistics(&algo, 1U << 5, false));
+	assert(algo.safe_reset_reason_mask & (1U << 5));
+	hx_safe_baseline_reset_statistics(&algo, 0, false);
+	assert(algo.safe_reset_reason_frames[5] == 2);
+	/* A safe-raw check keeps reset statistics eligible, as in the vendor
+	 * ResetStatisticsUnit path; it is not a blanket suppression. */
+	algo.safe_reset_reason_trigger_frames = 1;
+	assert(hx_safe_baseline_reset_statistics(&algo, 1U << 6, true));
+}
+
+static void test_official_safe_reset_thresholds(void)
+{
+	struct hx_algo algo = {};
+
+	hx_algo_init_defaults(&algo);
+	/* Values are extracted from the exported TSACore globals, not the
+	 * previous one-size-fits-all Linux defaults. */
+	assert(algo.safe_reset_time_threshold[0] == 500);
+	assert(algo.safe_reset_time_threshold[8] == 2000);
+	assert(algo.safe_reset_push_threshold[0] == 1);
+	assert(algo.safe_reset_push_threshold[7] == 0);
+	assert(algo.safe_reset_trigger_count[6] == 50);
+	assert(algo.safe_reset_screen_on_window[7] == 600000);
+
+	/* A reason emits one reset event when its accumulated duration crosses
+	 * its own threshold; it is not triggered by a global frame threshold. */
+	algo.frame_sequence = 1;
+	hx_safe_baseline_reset_statistics(&algo, 1U << 0, false);
+	algo.frame_sequence = 501;
+	assert(hx_safe_baseline_reset_statistics(&algo, 1U << 0, false));
+	assert(algo.safe_reset_push_count[0] == 1);
+	/* Side statistics have independent runtime counters even though they
+	 * share the same reason IDs. */
+	algo.frame_sequence = 1;
+	hx_safe_baseline_reset_statistics_variant(&algo, 1U << 0, false, true);
+	algo.frame_sequence = 501;
+	assert(hx_safe_baseline_reset_statistics_variant(&algo, 1U << 0,
+		false, true));
+	assert(algo.safe_reset_push_count_side[0] == 1);
+	assert(algo.safe_reset_push_count[0] == 1);
+	/* The global SafeBLPushed quota and the per-reason reset quota are
+	 * independent IsResetAllowed gates. */
+	algo.safe_reset_push_threshold[1] = 2;
+	algo.safe_baseline_pushes = 2;
+	algo.frame_sequence = 1;
+	assert(!hx_safe_baseline_reset_statistics(&algo, 1U << 1, false));
+	algo.safe_baseline_pushes = 0;
+	algo.safe_reset_trigger_count[1] = 1;
+	algo.safe_reset_push_count[1] = 1;
+	assert(!hx_safe_baseline_reset_statistics(&algo, 1U << 1, false));
+	/* SafeRawChecked short-circuits the quota checks in the vendor
+	 * IsResetAllowed implementation. */
+	algo.safe_baseline_pushes = 1;
+	algo.safe_reset_reason_trigger_frames = 1;
+	algo.frame_sequence = 1;
+	assert(hx_safe_baseline_reset_statistics(&algo, 1U << 1, true));
+}
+
+static void test_safe_prpt_spatial_aggregates(void)
+{
+	struct hx_safe_prpt prpt[5];
+	s16 dif[HX_PIXELS] = { 0 };
+
+	for (int i = 1; i < HX_PIXELS; i++)
+		dif[i] = 10;
+	dif[HX_COLS + 1] = -20;
+	dif[2 * HX_COLS] = 30;
+	dif[2 * HX_COLS + HX_COLS - 1] = -40;
+	hx_safe_baseline_collect_prpt(prpt, dif);
+	assert(prpt[2].count == HX_PIXELS);
+	assert(prpt[2].max == 30);
+	assert(prpt[2].min == -40);
+	assert(prpt[1].min == -20);
+	assert(prpt[3].count == HX_ROWS - 2);
+	assert(prpt[4].count == HX_ROWS - 2);
+	assert(prpt[0].count > 0);
+}
+
+static void test_safe_baseline_judge_uses_prpt(void)
+{
+	struct hx_algo algo = {};
+
+	hx_algo_init_defaults(&algo);
+	algo.safe_baseline_valid = true;
+	algo.safe_baseline_count = 1;
+	algo.safe_bl2bl_prpt_cmf[2].count = HX_PIXELS;
+	algo.safe_bl2raw_prpt_cmf[2].count = HX_PIXELS;
+	algo.safe_bl2bl_prpt_cmf[2].max = 700;
+	algo.safe_bl2bl_prpt_cmf[2].min = 0;
+	algo.safe_bl2raw_prpt_cmf[2].max = 20;
+	algo.safe_bl2raw_prpt_cmf[2].min = -20;
+	assert(hx_safe_baseline_judge_current(&algo) ==
+	       HX_SAFE_COMPARE_SAFE_BETTER);
+	algo.safe_bl2raw_prpt_cmf[2].max = 800;
+	assert(hx_safe_baseline_judge_current(&algo) ==
+	       HX_SAFE_COMPARE_WORKING_BETTER);
+}
+
+static void test_safe_baseline_judge_includes_first_cell(void)
+{
+	struct hx_algo algo = {};
+
+	hx_algo_init_defaults(&algo);
+	algo.safe_baseline_valid = true;
+	algo.safe_baseline_count = 1;
+	for (int region = 0; region < 5; region++) {
+		algo.safe_bl2bl_prpt_cmf[region].count = HX_PIXELS;
+		algo.safe_bl2raw_prpt_cmf[region].count = HX_PIXELS;
+	}
+	/* Keep all aggregate extrema benign and put the only corruption in
+	 * cell zero.  A complete-grid judge must still prefer the safe baseline. */
+	for (int i = 0; i < 4; i++)
+		algo.safe_bl2bl_dif_cmf[i] = 1000;
+	assert(hx_safe_baseline_judge_current(&algo) ==
+	       HX_SAFE_COMPARE_SAFE_BETTER);
+}
+
+static void test_baseline_observation_includes_first_cell(void)
+{
+	struct hx_algo algo = {};
+	struct hx_baseline_frame_observation obs;
+	u16 raw[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	for (int i = 0; i < HX_PIXELS; i++) {
+		algo.baseline_q8[i] = 0x7fee << HX_BASELINE_FRACTION_BITS;
+		raw[i] = 0x7fee;
+	}
+	raw[0] += 500;
+	hx_baseline_observe_frame(&algo, raw, 0, &obs);
+	assert(obs.safe_bad_nodes == 1);
+	assert(obs.max_signal == 500);
+}
+
+static void test_safe_baseline_queue_is_chronological(void)
+{
+	struct hx_algo algo = {};
+	int i;
+
+	hx_algo_init_defaults(&algo);
+	assert(hx_safe_baseline_queue_all_valid(&algo));
+	for (i = 0; i < HX_SAFE_BASELINE_SLOTS; i++) {
+		algo.safe_baselines[i].valid = true;
+		hx_safe_baseline_queue_record(&algo, i);
+	}
+	assert(algo.safe_queue_count == HX_SAFE_BASELINE_SLOTS);
+	assert(hx_safe_baseline_queue_oldest(&algo) < HX_SAFE_BASELINE_SLOTS);
+	{
+		u8 oldest = hx_safe_baseline_queue_oldest(&algo);
+		hx_safe_baseline_queue_record(&algo, 0);
+		assert(algo.safe_queue_count == HX_SAFE_BASELINE_SLOTS);
+		assert(hx_safe_baseline_queue_oldest(&algo) != oldest);
+	}
+}
+
+static void test_safe_baseline_temp_queue_requires_cross_wake_match(void)
+{
+	struct hx_algo algo = {};
+	s32 baseline[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	for (int i = 0; i < HX_PIXELS; i++)
+		baseline[i] = (s32)0x7fee << 8;
+	algo.screen_epoch = 1;
+	assert(!hx_safe_baseline_temp_observe(&algo, baseline));
+	assert(!hx_safe_baseline_temp_observe(&algo, baseline));
+	assert(algo.safe_temp_queue_count == 1);
+	algo.screen_epoch = 2;
+	assert(hx_safe_baseline_temp_observe(&algo, baseline));
+	assert(algo.safe_temp_queue_count == 2);
+	/* A spatially incompatible candidate clears the temporary authority. */
+	for (int i = 100; i < 105; i++)
+		baseline[i] += (s32)1000 << 8;
+	algo.screen_epoch = 3;
+	assert(!hx_safe_baseline_temp_observe(&algo, baseline));
+	assert(algo.safe_temp_queue_count == 1);
+}
+
+static void test_wake_replacement_requires_double_confirmation(void)
+{
+	struct hx_algo algo = {};
+
+	hx_algo_init_defaults(&algo);
+	algo.safe_baseline_valid = true;
+	assert(!algo.safe_baseline_replace_enabled);
+	/* The Gaokun panel parameter is zero; an explicit enable is required for
+	 * the optional replacement predicate below. */
+	algo.safe_baseline_replace_enabled = true;
+	algo.wake_finger_frames = algo.wake_finger_safe_frames;
+	for (int slot = 0; slot < 2; slot++) {
+		algo.safe_baselines[slot].valid = true;
+		algo.safe_baselines[slot].confidence = HX_SAFE_BASELINE_CONFIRMED;
+		algo.safe_baselines[slot].screen_epoch = slot + 1;
+		hx_safe_baseline_queue_record(&algo, slot);
+	}
+	assert(hx_safe_baseline_queue_double_checked(&algo));
+	for (int i = 1; i < 8; i++) {
+		algo.safe_bl2bl_dif_cmf[i] = 400;
+		algo.safe_bl2raw_dif_cmf[i] = 10;
+	}
+	assert(hx_safe_baseline_should_replace_wake(&algo));
+	algo.safe_flags = HX_SAFE_FLAG_VERY_NOISY;
+	assert(!hx_safe_baseline_should_replace_wake(&algo));
+}
+
+static void test_platform_state_gates_safe_update(void)
+{
+	struct hx_algo algo = {};
+	struct hx_baseline_platform_state state = {
+		.idle_transition = true,
+		.charger_connected = true,
+	};
+
+	hx_algo_init_defaults(&algo);
+	hx_safe_baseline_set_platform_state(&algo, &state);
+	assert(algo.platform.idle_transition);
+	assert(algo.platform.charger_connected);
+	state.idle_transition = false;
+	state.charger_noise = true;
+	hx_safe_baseline_set_platform_state(&algo, &state);
+	assert(algo.safe_flags & HX_SAFE_FLAG_VERY_NOISY);
+	state.charger_noise = false;
+	hx_safe_baseline_set_platform_state(&algo, &state);
+	assert(!(algo.safe_flags & HX_SAFE_FLAG_VERY_NOISY));
+}
+
+static void test_safe_queue_all_valid_rejects_drifted_working_grid(void)
+{
+	struct hx_algo algo = {};
+	s32 baseline[HX_PIXELS] = { 0 };
+
+	hx_algo_init_defaults(&algo);
+	for (int i = 0; i < HX_PIXELS; i++)
+		baseline[i] = (s32)0x7fee << 8;
+	hx_safe_baseline_bootstrap(&algo, baseline);
+	memcpy(algo.baseline_q8, baseline, sizeof(baseline));
+	assert(hx_safe_baseline_queue_all_valid(&algo));
+	for (int i = 100; i < 104; i++)
+		algo.baseline_q8[i] += (s32)500 << 8;
+	assert(!hx_safe_baseline_queue_all_valid(&algo));
+}
+
+static void test_reset_statistics_use_elapsed_frames(void)
+{
+	struct hx_algo algo = {};
+
+	hx_algo_init_defaults(&algo);
+	algo.frame_interval_ms = 1;
+	algo.safe_reset_reason_trigger_frames = 5;
+	algo.frame_sequence = 10;
+	hx_safe_baseline_reset_statistics(&algo, 1U << 4, false);
+	algo.frame_sequence = 13;
+	hx_safe_baseline_reset_statistics(&algo, 1U << 4, false);
+	assert(algo.safe_reset_reason_frames[4] == 4);
+	algo.frame_sequence = 14;
+	hx_safe_baseline_reset_statistics(&algo, 1U << 4, false);
+	assert(algo.safe_reset_reason_frames[4] == 5);
+}
+
+static void test_platform_state_enters_special_blsm_stage(void)
+{
+	struct hx_algo algo = {};
+	struct hx_baseline_platform_state state = { .panel_sd = true };
+	u16 raw[HX_PIXELS];
+
+	init_integrated_algo(&algo);
+	init_raw(raw, 0x7fee);
+	hx_safe_baseline_set_platform_state(&algo, &state);
+	hx_algo_process_frame_state(&algo, raw, HX_FINGER_ABSENT);
+	assert(algo.baseline_stage == HX_BLSM_FORCED);
+}
+
+static void test_platform_state_maps_to_reset_reasons(void)
+{
+	struct hx_algo algo = {};
+	struct hx_baseline_platform_state state = {
+		.charger_noise = true,
+		.panel_sd = true,
+	};
+
+	hx_algo_init_defaults(&algo);
+	algo.frame_interval_ms = 1;
+	algo.safe_reset_reason_trigger_frames = 1;
+	hx_safe_baseline_set_platform_state(&algo, &state);
+	hx_safe_baseline_reset_policy(&algo, HX_SAFE_COMPARE_BOTH_VALID,
+		false, HX_FINGER_ABSENT);
+	assert(algo.safe_reset_reason_mask & (1U << 4));
+	assert(algo.safe_reset_reason_mask & (1U << 8));
+}
+
+static void test_reset_screen_on_window_and_safe_raw_override(void)
+{
+	struct hx_algo algo = {};
+
+	hx_algo_init_defaults(&algo);
+	algo.frame_interval_ms = 1;
+	algo.safe_reset_reason_trigger_frames = 1;
+	algo.safe_reset_screen_on_window[4] = 2;
+	algo.screen_on_frame_sequence = 10;
+	algo.frame_sequence = 20;
+	assert(!hx_safe_baseline_reset_statistics(&algo, 1U << 4, false));
+	assert(hx_safe_baseline_reset_statistics(&algo, 1U << 4, true));
+}
+
+static void test_side_very_negative_predicate(void)
+{
+	struct hx_algo algo = {};
+	u16 raw[HX_PIXELS];
+	s32 reference[HX_PIXELS];
+
+	hx_algo_init_defaults(&algo);
+	for (int i = 0; i < HX_PIXELS; i++) {
+		raw[i] = 0x7fff;
+		reference[i] = 0x7fff << HX_BASELINE_FRACTION_BITS;
+	}
+	raw[1 * HX_COLS + 4] = 0x7fff + 100;
+	raw[1 * HX_COLS + 5] = 0x7fff - 400;
+	assert(hx_safe_baseline_check_side_very_negative(&algo, raw, reference,
+		0));
+	raw[1 * HX_COLS + 5] = 0x7fff - 200;
+	assert(!hx_safe_baseline_check_side_very_negative(&algo, raw, reference,
+		0));
+}
+
+static void test_panel_profile_registry(void)
+{
+	const struct hx_panel_profile *profile;
+
+	profile = hx_panel_profile_for_id("W273AS1310");
+	assert(profile->kind == HX_PANEL_PROFILE_BOE_NEW);
+	assert(profile->tx == HX_COLS && profile->rx == HX_ROWS);
+	assert(profile->physical_width == 0x48);
+	profile = hx_panel_profile_for_id("unknown-project");
+	assert(profile->kind == HX_PANEL_PROFILE_GENERIC);
+	assert(!strcmp(profile->project_id, "DFLT000000"));
+}
 
 
 void run_detection_tests(void)
@@ -1410,15 +1937,39 @@ void run_detection_tests(void)
 	test_runtime_comparator_detects_absorbed_touch();
 	test_safe_baseline_store_deduplicates_across_wakes();
 	test_safe_baseline_store_selects_best_history();
+	test_safe_baseline_queue_accepts_distinct_same_epoch_state();
 	test_safe_baseline_selection_prefers_spatial_fit();
 	test_runtime_blreset_restores_only_working_baseline();
 	test_touch_hold_blocks_spatial_learning_until_clean_release();
 	test_unclean_no_finger_frame_cannot_change_working_shape();
 	test_small_panel_residual_updates_working_but_not_safe();
-	test_working_baseline_cannot_drift_past_safe_envelope();
+	test_bliir_updates_independently_of_safe_history();
 	test_held_in_hand_release_uses_long_guard();
 	test_negative_residual_restarts_guard_qualification();
 	test_line_noise_is_held_but_compact_touch_is_not();
 	test_reported_track_survives_silent_gap();
 	test_hungarian_keeps_two_ids();
+	test_safe_slot_runtime_selection_and_reacquire_hold();
+	test_baseline_stage_machine();
+	test_screen_on_hand_state_transitions();
+	test_safe_reset_policy_debounces_and_separates_side_reset();
+	test_safe_side_postprocess_restores_after_release();
+	test_safe_buffer_comparison_tracks_common_mode();
+	test_safe_reset_statistics_decay_and_trigger();
+	test_official_safe_reset_thresholds();
+	test_safe_prpt_spatial_aggregates();
+	test_safe_baseline_judge_uses_prpt();
+	test_safe_baseline_judge_includes_first_cell();
+	test_baseline_observation_includes_first_cell();
+	test_safe_baseline_queue_is_chronological();
+	test_safe_baseline_temp_queue_requires_cross_wake_match();
+	test_wake_replacement_requires_double_confirmation();
+	test_platform_state_gates_safe_update();
+	test_safe_queue_all_valid_rejects_drifted_working_grid();
+	test_reset_statistics_use_elapsed_frames();
+	test_platform_state_enters_special_blsm_stage();
+	test_platform_state_maps_to_reset_reasons();
+	test_reset_screen_on_window_and_safe_raw_override();
+	test_side_very_negative_predicate();
+	test_panel_profile_registry();
 }

@@ -8,6 +8,7 @@
 #include <linux/slab.h>
 
 #include "himax-spi.h"
+#include "hx-panel-profile.h"
 
 #define HIMAX_BUS_RETRY					3
 /* SPI bus read header length */
@@ -83,12 +84,20 @@
 /* HIMAX SPI function select, 1st byte of any SPI command sequence */
 #define HIMAX_SPI_FUNCTION_READ				0xf3
 #define HIMAX_SPI_FUNCTION_WRITE			0xf2
+#define HIMAX_DDREG_CONTROL_REGISTER			0x0d
+#define HIMAX_DDREG_ENABLE				0x12
+#define HIMAX_DDREG_DISABLE				0x13
 
 union himax_dword_data {
 	u32 dword;
 	u16 word[2];
 	u8 byte[4];
 };
+
+static int himax_mcu_write_verify_u32(struct himax_ts_data *ts, u32 addr,
+					      u32 value, int attempts);
+static int himax_sense_off(struct himax_ts_data *ts, bool check_en);
+static int himax_sense_on(struct himax_ts_data *ts, bool sw_reset);
 
 int himax_spi_read(struct himax_ts_data *ts, u8 cmd, u8 *buf, u32 len)
 {
@@ -270,6 +279,160 @@ static int himax_mcu_register_write(struct himax_ts_data *ts, u32 addr, const u8
 	return himax_mcu_set_burst_mode(ts, !(len > HIMAX_REG_SZ));
 }
 
+int himax_ddreg_read_byte(struct himax_ts_data *ts, u8 reg, u32 bank,
+				  u8 offset, u8 *value)
+{
+	u32 ddreg_addr;
+	u8 control;
+	u8 data[4] = { 0 };
+	int ret;
+
+	if (!value || bank > 3)
+		return -EINVAL;
+
+	/* Address transform recovered from hx_ddreg_read_byte. */
+	ddreg_addr = ((((u32)reg | 0x30000U) << 2) |
+			     (bank & 3U)) << 10;
+	ddreg_addr |= offset;
+	control = HIMAX_DDREG_ENABLE;
+	ret = himax_write(ts, HIMAX_DDREG_CONTROL_REGISTER, NULL,
+				  &control, sizeof(control));
+	if (ret)
+		return ret;
+	ret = himax_mcu_register_read(ts, ddreg_addr, data, sizeof(data));
+	control = HIMAX_DDREG_DISABLE;
+	if (himax_write(ts, HIMAX_DDREG_CONTROL_REGISTER, NULL,
+				&control, sizeof(control)) && !ret)
+		ret = -EIO;
+	if (!ret)
+		*value = data[0];
+	return ret;
+}
+
+int himax_ddreg_write(struct himax_ts_data *ts, u8 reg, const u8 *data,
+			      u32 len)
+{
+	u32 ddreg_addr;
+
+	if (!data || !len || len > ts->xfer_buf_sz - HIMAX_REG_SZ)
+		return -EINVAL;
+	/* writeRegisterRaw_intf uses the same DDReg register prefix but a 12-bit
+	 * address shift.  Keep this separate from the byte-read bank transform.
+	 */
+	ddreg_addr = ((u32)reg | 0x30000U) << 12;
+	return himax_mcu_register_write(ts, ddreg_addr, data, len);
+}
+
+int himax_otp_read_block(struct himax_ts_data *ts, u16 otp_addr,
+				 u8 *data, size_t len)
+{
+	static const u32 lpwu_int_addr = 0x9000800c;
+	static const u32 lpwu_ctrl_addr = 0x90008010;
+	u8 command[4];
+	u8 control;
+	u8 value;
+	size_t i;
+	int ret;
+
+	if (!data || len != 10)
+		return -EINVAL;
+
+	/* The vendor reads OTP only while the MCU is stopped in safe mode. */
+	ret = himax_sense_off(ts, false);
+	if (ret)
+		return ret;
+	ret = himax_mcu_write_verify_u32(ts, lpwu_int_addr, 0xac53, 20);
+	if (ret)
+		goto out_resume;
+	ret = himax_mcu_write_verify_u32(ts, lpwu_ctrl_addr, 0x35ca, 20);
+	if (ret)
+		goto out_resume;
+
+	control = HIMAX_DDREG_ENABLE;
+	ret = himax_write(ts, HIMAX_DDREG_CONTROL_REGISTER, NULL,
+				  &control, sizeof(control));
+	if (ret)
+		goto out_resume;
+
+	/* hx_OTP_read command sequence: EB 55 66 CC, B9 83 12 1A,
+	 * then BB 02 <address-high> <address-low>.
+	 */
+	command[0] = 0x55;
+	command[1] = 0x66;
+	command[2] = 0xcc;
+	command[3] = 0x00;
+	ret = himax_ddreg_write(ts, 0xeb, command, sizeof(command));
+	if (ret)
+		goto out_disable;
+	usleep_range(10000, 11000);
+	command[0] = 0x83;
+	command[1] = 0x12;
+	command[2] = 0x1a;
+	command[3] = 0x00;
+	ret = himax_ddreg_write(ts, 0xb9, command, sizeof(command));
+	if (ret)
+		goto out_disable;
+	usleep_range(10000, 11000);
+	command[0] = 0x02;
+	command[1] = (u8)(otp_addr >> 8);
+	command[2] = (u8)otp_addr;
+	command[3] = 0x00;
+	ret = himax_ddreg_write(ts, 0xbb, command, sizeof(command));
+	if (ret)
+		goto out_disable;
+	usleep_range(10000, 11000);
+	command[0] = 0xbb;
+	command[1] = 10;
+	ret = himax_ddreg_write(ts, 0xbb, command, 2);
+	if (ret)
+		goto out_disable;
+	msleep(50);
+
+	for (i = 0; i < len; i++) {
+		ret = himax_ddreg_read_byte(ts, 0xb1, 3, (u8)(i + 1), &value);
+		if (ret)
+			goto out_disable;
+		data[i] = value;
+	}
+	ret = himax_ddreg_write(ts, 0xbb, data, len);
+
+out_disable:
+	control = HIMAX_DDREG_DISABLE;
+	if (himax_write(ts, HIMAX_DDREG_CONTROL_REGISTER, NULL,
+				&control, sizeof(control)) && !ret)
+		ret = -EIO;
+out_resume:
+	/* Always attempt to return the controller to the running state. */
+	if (himax_sense_on(ts, true) && !ret)
+		ret = -EIO;
+	return ret;
+}
+
+int himax_get_project_id_otp(struct himax_ts_data *ts, char *project_id,
+				     size_t project_id_len)
+{
+	static const u16 otp_addresses[] = { 0x0f18, 0x0f3a, 0x0f5c };
+	u8 raw[10];
+	size_t i;
+	int ret;
+
+	if (!project_id || project_id_len < 11)
+		return -EINVAL;
+	project_id[0] = '\0';
+	for (i = 0; i < ARRAY_SIZE(otp_addresses); i++) {
+		ret = himax_otp_read_block(ts, otp_addresses[i], raw, sizeof(raw));
+		if (ret)
+			continue;
+		memcpy(project_id, raw, sizeof(raw));
+		project_id[sizeof(raw)] = '\0';
+		if (hx_panel_profile_for_id(project_id)->kind !=
+		    HX_PANEL_PROFILE_GENERIC)
+			return 0;
+	}
+	project_id[0] = '\0';
+	return -ENODATA;
+}
+
 /* Xiaomi replays firmware-owned state with write/read retry loops.  Keep the
  * same rule, but require an exact readback (their AP-notify loop accidentally
  * stops on a successful read even when the value differs).
@@ -375,6 +538,37 @@ int himax_restore_afe_runtime(struct himax_ts_data *ts)
 		dev_info(ts->dev, "120 Hz scan-rate command transport completed\n");
 
 	return ret;
+}
+
+int himax_process_blrecal_request(struct himax_ts_data *ts)
+{
+	int ret;
+
+	if (!ts->algo->blrecal_requested)
+		return 0;
+	/* BLRecal_Process raises a request only after its complete 5+10 frame
+	 * vote.  Consume it at the hardware owner, never in the IRQ algorithm,
+	 * and acknowledge only after both command writes and the slot readback
+	 * complete.  The protocol exposes no calibration-done bit, so this is
+	 * explicitly a transport acknowledgement rather than a false claim that
+	 * AFE convergence has finished.
+	 */
+	ret = himax_afe_send_command(ts, &ts->afe_command_slot,
+				     HIMAX_HX83121A_AFE_CMD_START_CALIBRATION, 0);
+	if (ret) {
+		dev_warn_ratelimited(ts->dev,
+			"BLRecal calibration command transport failed: %d\n", ret);
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+		ts->afe_calibration_failures++;
+#endif
+		return ret;
+	}
+	hx_blrecal_ack(ts->algo, true);
+	ts->algo->baseline_update_suppressed_once = true;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+	ts->afe_calibration_count++;
+#endif
+	return 0;
 }
 
 /*
@@ -681,6 +875,10 @@ int himax_restore_raw_runtime(struct himax_ts_data *ts)
 	 */
 	supplied = power_supply_is_system_supplied();
 	if (supplied >= 0) {
+		struct hx_baseline_platform_state state = ts->algo->platform;
+
+		state.charger_connected = supplied > 0;
+		hx_safe_baseline_set_platform_state(ts->algo, &state);
 		ret = himax_mcu_write_verify_u32(ts,
 			HIMAX_DSRAM_ADDR_USB_DETECT,
 			supplied ? HIMAX_DSRAM_DATA_USB_CONNECTED : 0, 3);

@@ -53,6 +53,8 @@ producer 和 wake raw quality。算法维护 `working`、`wake_candidate` 与 `l
 - `hx-algo-resolve.c`：contact-region expansion、centroid 和坐标求解；
 - `hx-algo-track.c`：peak identity、assignment、slot 生命周期和坐标滤波；
 - `hx-algo.h`：不依赖 SPI/input device 的算法状态与公开测试接口。
+- `hx-stylus.c/.h`：预留的主动笔边界；默认不参与构建，且不得向手指
+  tracker、baseline 或同一个 input device 注入状态。
 
 后续拆分不得以导出大量全局变量为代价。共享设备状态放在私有 header 的结构体中，跨
 文件函数仅暴露完成一项职责的操作。

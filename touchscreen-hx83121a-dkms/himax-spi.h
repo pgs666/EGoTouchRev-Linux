@@ -29,6 +29,7 @@
 #define HIMAX_MAX_CONSECUTIVE_FRAME_ERRORS 3
 #define HIMAX_RESUME_QUALITY_ATTEMPTS	30
 #define HIMAX_MAX_CONSECUTIVE_NOISE_FRAMES 12
+#define HIMAX_MAX_CONSECUTIVE_INVALID_FRAMES 6
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 #define HIMAX_TRACE_CAPACITY		512U
@@ -133,6 +134,8 @@ struct himax_ts_data {
 	struct hx_algo *algo;
 	u8 consecutive_frame_errors;
 	u8 consecutive_noise_frames;
+	u8 consecutive_invalid_frames;
+	u8 consecutive_retry_frames;
 	u8 afe_command_slot;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	struct himax_trace_record *trace_ring;
@@ -157,7 +160,16 @@ void himax_int_enable(struct himax_ts_data *ts, bool enable);
 void himax_lock(struct himax_ts_data *ts);
 void himax_unlock(struct himax_ts_data *ts);
 int himax_spi_read(struct himax_ts_data *ts, u8 command, u8 *buf, u32 len);
+int himax_ddreg_read_byte(struct himax_ts_data *ts, u8 reg, u32 bank,
+				  u8 offset, u8 *value);
+int himax_ddreg_write(struct himax_ts_data *ts, u8 reg, const u8 *data,
+			      u32 len);
+int himax_otp_read_block(struct himax_ts_data *ts, u16 otp_addr,
+				 u8 *data, size_t len);
+int himax_get_project_id_otp(struct himax_ts_data *ts, char *project_id,
+				     size_t project_id_len);
 int himax_restore_afe_runtime(struct himax_ts_data *ts);
+int himax_process_blrecal_request(struct himax_ts_data *ts);
 int himax_restore_raw_runtime(struct himax_ts_data *ts);
 int himax_verify_running_ic(struct himax_ts_data *ts);
 int hx83121a_chip_detect(struct himax_ts_data *ts);
@@ -166,6 +178,7 @@ int himax_mcu_power_on_init(struct himax_ts_data *ts);
 int himax_mcu_check_crc(struct himax_ts_data *ts, u32 start_addr,
 			int reload_length, u32 *crc_result);
 int himax_manual_reset(struct himax_ts_data *ts);
+int himax_manual_full_baseline_reset(struct himax_ts_data *ts);
 int himax_sysfs_init(struct himax_ts_data *ts);
 void himax_sysfs_remove(struct himax_ts_data *ts);
 
