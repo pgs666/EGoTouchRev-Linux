@@ -541,7 +541,8 @@ static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts)
 					(const u16 *)(ts->event_buf +
 					 HX_FRAME_HEADER_BYTES),
 					effective_finger);
-				himax_process_blrecal_request(ts);
+				if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED)
+					himax_process_blrecal_request(ts);
 				himax_report_tracked_state(ts, stable_cnt > 0);
 				return 0;
 			}
@@ -750,8 +751,8 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 		state.charger_noise = false;
 		hx_safe_baseline_set_platform_state(algo, &state);
 	}
-	if (hx_algo_runtime_baseline_process(algo, ptr, effective_finger,
-					     false))
+	if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED &&
+	    hx_algo_runtime_baseline_process(algo, ptr, effective_finger, false))
 		dev_warn_ratelimited(ts->dev,
 			"restored working baseline from validated safe history\n");
 
@@ -763,7 +764,8 @@ static irqreturn_t himax_ts_thread(int irq, void *data)
 	 * layer.  Keep this after frame classification so a command cannot race
 	 * the raw snapshot used for the current baseline decision.
 	 */
-	if (himax_process_blrecal_request(ts))
+	if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED &&
+	    himax_process_blrecal_request(ts))
 		dev_warn_ratelimited(ts->dev,
 			"BLRecal request remains pending after transport failure\n");
 	himax_trace_record_irq(ts, 0, true, &frame_status, false);

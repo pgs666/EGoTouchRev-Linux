@@ -24,6 +24,12 @@ struct input_mt_pos { int x; int y; };
 #include <linux/types.h>
 #endif
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_EXPERIMENTAL_SAFE_BASELINE
+#define HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED 1
+#else
+#define HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED 0
+#endif
+
 /* Grid dimensions — must match the firmware raw frame layout. */
 #define HX_ROWS        40
 #define HX_COLS        60

@@ -1101,7 +1101,8 @@ int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
 	u16 out_of_range = 0;
 	u16 unstable = 0;
 	u8 required_frames;
-	bool had_safe_baseline = algo->safe_baseline_valid;
+	bool had_safe_baseline = HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED &&
+		algo->safe_baseline_valid;
 	int i;
 
 	if (!algo->wake_qualifying)
@@ -1121,9 +1122,11 @@ int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
 #endif
 		return HX_WAKE_QUALITY_REJECTED;
 	}
-	if (algo->safe_baseline_count)
+	if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED &&
+	    algo->safe_baseline_count)
 		hx_safe_baseline_select_for_raw(algo, raw);
-	if (algo->safe_baseline_valid)
+	if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED &&
+	    algo->safe_baseline_valid)
 		safe_observation = hx_wake_observe_against_safe(algo, raw,
 							       &observed_common,
 							       &observed_common_valid);
@@ -1397,7 +1400,7 @@ int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
 	if (algo->baseline_enabled)
 		memcpy(algo->baseline_q8, algo->wake_candidate_q8,
 		       sizeof(algo->baseline_q8));
-	if (!had_safe_baseline)
+	if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED && !had_safe_baseline)
 		hx_safe_baseline_bootstrap(algo, algo->wake_candidate_q8);
 	algo->baseline_initialized = true;
 	algo->wake_qualifying = false;

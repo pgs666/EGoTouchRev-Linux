@@ -31,6 +31,7 @@ hx-algo-test: $(TEST_SOURCES) hx-algo-test-common.h $(ALGO_SOURCES) \
 		$(ALGO_DIR)/hx-algo.h $(ALGO_DIR)/hx-algo-internal.h host-compat.h
 	$(CC) $(CFLAGS) -DHX_ALGO_HOST_TEST \
 		-DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS=1 \
+		-DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_EXPERIMENTAL_SAFE_BASELINE=1 \
 		-I$(ALGO_DIR) $(ALGO_SOURCES) $(TEST_SOURCES) -o $@
 
 test: hx-algo-test

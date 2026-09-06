@@ -925,8 +925,10 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 			}
 	}
 	hx_baseline_observe_frame(algo, raw, common_diff, &observation);
-	blrecal_request = hx_blrecal_process(algo, raw, observation.max_signal,
-		observation.min_signal, false, false);
+	blrecal_request = false;
+	if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED)
+		blrecal_request = hx_blrecal_process(algo, raw,
+			observation.max_signal, observation.min_signal, false, false);
 	blreset_flags = hx_blreset_classify_frame(algo, raw, common_diff,
 		observation.max_signal, observation.min_signal, has_signal,
 		observation.line_noise, observation.out_of_range);
@@ -989,16 +991,18 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	algo->safe_current_positive_nodes = observation.safe_bad_nodes >
 		observation.safe_negative_nodes ?
 		observation.safe_bad_nodes - observation.safe_negative_nodes : 0;
-	signal_flags = hx_safe_baseline_signal_flags(algo,
-		observation.max_signal, observation.min_signal,
-		finger_state == HX_FINGER_PRESENT || active_tracks != 0);
-	if (algo->safe_baseline_valid)
-		ghost_max = hx_safe_baseline_check_ghost(algo, raw,
-			algo->safe_baseline_q8, common_diff, &ghost_nodes);
-	algo->safe_flags |= signal_flags;
-	if (ghost_max)
-		algo->safe_flags |= HX_SAFE_FLAG_GHOST_MAX;
-	hx_safe_baseline_check_with_state(algo, finger_state,
+	signal_flags = 0;
+	if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED) {
+		signal_flags = hx_safe_baseline_signal_flags(algo,
+			observation.max_signal, observation.min_signal,
+			finger_state == HX_FINGER_PRESENT || active_tracks != 0);
+		if (algo->safe_baseline_valid)
+			ghost_max = hx_safe_baseline_check_ghost(algo, raw,
+				algo->safe_baseline_q8, common_diff, &ghost_nodes);
+		algo->safe_flags |= signal_flags;
+		if (ghost_max)
+			algo->safe_flags |= HX_SAFE_FLAG_GHOST_MAX;
+		hx_safe_baseline_check_with_state(algo, finger_state,
 		/* No BL2BL/BL2RAW comparison was performed in this lightweight
 		 * per-frame path.  Passing ``true`` merely because a safe slot exists
 		 * would claim the vendor SafeDiff check completed and allow learning
@@ -1009,6 +1013,7 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 		HX_SAFE_FLAG_VERY_NOISY), !!(signal_flags &
 		HX_SAFE_FLAG_VERY_NEGATIVE), ghost_max,
 		observation.out_of_range);
+	}
 	safe_frame_clean = !observation.out_of_range &&
 		observation.safe_bad_nodes <= HX_BASELINE_CLEAN_MAX_NODES;
 	operational_clean = !observation.out_of_range &&
@@ -1028,7 +1033,8 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	else if (algo->baseline_no_touch_stable_frames < U8_MAX)
 		algo->baseline_no_touch_stable_frames++;
 	stable_no_touch = algo->baseline_no_touch_stable_frames >= 10;
-	shb_noisy_action = hx_blsm_shb_consume_action(algo) != 0;
+	shb_noisy_action = HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED &&
+		hx_blsm_shb_consume_action(algo) != 0;
 	/* BLSM consumes the frame classification before BLIIR is allowed to
 	 * update.  Keep the stage explicit so touch, mild noise and severe line
 	 * noise cannot accidentally share the same learning path.
@@ -1064,7 +1070,8 @@ static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
 	 * raw grid at the release boundary instead of letting the ordinary BLIIR
 	 * integrator crawl toward it and potentially absorb residual artifacts.
 	 */
-	if (touch_hold_released && algo->baseline_enabled &&
+	if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED && touch_hold_released &&
+		algo->baseline_enabled &&
 		(!has_signal || release_candidate) &&
 		(operational_clean || release_candidate)) {
 		algo->baseline_reacquire_pending = true;
@@ -1203,7 +1210,9 @@ store:
 	 * otherwise gain false confidence.  Also skip the exact release frame;
 	 * cell release-hold protects its rebound before a new candidate starts.
 	 */
-	if (algo->baseline_touch_hold || touch_hold_released) {
+	if (!HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED) {
+		hx_clean_baseline_reset(algo);
+	} else if (algo->baseline_touch_hold || touch_hold_released) {
 		if (has_signal || finger_state == HX_FINGER_PRESENT)
 			algo->safe_candidate_armed = true;
 		hx_clean_baseline_reset(algo);
@@ -1442,8 +1451,9 @@ void hx_preprocess_frame_state(struct hx_algo *algo, const u16 *raw,
 	/* Commit raw history only after all classifiers have consumed the previous
 	 * frame.  A partial/SPI-failed frame never reaches this function.
 	 */
-	hx_blsm_shb_process(algo, algo->pre_cmf_raw,
-		algo->baseline_stage == HX_BLSM_RESET);
+	if (HX_EXPERIMENTAL_SAFE_BASELINE_ENABLED)
+		hx_blsm_shb_process(algo, algo->pre_cmf_raw,
+			algo->baseline_stage == HX_BLSM_RESET);
 	memcpy(algo->prev_raw, raw, sizeof(algo->prev_raw));
 	algo->prev_raw_valid = true;
 }

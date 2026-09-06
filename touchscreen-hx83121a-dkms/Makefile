@@ -7,6 +7,12 @@ MODVER = 0.1
 # code.
 HIMAX_STYLUS ?= 0
 
+# The multi-slot SafeBaseline, held-in-hand reacquire, SHB extension and
+# automatic BLRecal paths are still experimental.  They remain enabled by
+# default for the current development branch, but can be disabled as one
+# coherent behaviour set without removing the basic BLIIR/BLSM pipeline.
+HIMAX_EXPERIMENTAL_SAFE_BASELINE ?= 1
+
 obj-m += $(MODNAME).o
 $(MODNAME)-y := himax-spi-core.o himax-spi-hw.o himax-spi-sysfs.o \
 	hx-algo.o hx-algo-preprocess.o hx-algo-detect.o hx-algo-resolve.o \
@@ -23,6 +29,12 @@ $(MODNAME)-y += hx-panel-profile.o
 HIMAX_DIAGNOSTICS ?= 0
 ifeq ($(HIMAX_DIAGNOSTICS),1)
 ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS=1
+endif
+
+ifeq ($(HIMAX_EXPERIMENTAL_SAFE_BASELINE),1)
+ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_EXPERIMENTAL_SAFE_BASELINE=1
+else ifneq ($(HIMAX_EXPERIMENTAL_SAFE_BASELINE),0)
+$(error HIMAX_EXPERIMENTAL_SAFE_BASELINE must be 0 or 1)
 endif
 
 ifeq ($(HIMAX_STYLUS),1)

@@ -63,6 +63,17 @@ make -C touchscreen-hx83121a-dkms HIMAX_DIAGNOSTICS=1
 普通构建默认不包含 `event_trace`、完整 event stack sysfs 和逐 IRQ 大块复制。只有在
 复现硬件/算法故障时才应部署诊断版。
 
+当前开发版默认启用实验性的多槽 SafeBaseline、held-in-hand reacquire、SHB 和
+BLRecal 路径。它们可以作为一个整体关闭，同时保留基础 working baseline、BLIIR/BLSM
+和 BLReset 检测：
+
+```sh
+make -C touchscreen-hx83121a-dkms HIMAX_EXPERIMENTAL_SAFE_BASELINE=0
+```
+
+该开关当前默认值为 `1`。掌压亮屏仍是已知未解决场景，Windows Gaokun 原版驱动也能
+复现；默认启用不代表这些扩展路径已经达到原厂等价或正式稳定状态。
+
 ### DKMS
 
 ```sh
