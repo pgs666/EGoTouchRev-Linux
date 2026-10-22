@@ -6,6 +6,8 @@
 #include "v4l2-capture.h"
 #include "stream-state.h"
 #include "service-notify.h"
+#include "screen-rotation.h"
+#include "solver-screen.h"
 
 #include <algorithm>
 #include <array>
@@ -16,7 +18,9 @@
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <optional>
 #include <poll.h>
+#include <string_view>
 #include <time.h>
 
 namespace {
@@ -45,7 +49,8 @@ static hx_raw_action HardwareAction(Solvers::Tsa::AfeActionType action) {
 }
 
 int main(int argc, char** argv) {
-    std::string device, project, recording;
+    std::string device, project, recording, rotationFile;
+    std::optional<int> fixedRotation;
     bool observe = false, infoOnly = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -54,8 +59,17 @@ int main(int argc, char** argv) {
         else if (arg == "--device" && i + 1 < argc) device = argv[++i];
         else if (arg == "--project" && i + 1 < argc) project = argv[++i];
         else if (arg == "--record" && i + 1 < argc) recording = argv[++i];
-        else {
+        else if (arg == "--rotation" && i + 1 < argc) {
+            fixedRotation = himax::ParseScreenRotation(argv[++i]);
+            if (!fixedRotation) {
+                std::cerr << "Invalid rotation; use 0..3 or 0/90/180/270\n";
+                return 2;
+            }
+        } else if (arg == "--rotation-file" && i + 1 < argc) {
+            rotationFile = argv[++i];
+        } else {
             std::cerr << "Usage: himax-touchd [--device /dev/videoN] [--project ID]\n"
+                      << "                    [--rotation 0..3|90|180|270] [--rotation-file FILE]\n"
                       << "                    [--observe [--record FILE.hxst]]\n"
                       << "       himax-touchd [--device /dev/videoN] --info\n";
             return arg == "--help" ? 0 : 2;
@@ -66,7 +80,8 @@ int main(int argc, char** argv) {
         return 2;
     }
     const bool autoProject = project.empty();
-    if (infoOnly && (observe || !recording.empty() || !autoProject)) {
+    if (infoOnly && (observe || !recording.empty() || !autoProject ||
+                     fixedRotation || !rotationFile.empty())) {
         std::cerr << "--info cannot be combined with solver/capture options\n";
         return 2;
     }
@@ -113,6 +128,9 @@ int main(int argc, char** argv) {
         }
     }
     auto solver = std::make_unique<Solvers::Tsa::TsaCoreSolver>();
+    himax::ScreenRotationProvider rotationProvider(rotationFile);
+    rotationProvider.SetFixed(fixedRotation);
+    himax::SolverScreenState solverScreen;
     auto frame = std::make_unique<Solvers::HeatmapFrame>();
     auto packet = std::make_unique<hx_raw_frame>();
     std::array<uint8_t, Frame::kMasterFrameSize> thp{};
@@ -129,6 +147,7 @@ int main(int argc, char** argv) {
     std::array<uint64_t, 5> actionRequests{}, actionSuccess{};
     uint64_t idleFrames = 0, calibrationFrames = 0, frequencyFrames = 0;
     uint64_t resetRequests = 0, resetSuccess = 0;
+    uint64_t nextRotationPoll = 0;
     int exitCode = 0;
     uint64_t heartbeat = NowNs();
     const auto printStats = [&] {
@@ -165,11 +184,24 @@ int main(int argc, char** argv) {
         if (resetRequests)
             std::cerr << "afe_reset requested=" << resetRequests << " succeeded=" << resetSuccess
                       << " failed=" << resetRequests - resetSuccess << '\n';
+        std::cerr << "screen_rotation=" << solverScreen.Rotation()
+                  << " (-1 means no host orientation)\n";
+    };
+    const auto pollRotation = [&](uint64_t now) {
+        if (now < nextRotationPoll) return;
+        nextRotationPoll = now + 250000000ULL;
+        const auto sample = rotationProvider.Poll();
+        if (!sample || sample->value == solverScreen.Rotation()) return;
+        solverScreen.SetRotation(sample->value);
+        std::cerr << "screen_rotation=" << sample->value
+                  << " source=" << sample->source << '\n';
     };
     himax::NotifyService("READY=1");
     std::cerr << (observe ? "Observing " : "Solving ") << capture.Path()
               << " project=" << (autoProject ? "pending-OTP" : project) << '\n';
     while (!stopped) {
+        const uint64_t loopNow = NowNs();
+        pollRotation(loopNow);
         if (dumpRequested) { dumpRequested = 0; printStats(); }
         if (stream.TimedOut(NowNs())) {
             std::cerr << "AFE producer stalled for four seconds; restarting through supervisor\n";
@@ -266,7 +298,7 @@ int main(int argc, char** argv) {
             frame->rawPtr = thp.data();
             frame->rawLen = thp.size();
             const uint64_t solveStart = NowNs();
-            const bool report = solver->Process(*frame, packet->timestamp_ns / 1000000);
+            const bool report = solverScreen.Process(*solver, *frame, packet->timestamp_ns / 1000000);
             const uint64_t solveTime = NowNs() - solveStart;
             ++solved;
             solveTotal += solveTime;

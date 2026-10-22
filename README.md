@@ -1,4 +1,4 @@
-# EGoTouchRev Linux
+# EGoTouchRev-Linux
 
 面向华为 MateBook E Go 2023（Gaokun）Himax HX83121A TDDI 的实验性 Linux/Android
 触控驱动。本仓库包含 SPI 内核模块、可在主机运行的算法回归测试、诊断 APK 和调参
@@ -44,7 +44,8 @@ APK、内核模块、采集日志和本机部署记录是构建/运行产物，�
 
 ## 构建
 
-要求当前内核 headers/build tree、C++23 编译器和 CMake。默认同时构建 V4L2 内核模块、
+要求当前内核 headers/build tree、C++23 编译器、CMake、pkg-config、libsystemd 开发文件
+和测试所需的 Python 3。默认同时构建 V4L2 内核模块、
 用户态程序并执行回归测试：
 
 ```sh

@@ -2,6 +2,7 @@
 #include "native-frame.h"
 #include "recording.h"
 #include "TsaCoreSolver.h"
+#include "solver-screen.h"
 
 #include <array>
 #include <charconv>
@@ -13,22 +14,29 @@
 int main(int argc, char** argv) {
     himax::RecordingFormat format = himax::RecordingFormat::Native;
     bool startupGrace = false;
-    if (argc > 1 && std::string_view(argv[1]) == "--allow-startup-invalid") {
-        startupGrace = true;
-        --argc;
-        ++argv;
-    }
-    if (argc > 1 && std::string_view(argv[1]) == "--trace") {
-        format = himax::RecordingFormat::Trace;
-        --argc;
-        ++argv;
-    } else if (argc > 1 && std::string_view(argv[1]) == "--hxst") {
-        format = himax::RecordingFormat::Hxst;
+    himax::SolverScreenState screen;
+    while (argc > 1) {
+        const std::string_view option(argv[1]);
+        if (option == "--allow-startup-invalid") startupGrace = true;
+        else if (option == "--trace") format = himax::RecordingFormat::Trace;
+        else if (option == "--hxst") format = himax::RecordingFormat::Hxst;
+        else if (option == "--rotation" && argc > 2) {
+            const std::string_view value(argv[2]);
+            int rotation = -1;
+            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), rotation);
+            if (error != std::errc{} || end != value.data() + value.size() || rotation < 0 || rotation > 3) {
+                std::cerr << "Replay rotation must be 0..3\n";
+                return 2;
+            }
+            screen.SetRotation(rotation);
+            --argc;
+            ++argv;
+        } else break;
         --argc;
         ++argv;
     }
     if (argc < 2 || argc > 4) {
-        std::cerr << "Usage: himax-replay [--allow-startup-invalid] [--trace|--hxst]\n"
+        std::cerr << "Usage: himax-replay [--allow-startup-invalid] [--rotation 0..3] [--trace|--hxst]\n"
                   << "                    FRAMES [PROJECT_ID] [RECORD_BYTES]\n"
                   << "Input: concatenated 5132-byte native frames (or 5060 with RECORD_BYTES).\n";
         return 2;
@@ -103,7 +111,7 @@ int main(int argc, char** argv) {
         frame->rawPtr = thp.data();
         frame->rawLen = thp.size();
         const uint64_t timeMs = record.timeNs / 1000000;
-        const bool report = solver->Process(*frame, timeMs);
+        const bool report = screen.Process(*solver, *frame, timeMs);
         if (!solver->IsAvailable()) {
             std::cerr << "TSACore initialization failed\n";
             return 1;

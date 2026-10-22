@@ -1,0 +1,13 @@
+[Unit]
+Description=Himax touch screen orientation bridge for KDE
+PartOf=graphical-session.target
+After=graphical-session.target plasma-kscreen.service
+
+[Service]
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/himax-screen-bridge
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=4
+
+[Install]
+WantedBy=graphical-session.target

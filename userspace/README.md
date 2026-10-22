@@ -20,7 +20,8 @@ baseline、AFE 状态解析、噪声处理、检测、跟踪和滤波由用户�
 
 ## 构建
 
-需要支持 C++23 的 GCC/Clang、CMake、当前内核 build tree。
+需要支持 C++23 的 GCC/Clang、CMake、pkg-config、libsystemd 开发文件和当前内核 build tree。
+可选 KDE 方向桥接另需 Python 3 和 `kscreen-doctor`（host tests 也使用 Python 3）。
 
 ```sh
 git submodule update --init third_party/EGoTouchRev
@@ -94,8 +95,40 @@ sudo /usr/local/bin/himax-touchd --info
 当前 live ABI 为 v2，内核与 daemon 必须配套升级。INFO 包含固件描述的坐标变换：
 bit 0 为 X 翻转，bit 1 为 Y 翻转，bit 2 为交换 X/Y。uinput 先在原传感器坐标轴上翻转，
 再交换轴，与 Linux touchscreen helpers 保持一致。本机值为 `5`，交换后的输入量程
-为 `15999×25599`，libinput 物理尺寸约 `167×267 mm`。桌面旋转仍由 compositor 处理；
-这项静态接线变换不等于已把桌面动态方向传入 TSACore 的握持/边缘策略。
+为 `15999×25599`，libinput 物理尺寸约 `167×267 mm`。桌面旋转与触控接线变换分开，
+但服务会以低频读取屏幕方向并传入 TSACore，供握持/边缘策略使用。
+
+方向值是 TSACore 的 `0/1/2/3`（0/90/180/270）。KDE 下，在执行过
+`sudo cmake --install userspace/build` 后，由桌面用户启用独立桥接：
+
+```sh
+systemctl --user daemon-reload
+systemctl --user enable --now himax-screen-bridge.service
+```
+
+桥接每秒在桌面会话中执行一次 `kscreen-doctor --json`，只选择已启用且已连接的
+`DSI-1`，通过 Unix datagram 发布方向。主服务每 250 ms 排空有界消息队列；
+只接受 root 或 logind `seat0` 当前活动用户的内核验证凭据。主服务没有连接桌面
+D-Bus，也不需要放宽 `ProtectHome` 或增加文件读取权限；每秒重发可覆盖服务重启。
+KScreen 的 `1/2/4/8` 分别映射为 `0/1/2/3`，镜像模式拒绝猜测。
+
+`--rotation N` 固定值优先；其次为 `--rotation-file FILE`/
+`HIMAX_SCREEN_ROTATION_FILE`，内容可为 `0..3`、`90/180/270`、`rotation=...`，
+或显式带标签的 `kscreen=1|2|4|8`。文件源不存在/错误时不改读 framebuffer；
+`fb0/rotate` 并不代表 Wayland 桌面方向。文件限长 63 字节，拒绝 FIFO/设备/软链接。
+未获得方向时保留上游默认值，日志显示 `screen_rotation=-1`；桥接暂失时保留最近方向。
+其他桌面或 Android 的显示桥接可原子更新显式文件，但尚未提供对应生产者。
+
+方向更新只影响 TSACore 握持/边缘区域，不改变上报坐标，也不人为抬起触点、不清
+mapper、不复位 AFE/校准/基线。适配层在处理前后重放方向，防止上游 `MsReset`
+把它恢复为 0。手写笔仍未启用，方向输入与笔状态通道分离；上游 submodule 保持不变。
+
+手动运行时可指定方向：
+
+```sh
+sudo userspace/build/himax-touchd --rotation 3
+sudo userspace/build/himax-touchd --rotation-file /run/himax-screen-rotation
+```
 
 服务用三秒 watchdog 监控整个求解循环，进程退出或被终止时关闭 uinput，销毁虚拟设备。
 屏灭事件立即释放所有 slot；epoch、sequence 和时间检查禁止屏灭前队列帧重新生成触点。
@@ -126,6 +159,8 @@ sudo timeout --signal=TERM 5 userspace/build/himax-touchd \
     --observe --record /tmp/capture.hxst
 sudo systemctl start himax-touchd
 userspace/build/himax-replay --hxst /tmp/capture.hxst > /tmp/contacts.csv
+# 固定方向重放；旧 HXRC/HXST 没有记录动态方向：
+userspace/build/himax-replay --rotation 3 --hxst /tmp/capture.hxst > /tmp/contacts.csv
 ```
 
 正常服务不写逐帧文件；`--record` 仅允许观察模式，避免同步磁盘 I/O 进入输入路径。
@@ -222,3 +257,15 @@ Android init/SELinux、内核配置和设备映射也需要独立集成。
 早期首次加载曾因错误设置 vb2 最大队列长度触发 warning 并拒绝 probe，随后已修正；
 该失败不计为成功的实机验证。系统此前另有 DPU vblank/commit timeout 日志，
 现有证据不能将其归因于触控，也不能据此宣称整个内核没有错误。
+
+2026-10-23 屏幕方向增量验证：
+
+- Release 和 ASan/UBSan 各 15 组测试通过，sanitizer 仍使用 `detect_leaks=0`；
+- 四种初始方向均覆盖初始化、校准标记、IDLE、AFE epoch，以及合成手指持续按住时
+  改方向；合成内区触点保持 ID，没有额外 UP。这不替代真实边缘握持测试；
+- 独立 Unix socket 实测有效消息、最新值、非法/截断消息、固定值优先；
+  root 运行另外覆盖降权子进程的真实凭据拒绝，不依赖伪造 UID 字段；
+- 历史 512 帧真实 trace 在四种固定方向下可回放；各方向重复回放结果一致。
+
+这些测试不覆盖复位帧内部各阶段的瞬时方向值。适配层在帧前后恢复方向，上游复位
+仍可能在当帧中途清零；不能声称已经证明该边界与 Windows 宿主完全相同。

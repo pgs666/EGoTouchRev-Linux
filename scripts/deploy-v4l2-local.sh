@@ -33,6 +33,8 @@ installed_paths=(
 	/usr/local/bin/himax-touchd
 	/usr/local/bin/himax-replay
 	/usr/local/lib/systemd/system/himax-touchd.service
+	/usr/local/bin/himax-screen-bridge
+	/usr/local/lib/systemd/user/himax-screen-bridge.service
 	/usr/local/lib/udev/rules.d/70-himax-raw.rules
 	/usr/local/lib/modules-load.d/himax-touchd.conf
 	/etc/modprobe.d/himax-spi-dkms.conf

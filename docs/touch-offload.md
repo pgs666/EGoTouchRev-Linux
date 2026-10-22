@@ -51,8 +51,29 @@ ABI v2 将 INFO 的原保留字段定义为 `coordinate_flags`，结构仍为 40
 bit 0/1/2 分别是 invert X、invert Y 和 swap XY；其他位必须为零。内核从固件
 touchscreen 属性读取，用户态先翻转再交换轴，然后声明对应的 uinput 量程。
 本机是 `5`，uinput 坐标量程为 `15999×25599`；solver 和回放 CSV 仍在原始
-`2560×1600` 面板方向工作。compositor 的桌面旋转与这项接线变换分开，
-向算法传入动态握持方向仍待实现。live daemon 要求 ABI v2，不与 ABI v1 模块混用。
+`2560×1600` 面板方向工作。compositor 的桌面旋转与这项接线变换分开，但 live daemon
+通过 `SolverScreenState` 将宿主方向传入 `Core::SetScreenRotateState()`。方向来源优先级为：
+`--rotation` 固定值、显式 `--rotation-file`/`HIMAX_SCREEN_ROTATION_FILE`、KDE 桥接消息。
+不读取 `fb0/rotate`：它与 compositor 方向不同。本机 framebuffer 为 0，而 KScreen 为 8。
+live daemon 要求 ABI v2，不与 ABI v1 模块混用。
+
+独立的 `himax-screen-bridge.service` 在桌面用户会话每秒查询一次 `kscreen-doctor --json`，
+只读取已启用且已连接的指定内屏（默认 `DSI-1`）。`Output::Rotation` 的
+`None/Left/Inverted/Right = 1/2/4/8` 转为 TSACore 的 `0/1/2/3`，拒绝镜像模式。
+枚举与 Wayland 映射依据 KDE libkscreen 的 `src/output.h` 和
+`backends/kwayland/waylandoutputdevice.cpp`（本机另有 `kscreen-doctor -j` 实测）。
+桥接发往抽象 Unix datagram 地址 `himax-touchd-screen-state`；接收方启用 `SO_PASSCRED`，
+只接受 root 或 `sd_seat_get_active("seat0")` 对应 UID，消息限长 64 字节，每 250 ms
+至多消费 16 条。查询不进入求解循环，不访问主服务被隔离的桌面 D-Bus/home。
+桥接每秒重发，覆盖主服务重启；无新来源时保留最近方向，首次无来源时使用上游默认值。
+
+方向变化不重置 AFE/control/mapper/baseline，不强制触点抬起，也不重复变换上报坐标。
+适配层在 `Process` 前后设置 Core 的宿主方向，因为上游 `MsReset -> Sys::Init` 会把
+`screenRotation` 清回 0；复位帧的算法仍保持上游的复位处理，之后的普通帧使用宿主方向。
+手写笔状态不会被用作传送显示方向的假通道，上游 submodule 无本地修改。
+四种初始方向及校准/IDLE/AFE epoch 的 host tests 检查实际 Core 状态；实际四方向
+边缘手势和握持手感仍须实机验收。原始 HXRC v1 不保存方向变化，固定方向回放可使用
+`himax-replay --rotation 0..3`，不能宣称已有动态旋转录制的逐帧等价。
 
 `--info` 使用只读 fd 查询 QUERYCAP/INFO，不分配 buffer、不启动 AFE、不申请
 队列所有权，可以在常驻服务运行时使用。本接口是项目私有的 V4L2 metadata 格式，
