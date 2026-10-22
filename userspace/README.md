@@ -18,11 +18,45 @@ baseline、AFE 状态解析、噪声处理、检测、跟踪和滤波由用户�
 文中“原版”指这个固定版本的上游 C++ 重写实现，不是直接加载华为 Windows DLL，
 也不是 Himax 发布的算法源码；移植成功不等于已证明与零售版驱动逐帧等价。
 
-构建时有两处明确的 Linux 宿主适配，详见
+构建时有四处明确的本地适配/修复，详见
 [`cmake/PrepareUpstream.cmake`](cmake/PrepareUpstream.cmake)：生成上游
-`TsaCoreSolver.cpp` / `Sys.cpp` 的副本，在首次初始化、每帧和复位内部应用宿主方向。
+`TsaCoreSolver.cpp` / `Sys.cpp` 的副本，在首次初始化、每帧和复位内部应用宿主方向；
+生成 `TouchReport.cpp` 副本，在首次获准上报时调用本地边缘起点修正；
+生成 `Contour.cpp` 副本，限制插值取窗的行列，修复最后一行/列的越界读取。
 submodule 文件保持不变，原始文件的完整 SHA-256 不匹配时停止配置，要求重新审查适配。
-生成文件位于 `build/upstream-overlay/`；其余算法源码、参数表和布局没有改动。
+生成文件位于 `build/upstream-overlay/`；其余上游算法源码、参数表和布局没有改动。
+
+### 边缘滑入的首报修正
+
+上游 EdgeRecovery 按确认按下时的当前位置决定是否恢复边缘起点；快速滑动在
+debounce 后可能已经越过窄修正窗口。上游外推还要求两个坐标分量均非零，因此严格
+轴向滑入可能没有补回边缘历史。Linux 的旧内核算法另有 edge fast-start，新路径
+没有默认编译它。不能把这个回归归因于 V4L2/uinput 额外排队。
+
+本地 [`edge-onset.cpp`](edge-onset.cpp) 在正常防误触准入、历史处理和坐标滤波之后，
+只修正第一次获准上报的坐标。使用最初候选位置与当前运动方向反向求边界交点，
+支持一维位移为零；不改变 raw、baseline、down/up 状态、debounce、ID 或回放队列，
+不设置上游会影响 lift-off 与上报准入的 history-replay 标志，也不再等待确认帧。
+它是本地补偿，不是上游/华为原厂逐函数等价实现。
+
+适用条件为：单指、正常信号/形状、无全局噪声/异常、尚未报过点，首次检测不超过
+36 ms，起点在该条边已有 ER 最大范围以内；运动需明显朝内且反向轨迹能到达该边。
+角落、静止、沿边、向外、多指、弱峰/分裂区域、异常或长时间被抑制的触点不修正。
+如果第一份可检测 raw 已经在这个范围之外，则保留上游坐标；无法仅凭两帧区分
+“屏外滑入”和“在很靠近边缘的位置按下后朝内移动”，后者也可能被当作边缘滑入。
+后续实机应重点检查这项取舍，不应无限扩大范围。
+
+复现/对照工具只在 `BUILD_TESTING` 下编译：
+
+```sh
+# rotation、原始面板边（左0/右1/上2/下3）、每帧移动的格数、切向漂移格数
+userspace/build/himax-solver-edge-test 3 3 3 0
+userspace/build/himax-solver-edge-reference 3 3 3 0
+```
+
+两者使用相同 raw、adapter、TSACore 和参数，reference 仅禁用本地首报修正，
+仍包含轮廓越界修复。输出坐标为原始面板 `2560×1600` 方向，尚未应用接线变换
+或桌面旋转。合成测试不能代替真实 Android 全面屏手势验收。
 
 ## 构建
 
@@ -444,3 +478,33 @@ Android init/SELinux、内核配置和设备映射也需要独立集成。
 `b0f281a606dc7fdc4ff5cab37106307ceb3c3a85a33a60a680ddedbd562ac17a`。
 本次没有执行真正系统休眠或修改 Android。桥接冷启动/无新鲜缓存时仍可能先使用
 上游默认方向；实际四方向触控、系统休眠与长期稳定性仍待单独验收。
+
+2026-10-23 快速边缘滑入修复验证：
+
+- Release 与 ASan/UBSan 各 23 组通过，sanitizer 使用 `detect_leaks=0`。
+  96 条合成 raw 滑入覆盖四方向、四边、两种速度、轴向及正负斜向；
+  另有屏内移动、物理首末行列/角落和修正拒绝条件测试；
+- 32 条真实求解管线的合成 A/B 序列，首报帧、释放帧和 tracking ID 完全一致。
+  方向 3 的代表性样本中，左/右边首报距边缘约 `231 → 0.2/0` 像素，
+  上边 `99.1 → 0.1`、下边 `219.2 → 0`。这些是 `2560×1600` 面板坐标
+  下的合成结果，不是用户本次实际动作的测量；
+- 若第一份有效候选已超出原有 ER 最大范围，则整个轨迹与关闭修正的对照一致。
+  不为无法证明来源的远端起点造边缘坐标；靠边按下后立即朝内滑动仍可能触发补偿；
+- 新测试在修复前触发了上游 `Contour.cpp::HighResCache::Row` 的 heap-buffer-overflow，
+  原因是最后一行/列的 cubic window 仍取到 `len`。现在仅将越界抽头限制到最近
+  有效行/列，所有原本有效的取窗保持原值；对照与修复程序都包含这项内存修复；
+- 本机已更新 `himax-touchd` / `himax-replay`，未重载模块。六秒闭环录制 672 帧，
+  bad/stale/dropped/recording_error 全零，严格回放 `live_output_verified=1`。
+  该样本无触点，只证明设备采集、求解、方向及录制链路；
+- 程序及测试日志备份：`deploy-logs/edge-onset-0IB2FR2j/`；
+  本机录制：`deploy-logs/session-GpLw6vqw/`。
+
+本次安装的 daemon SHA-256：
+`cc2e3269ee76e4e1ecb270eaf1662815af8ddf1962eb4f562714c9a5eaf33e25`。
+实际快速滑入手感、靠边点击/游戏操作以及 Android 全面屏手势尚未验收；
+Android 仍未迁移或部署此用户态架构。
+
+同次构建另包含此前完成的 master 健康状态修改：完整 checksum body 全 `0xEC`
+时按上游 BusFiller 立即请求 SOS；其他坏帧仍连续五帧才恢复，好帧/新 epoch 清除
+累计状态；reset 失败时保持请求供后续重试。分类、计数饱和、最后完整 THP 缓冲
+保留、录制/严格回放的恢复一致性已通过 host tests，但未对真实 SPI 注入故障。

@@ -26,11 +26,15 @@ AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、系统 PM
 不把 C++ 浮点和进程级全局状态搬进内核。手写笔采集未启用。
 这里的“原版”是上游 EGoTouchRev v1.4.0 的 C++ 重写实现，不能据此声称直接运行
 华为原厂 DLL，或已经通过零售驱动的逐帧等价验证。
-Linux 有两处明确的宿主适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys.cpp` 的副本，
+Linux 有两处宿主方向适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys.cpp` 的副本，
 分别在 `ApplyPenSession()` 后和 `screenRotation = 0` 后应用宿主方向。
-[`PrepareUpstream.cmake`](../userspace/cmake/PrepareUpstream.cmake) 校验两份原始源文件
+另生成 `TouchReport.cpp` 与 `Contour.cpp` 的副本：前者调用本地的首次获准上报
+边缘起点修正，后者修复插值最后一行/列的越界取样。
+[`PrepareUpstream.cmake`](../userspace/cmake/PrepareUpstream.cmake) 校验四份原始源文件
 的完整 SHA-256；源文件变化就停止配置并要求审查。submodule 本身不被修改，
-其余算法源文件、接口布局和参数表不变，不能将生成副本误认为没有宿主适配的原文件。
+其余算法源文件、接口布局和参数表不变，不能把本地修正称为上游等价行为。
+边缘修正的条件、限制和对照工具见
+[`userspace/README.md`](../userspace/README.md#边缘滑入的首报修正)。
 
 ## V4L2 ABI v2
 

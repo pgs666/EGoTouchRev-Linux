@@ -9,7 +9,8 @@ import tempfile
 import time
 
 cmake, upstream, module = sys.argv[1:]
-sources = ("TsaCoreSolver.cpp", "src/App/Sys.cpp")
+sources = ("TsaCoreSolver.cpp", "src/App/Sys.cpp",
+           "src/Rejection/TouchReport/TouchReport.cpp", "src/Alg/TouchZone/Contour.cpp")
 
 
 def sha(path):
@@ -41,13 +42,26 @@ with tempfile.TemporaryDirectory(prefix="himax-overlay-") as directory:
     for name in sources:
         assert sha(source / name) == originals[name], "submodule source was modified"
         text = (output / name).read_text()
-        assert text.count("::himax::ApplyHostScreenRotation();") == 1
-        assert text.startswith('#include "host-screen.h"\n#line 1 "')
+        if name == sources[3]:
+            assert text.startswith('#line 1 "')
+            assert text.count(
+                "if (first + k < 0 || first + k >= len) return std::clamp(first + k, 0, len - 1);"
+            ) == 1
+            continue
+        hook, header = (
+            ("::himax::RecoverEdgeOnset(curIdx, prevIdx, report);", "edge-onset.h")
+            if name == sources[2] else ("::himax::ApplyHostScreenRotation();", "host-screen.h")
+        )
+        assert text.count(hook) == 1
+        assert text.startswith(f'#include "{header}"\n#line 1 "')
     assert "ApplyPenSession();\n    ::himax::ApplyHostScreenRotation();" in (
         output / sources[0]
     ).read_text()
     assert "s.screenRotation = 0;\n    ::himax::ApplyHostScreenRotation();" in (
         output / sources[1]
+    ).read_text()
+    assert "if (replayed) u.pos = orig;\n    ::himax::RecoverEdgeOnset" in (
+        output / sources[2]
     ).read_text()
     stamps = {name: (output / name).stat().st_mtime_ns for name in sources}
     time.sleep(0.02)

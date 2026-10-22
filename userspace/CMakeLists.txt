@@ -30,10 +30,14 @@ file(GLOB_RECURSE TSACORE_SOURCES CONFIGURE_DEPENDS "${TSACORE}/src/*.cpp")
 include(cmake/PrepareUpstream.cmake)
 set(TSACORE_OVERLAY "${CMAKE_CURRENT_BINARY_DIR}/upstream-overlay")
 himax_prepare_upstream("${TSACORE}" "${TSACORE_OVERLAY}")
-list(REMOVE_ITEM TSACORE_SOURCES "${TSACORE}/src/App/Sys.cpp")
+list(REMOVE_ITEM TSACORE_SOURCES "${TSACORE}/src/App/Sys.cpp"
+    "${TSACORE}/src/Rejection/TouchReport/TouchReport.cpp"
+    "${TSACORE}/src/Alg/TouchZone/Contour.cpp")
 add_library(himax-tsacore STATIC ${TSACORE_SOURCES}
     "${TSACORE}/HimaxAfeAdapter.cpp" "${TSACORE_OVERLAY}/TsaCoreSolver.cpp"
-    "${TSACORE_OVERLAY}/src/App/Sys.cpp" host-screen.cpp
+    "${TSACORE_OVERLAY}/src/App/Sys.cpp" host-screen.cpp edge-onset.cpp
+    "${TSACORE_OVERLAY}/src/Rejection/TouchReport/TouchReport.cpp"
+    "${TSACORE_OVERLAY}/src/Alg/TouchZone/Contour.cpp"
     native-frame.cpp recording.cpp capture-session.cpp session-replay.cpp)
 target_include_directories(himax-tsacore
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${TSACORE}" "${SOLVERS}"
@@ -138,4 +142,20 @@ if(BUILD_TESTING)
     foreach(rotation RANGE 0 3)
         add_test(NAME solver-screen-${rotation} COMMAND himax-solver-screen-test ${rotation})
     endforeach()
+    add_executable(himax-solver-edge-test tests/solver-edge-test.cpp)
+    target_include_directories(himax-solver-edge-test PRIVATE "${TSACORE}/src")
+    target_link_libraries(himax-solver-edge-test PRIVATE himax-tsacore)
+    target_compile_options(himax-solver-edge-test PRIVATE -Wall -Wextra -Werror)
+    foreach(rotation RANGE 0 3)
+        add_test(NAME solver-edge-${rotation} COMMAND himax-solver-edge-test ${rotation})
+    endforeach()
+    add_executable(himax-solver-edge-reference tests/solver-edge-test.cpp
+        tests/edge-onset-reference.cpp)
+    target_include_directories(himax-solver-edge-reference PRIVATE "${TSACORE}/src")
+    target_link_libraries(himax-solver-edge-reference PRIVATE himax-tsacore)
+    target_compile_options(himax-solver-edge-reference PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME edge-onset-reference COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/edge-onset-compare.py"
+        $<TARGET_FILE:himax-solver-edge-test> $<TARGET_FILE:himax-solver-edge-reference>)
+    set_tests_properties(edge-onset-reference PROPERTIES TIMEOUT 120)
 endif()
