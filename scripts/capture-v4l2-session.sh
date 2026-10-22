@@ -74,7 +74,7 @@ sudo "$replay" --session "$state_dir/capture.hxst" \
 	echo "Capture incomplete or replay mismatch; evidence kept in $state_dir" >&2
 	exit 1
 }
-# Root creates evidence with mode 0600; return it to the invoking developer.
+# Return root-created evidence to the invoking developer.
 sudo chown "$(id -u):$(id -g)" \
 	"$state_dir/capture.hxst" "$state_dir/capture.hxst.events"
 tail -14 "$state_dir/daemon.log"

@@ -333,3 +333,6 @@ Android init/SELinux、内核配置和设备映射也需要独立集成。
   退出、原常驻服务恢复。记录位于 `deploy-logs/session-20261023-kj9dYT/`、
   `deploy-logs/session-aIoHbNTN/` 和 `deploy-logs/session-CuChHiDX/`；
 - 实机样本没有实际触点，不能代替真实快速滑动、多指、握持或掌压亮屏验收。
+- 用户态更新已安装到本机，内核模块未重载。默认服务为单线程、没有开启录制，
+  处理 911 帧时 bad/stale 均为 0，`NRestarts=0`，方向为 3；
+  安装前备份为 `deploy-logs/userspace-session-20261023-KEK1N5/`。
