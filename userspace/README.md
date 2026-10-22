@@ -33,7 +33,23 @@ submodule 文件保持不变，原始文件的完整 SHA-256 不匹配时停止�
 在 `hx-afe.c`，测试比较全部命令/参数组合，并检查三步寄存器事务的顺序、失败和重试。
 
 内核的 `himax_mcu_power_on_init()` 调用共享的
-[`hx-raw-init.c`](../touchscreen-hx83121a-dkms/hx-raw-init.c)，顺序为：
+[`hx-raw-init.c`](../touchscreen-hx83121a-dkms/hx-raw-init.c)。默认 V4L2 路径先执行
+`hx_raw_prepare_scan()`，对应 Windows `Chip::Init()` 实际调用的前置事务：
+
+```text
+flash reload enable=0
+→ SRAM inspection unlock=0（最多 20 次）
+→ sorting=0（最多 10 次）
+→ N-frame=1
+→ N-frame=0x7f0c0001
+```
+
+解锁、sorting 和两次 N-frame 均完整读写四字节，但只比较低两字节；
+前两项对传输或比较失败都重试，耗尽返回 `EINVAL`，由外层从硬件 reset 重试。
+N-frame 任一笔失败立即退出，不能继续启用 raw。这里没有延时或 sense-on。
+后续又写 N-frame=1，不构成省略前置事务的依据。legacy 入口保持原有准备流程。
+
+然后执行 `hx_raw_power_on()`，顺序为：
 RawOut 清零 → sorting 清零并读回 → N-frame=1 → reload 状态清零 →
 平台 sense-on/reset → A8 低字节为 5 → 完整 reload word 为 `0x72c0` →
 RawOut=`0xf6` → master SRAM password=`0x5aa5`。任何阶段的传输失败立即退出，
@@ -42,15 +58,23 @@ reload 超时统一返回 `ETIMEDOUT`，错误日志给出失败阶段。
 
 RawOut 在 sense-on 之前清零来自固定版本 Windows
 `HimaxChipLifecycle.cpp::himax_mcu_power_on_init()`；此前 Linux 漏了这一步。
-新增 host 测试运行的就是内核共享实现，覆盖寄存器顺序、每笔传输失败、状态迟到、
+power-on host 测试运行的就是内核共享实现，覆盖寄存器顺序、每笔传输失败、状态迟到、
 完整 reload word 检查和超时后禁止启用 raw producer。它使用人工核对的协议 fixture，
 并未像邮箱构包测试那样直接编译 Windows 函数；不能声称验证了整个启动流程逐笔等价。
 
+前置准备另有直接源码对照：测试构建通过
+[`RawPrepareReference.cmake`](cmake/RawPrepareReference.cmake)，提取未经修改的
+`himax_mcu_reload_disable`、`himax_mcu_assign_sorting_mode`、`hx_set_N_frame`、
+`himax_switch_mode_inspection` 和 `write_and_verify` 五个函数体；寄存器值也从上游
+`HimaxRegisters.cpp` 提取。五份输入文件（含实际使用的 `HimaxByteUtils.h`）都校验
+完整 SHA-256，Init 调用顺序也受检查。仅 Windows HAL 读写替换成与 Linux 共用的
+fake bus；每笔完整传输、返回值、20/10 次重试边界、N-frame 两段失败和高字不同均
+与生产 C 实现比较。引用实现仅链接到测试，不进入模块或 daemon。
+
 完整启动仍有差异：Linux 在前面做 IC 探测/进入 safe mode；保留额外的 A8 ready gate；
 后面 `himax_restore_raw_runtime()` 仍会重放 AP notify、sorting/N-frame、RawOut、USB profile
-及 SRAM password。Windows 的前置 inspection unlock、N-frame=`0x7f0c0001` 并未逐项
-移植，也不能忽略其后还有 N-frame=1 与物理 reset。当前不依据函数存在就盲加写入，
-或把这些差异直接归因于手动切频失败。slave/pen 通道按本项目范围保持关闭。
+及 SRAM password。前置 inspection/N-frame 的事务对照不涵盖这些额外检查、GPIO reset
+或完整生命周期，也不能据此声称手动切频已经生效。slave/pen 通道按本项目范围保持关闭。
 
 ### 边缘滑入的首报修正
 

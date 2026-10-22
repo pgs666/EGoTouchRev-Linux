@@ -872,7 +872,20 @@ int himax_mcu_power_on_init(struct himax_ts_data *ts)
 	enum hx_raw_init_step step = HX_RAW_INIT_RAW_CLEAR;
 	int ret;
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+	/* The active Windows Init calls inspection unlock and BOTH N-frame
+	 * writes before power_on_init rewrites N-frame and resets the MCU.
+	 * Preserve these transactions instead of assuming final-value equality
+	 * makes them redundant. Legacy retains its existing setup entry point.
+	 */
+	ret = hx_raw_prepare_scan(&bus, &step);
+	if (ret)
+		goto report;
+#endif
 	ret = hx_raw_power_on(&bus, &step);
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+report:
+#endif
 	if (ret)
 		dev_err(ts->dev, "raw power-on %s failed: %d\n",
 			hx_raw_init_step_name(step), ret);

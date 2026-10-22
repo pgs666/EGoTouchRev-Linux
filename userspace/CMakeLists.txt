@@ -137,6 +137,21 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-raw-init-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME raw-power-on COMMAND himax-raw-init-test)
+    include(cmake/RawPrepareReference.cmake)
+    himax_prepare_raw_reference("${UPSTREAM}/EGoTouchService/Device/himax"
+        "${TSACORE_OVERLAY}/raw-prepare-reference.cpp")
+    add_executable(himax-raw-prepare-test ../tests/hx-raw-prepare-test.c
+        ../touchscreen-hx83121a-dkms/hx-raw-init.c
+        "${TSACORE_OVERLAY}/raw-prepare-reference.cpp")
+    target_include_directories(himax-raw-prepare-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_definitions(himax-raw-prepare-test PRIVATE HX_RAW_INIT_UPSTREAM_REFERENCE=1)
+    target_compile_options(himax-raw-prepare-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME raw-scan-preparation COMMAND himax-raw-prepare-test)
+    add_test(NAME raw-preparation-reference-integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/raw-prepare-reference-test.py"
+        "${CMAKE_COMMAND}" "${UPSTREAM}/EGoTouchService/Device/himax"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RawPrepareReference.cmake")
     # Requires an idle real device and performs hardware resets. Invoke using
     # scripts/test-v4l2-transport.sh; never run as a normal host test.
     add_executable(himax-transport-test tests/transport-test.cpp v4l2-capture.cpp)

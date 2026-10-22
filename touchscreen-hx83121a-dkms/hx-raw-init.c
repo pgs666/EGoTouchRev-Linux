@@ -13,6 +13,7 @@
 #define HX_RELOAD_DONE		0x100072c0U
 #define HX_FW_STATUS		0x900000a8U
 #define HX_RAW_PASSWORD		0x10000000U
+#define HX_FLASH_RELOAD		0x10007f00U
 
 static int write_u32(const struct hx_raw_init_bus *bus, u32 address, u32 value)
 {
@@ -30,6 +31,66 @@ static int read_u32(const struct hx_raw_init_bus *bus, u32 address, u32 *value)
 	if (!ret)
 		*value = (u32)bytes[0] | (u32)bytes[1] << 8 |
 			 (u32)bytes[2] << 16 | (u32)bytes[3] << 24;
+	return ret;
+}
+
+static int write_verify_low16(const struct hx_raw_init_bus *bus,
+			      u32 address, u32 value)
+{
+	u32 readback;
+	int ret;
+
+	ret = write_u32(bus, address, value);
+	if (ret)
+		return ret;
+	ret = read_u32(bus, address, &readback);
+	if (ret)
+		return ret;
+	return (readback & 0xffff) == (value & 0xffff) ? 0 : -EINVAL;
+}
+
+static int retry_verify(const struct hx_raw_init_bus *bus,
+			 u32 address, u32 value, unsigned int attempts)
+{
+	unsigned int i;
+
+	/* Upstream inspection unlock/sorting retry ANY failed transaction;
+	 * exhausted retries become VerificationFailed, even for bus errors.
+	 * The outer lifecycle then starts a complete hardware-reset attempt.
+	 */
+	for (i = 0; i < attempts; i++)
+		if (!write_verify_low16(bus, address, value))
+			return 0;
+	return -EINVAL;
+}
+
+int hx_raw_prepare_scan(const struct hx_raw_init_bus *bus,
+			enum hx_raw_init_step *step)
+{
+	int ret;
+
+	if (!bus || !step || !bus->write || !bus->read)
+		return -EINVAL;
+	*step = HX_RAW_INIT_FLASH_RELOAD;
+	ret = write_u32(bus, HX_FLASH_RELOAD, 0);
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_INSPECTION_UNLOCK;
+	ret = retry_verify(bus, HX_RAW_PASSWORD, 0, 20);
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_INSPECTION_SORTING;
+	ret = retry_verify(bus, HX_SORTING_MODE, 0, 10);
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_NFRAME_NORMAL;
+	ret = write_verify_low16(bus, HX_NFRAME, 1);
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_NFRAME_MODE;
+	ret = write_verify_low16(bus, HX_NFRAME, 0x7f0c0001);
+	if (!ret)
+		*step = HX_RAW_INIT_COMPLETE;
 	return ret;
 }
 
@@ -130,7 +191,8 @@ const char *hx_raw_init_step_name(enum hx_raw_init_step step)
 	static const char * const names[] = {
 		"raw_clear", "sorting_clear", "nframe", "reload_clear",
 		"sense_on", "running", "reload_done", "raw_select",
-		"raw_password", "complete",
+		"raw_password", "flash_reload", "inspection_unlock",
+		"inspection_sorting", "nframe_normal", "nframe_mode", "complete",
 	};
 
 	if ((unsigned int)step > HX_RAW_INIT_COMPLETE)

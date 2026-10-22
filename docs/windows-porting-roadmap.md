@@ -34,8 +34,10 @@
 
 初始化审计补充：共享 `hx-raw-init.c` 已补上 sensing/reset 前 RawOut 清零，保留
 Linux 的 sorting 读回和 A8 ready 检查；生产路径与 host 事务故障测试使用同一实现。
-这只覆盖 power-on/ready/master raw 设置阶段，不代表 Windows 整个 `Chip::Init()`
-已经逐笔等价。前置 inspection/N-frame、后置 AP/USB runtime 重放的差异和验证边界
+默认 V4L2 入口另补上 Windows Init 实际调用的 reload/inspection unlock/sorting/
+两段 N-frame 准备，测试直接编译上游五个原始函数体，与 Linux 事务和重试逐笔对照。
+这不代表 Windows 整个 `Chip::Init()` 已经逐笔等价；后置 AP/USB runtime 重放、
+前置 IC 探测/安全模式、GPIO reset 和额外 ready 检查仍有差异。验证边界
 见 [用户态运行说明](../userspace/README.md)。
 
 ---

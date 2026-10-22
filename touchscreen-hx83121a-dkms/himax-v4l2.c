@@ -83,9 +83,7 @@ static int himax_start_afe(struct himax_ts_data *ts)
 			if (ret)
 				continue;
 		}
-		ret = himax_enable_fw_reload(ts);
-		if (ret)
-			continue;
+		/* Includes upstream reload/inspection/N-frame preparation. */
 		ret = himax_mcu_power_on_init(ts);
 		if (ret)
 			continue;
