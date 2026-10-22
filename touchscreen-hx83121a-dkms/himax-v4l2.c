@@ -607,11 +607,16 @@ static int himax_raw_probe(struct spi_device *spi)
 		ret = -ENOMEM;
 		goto free_ts;
 	}
-	ts->gpiod_rst = devm_gpiod_get_optional(ts->dev, "reset", GPIOD_OUT_HIGH);
+	/* The Windows reset protocol starts with a register write. Do not hold
+	 * RESET asserted while acquiring the GPIO, or that first write cannot
+	 * reach the IC. Native low/released retains the existing ACPI polarity.
+	 */
+	ts->gpiod_rst = devm_gpiod_get(ts->dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(ts->gpiod_rst)) {
 		ret = PTR_ERR(ts->gpiod_rst);
 		goto free_ts;
 	}
+	usleep_range(50000, 50100);
 	spi->bits_per_word = 8;
 	spi->mode = SPI_MODE_3;
 	spi->cs_setup.value = HIMAX_SPI_CS_SETUP_TIME;

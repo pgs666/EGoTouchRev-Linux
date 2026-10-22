@@ -104,7 +104,9 @@ union himax_dword_data {
 
 static int himax_mcu_write_verify_u32(struct himax_ts_data *ts, u32 addr,
 					      u32 value, int attempts);
+#ifndef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
 static int himax_sense_off(struct himax_ts_data *ts, bool check_en);
+#endif
 static int himax_sense_on(struct himax_ts_data *ts, bool sw_reset);
 
 int himax_spi_read(struct himax_ts_data *ts, u8 cmd, u8 *buf, u32 len)
@@ -221,6 +223,23 @@ static void himax_ahb_sleep(void *context, unsigned int milliseconds)
 	usleep_range(milliseconds * 1000, milliseconds * 1000 + 100);
 }
 
+static int himax_ahb_reset(void *context, bool high)
+{
+	struct himax_ts_data *ts = context;
+
+	if (!ts->gpiod_rst)
+		return -ENODEV;
+	/* ACPI GPIO is active-low: logical 1 asserts physical RESET low.
+	 * Keep known-good native timing; Windows THP IOCTL timing is unknown.
+	 */
+	gpiod_set_value_cansleep(ts->gpiod_rst, !high);
+	if (high)
+		usleep_range(50000, 50100);
+	else
+		usleep_range(20000, 20100);
+	return 0;
+}
+
 static struct hx_ahb_bus himax_ahb_bus(struct himax_ts_data *ts)
 {
 	return (struct hx_ahb_bus) {
@@ -228,6 +247,7 @@ static struct hx_ahb_bus himax_ahb_bus(struct himax_ts_data *ts)
 		.write = himax_ahb_write,
 		.read = himax_ahb_read,
 		.sleep_ms = himax_ahb_sleep,
+		.set_reset = himax_ahb_reset,
 	};
 }
 
@@ -593,6 +613,7 @@ err:
 #endif
 }
 
+#ifndef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
 static void himax_pin_reset(struct himax_ts_data *ts)
 {
 	gpiod_set_value_cansleep(ts->gpiod_rst, 1);
@@ -600,6 +621,7 @@ static void himax_pin_reset(struct himax_ts_data *ts)
 	gpiod_set_value_cansleep(ts->gpiod_rst, 0);
 	usleep_range(50000, 50100);
 }
+#endif
 
 void himax_int_enable(struct himax_ts_data *ts, bool enable)
 {
@@ -638,6 +660,7 @@ void himax_unlock(struct himax_ts_data *ts)
 	mutex_unlock(&ts->op_lock);
 }
 
+#ifndef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
 static void himax_mcu_ic_reset(struct himax_ts_data *ts, bool int_off)
 {
 	if (int_off)
@@ -737,6 +760,7 @@ without_check:
 
 	return -EIO;
 }
+#endif
 
 /**
  * @sw_reset: true for software reset, false for hardware reset
@@ -747,6 +771,11 @@ without_check:
  */
 static int himax_sense_on(struct himax_ts_data *ts, bool sw_reset)
 {
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+	const struct hx_ahb_bus bus = himax_ahb_bus(ts);
+
+	return hx_ahb_sense_on(&bus, sw_reset);
+#else
 	int ret;
 	const union himax_dword_data re_init = {
 		.dword = cpu_to_le32(HIMAX_REG_DATA_FW_RE_INIT)
@@ -760,12 +789,7 @@ static int himax_sense_on(struct himax_ts_data *ts, bool sw_reset)
 	ret = himax_mcu_register_write(ts, HIMAX_REG_ADDR_CTRL_FW, re_init.byte, 4);
 	if (ret < 0)
 		return ret;
-#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
-	/* Active upstream hx_sense_on waits 11 ms before the reset pair. */
-	usleep_range(11000, 12000);
-#else
 	usleep_range(10000, 11000);
-#endif
 	if (!sw_reset) {
 		himax_mcu_ic_reset(ts, false);
 	} else {
@@ -775,6 +799,7 @@ static int himax_sense_on(struct himax_ts_data *ts, bool sw_reset)
 			return ret;
 	}
 	return 0;
+#endif
 }
 
 int hx83121a_chip_detect(struct himax_ts_data *ts)
@@ -784,6 +809,20 @@ int hx83121a_chip_detect(struct himax_ts_data *ts)
 	const u32 read_icid_retry_limit = 5;
 	union himax_dword_data data;
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+	const struct hx_ahb_bus bus = himax_ahb_bus(ts);
+
+	/* Windows Init resets before OTP and again afterwards. Do not enter
+	 * legacy safe mode merely to identify the IC on every start/resume.
+	 * Keep Linux's read-only identity gate; the OTP helper owns safe mode.
+	 */
+	ret = hx_ahb_hw_reset(&bus);
+	if (ret) {
+		dev_err(ts->dev, "raw hardware reset failed: %d\n", ret);
+		return ret;
+	}
+	himax_ahb_sleep(ts, 10);
+#else
 	himax_pin_reset(ts);
 
 	ret = himax_mcu_interface_on(ts);
@@ -795,6 +834,7 @@ int hx83121a_chip_detect(struct himax_ts_data *ts)
 	ret = himax_sense_off(ts, false);
 	if (ret)
 		return ret;
+#endif
 
 	for (retry_cnt = 0; retry_cnt < read_icid_retry_limit; retry_cnt++) {
 		ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_ICID, data.byte, 4);

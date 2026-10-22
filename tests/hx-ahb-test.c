@@ -7,7 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum operation { BURST, READ, WRITE, INTERFACE_ON };
+enum operation { BURST, READ, WRITE, INTERFACE_ON, HW_RESET, SENSE_HW, SENSE_FLASH };
 
 struct transaction {
 	char kind;
@@ -75,6 +75,11 @@ static int write_bus(void *context, u8 command, const u8 *address,
 		fake->current_address = (u32)address[0] | (u32)address[1] << 8 |
 			(u32)address[2] << 16 | (u32)address[3] << 24;
 	} else {
+		if (command == 0x31) {
+			check(!address && length == 2 && !data[0] && !data[1],
+			      "flash-mode sense-on releases safe-mode password, not GPIO");
+			return 0;
+		}
 		check(!address && length == 1 && data, "single-byte bus control");
 		if (command == 0x13)
 			fake->continuous = data[0];
@@ -114,9 +119,15 @@ static void sleep_ms(void *context, unsigned int milliseconds)
 {
 	struct fake *fake = context;
 
-	check(milliseconds == 1, "Windows interface-on polling delay");
+	check(milliseconds == 1 || milliseconds == 11,
+	      "Windows interface-on/sense-on polling delay");
 	fake->sleep_count++;
 	record(fake, 's', 0, NULL, NULL, milliseconds);
+}
+
+static int set_reset(void *context, bool high)
+{
+	return record(context, 'g', high, NULL, NULL, 0)->result;
 }
 
 #ifdef HX_AHB_UPSTREAM_REFERENCE
@@ -130,6 +141,7 @@ static int run(struct fake *fake, enum operation operation, u32 address,
 	struct hx_ahb_bus bus = {
 		.context = fake, .write = write_bus, .read = read_bus,
 		.sleep_ms = sleep_ms,
+		.set_reset = set_reset,
 	};
 	struct fake reference = *fake;
 	u8 reference_data[512];
@@ -148,6 +160,13 @@ static int run(struct fake *fake, enum operation operation, u32 address,
 		break;
 	case INTERFACE_ON:
 		result = hx_ahb_interface_on(&bus);
+		break;
+	case HW_RESET:
+		result = hx_ahb_hw_reset(&bus);
+		break;
+	case SENSE_HW:
+	case SENSE_FLASH:
+		result = hx_ahb_sense_on(&bus, operation == SENSE_FLASH);
 	}
 #ifdef HX_AHB_UPSTREAM_REFERENCE
 	{
@@ -242,6 +261,59 @@ int main(void)
 		check(run(&fake, INTERFACE_ON, 0, data, 0) == (sleep ? 0 : -EREMOTEIO),
 		      "every interface read/write error aborts; Sleep has no return status");
 	}
+	for (operation = HW_RESET; operation <= SENSE_FLASH; operation++) {
+		unsigned int count = operation == HW_RESET ? 7 :
+			operation == SENSE_HW ? 11 : 10;
+
+		fake = (struct fake) { 0 };
+		check(run(&fake, operation, 0, data, 0) == 0 && fake.count == count,
+		      "hardware reset and both sense-on branches match upstream");
+		if (operation == HW_RESET) {
+			check(fake.events[2].address_present &&
+			      !memcmp(fake.events[2].bytes, "\xc0\x72\x00\x10\0\0\0\0", 8) &&
+			      fake.events[3].kind == 'g' && fake.events[3].command == 0 &&
+			      fake.events[4].kind == 'g' && fake.events[4].command == 1 &&
+			      fake.events[6].command == 0x0d && fake.events[6].bytes[0] == 0x13,
+			      "reload cleared BEFORE low/high reset pair and burst reenabled AFTER");
+		} else {
+			check(fake.events[0].kind == 'r' && fake.events[0].command == 0x08 &&
+			      fake.events[7].address_present &&
+			      !memcmp(fake.events[7].bytes, "\x5c\0\0\x90\0\0\0\0", 8) &&
+			      fake.events[8].kind == 's' && fake.events[8].length == 11,
+			      "interface-on precedes ISR clear, then exactly 11 ms before reset");
+			if (operation == SENSE_HW)
+				check(fake.events[9].kind == 'g' && fake.events[9].command == 0 &&
+				      fake.events[10].kind == 'g' && fake.events[10].command == 1,
+				      "sense-on false uses physical low/high reset pair");
+			else
+				check(fake.events[9].kind == 'w' && fake.events[9].command == 0x31,
+				      "sense-on true does not toggle GPIO");
+		}
+		for (i = 1; i <= count; i++) {
+			bool sleep = operation != HW_RESET && i == 9;
+
+			fake = (struct fake) { .fail_at = i };
+			check(run(&fake, operation, 0, data, 0) == (sleep ? 0 : -EREMOTEIO) &&
+			      fake.count == (sleep ? count : i),
+			      "every bus/GPIO failure stops at same phase without later reset/arming");
+		}
+		if (operation == HW_RESET)
+			continue;
+		for (i = 0; i <= 10; i++) {
+			fake = (struct fake) { .conti_mismatches = i };
+			check(run(&fake, operation, 0, data, 0) == 0 &&
+			      fake.sleep_count == i + 1 && fake.events[fake.count - 3].length ==
+			      (operation == SENSE_HW ? 11 : 4),
+			      "delayed interface-on retains sense-on ordering and 11 ms delay");
+		}
+		for (i = 1; i <= count + 46; i++) {
+			bool sleep = (i >= 6 && i <= 51 && (i - 6) % 5 == 0) || i == 55;
+
+			fake = (struct fake) { .incr_mismatches = 10, .fail_at = i };
+			check(run(&fake, operation, 0, data, 0) == (sleep ? 0 : -EREMOTEIO),
+			      "every delayed sense-on transaction/GPIO fault matches upstream");
+		}
+	}
 	fake = (struct fake) { .capacity = 256 };
 	check(run(&fake, WRITE, 0x10007550, data, 252) == 0,
 	      "address consumes four bytes of native transfer capacity");
@@ -268,6 +340,13 @@ int main(void)
 		      hx_ahb_interface_on(NULL) == -EINVAL &&
 		      hx_ahb_interface_on(&empty) == -EINVAL,
 		      "invalid native bus descriptors rejected before I/O");
+		check(hx_ahb_hw_reset(NULL) == -EINVAL &&
+		      hx_ahb_hw_reset(&empty) == -EINVAL &&
+		      hx_ahb_sense_on(NULL, false) == -EINVAL &&
+		      hx_ahb_sense_on(&empty, true) == -EINVAL &&
+		      hx_ahb_sense_on(&bus, false) == -EINVAL &&
+		      hx_ahb_hw_reset(&bus) == -EINVAL && !fake.count,
+		      "missing reset callback rejected before I/O, not during sequence");
 		check(hx_ahb_register_read(&bus, 0, NULL, 4) == -EINVAL &&
 		      hx_ahb_register_write(&bus, 0, NULL, 4) == -EINVAL &&
 		      !fake.count, "null payload guards do not access hardware");

@@ -16,8 +16,15 @@ function(himax_prepare_ahb_reference directory output)
     himax_raw_reference_extract("${lifecycle}"
         "ChipResult<> Chip::himax_mcu_interface_on("
         "ChipResult<> Chip::hx_sense_on(" interface_on)
+    himax_raw_reference_extract("${lifecycle}"
+        "ChipResult<> Chip::hx_hw_reset_ahb_intf("
+        "ChipResult<> Chip::hx_sw_reset_ahb_intf(" hw_reset)
+    himax_raw_reference_extract("${lifecycle}"
+        "ChipResult<> Chip::hx_sense_on("
+        "ChipResult<> Chip::hx_sense_off(" sense_on)
     foreach(field IN ITEMS addr_ahb_rdata_byte_0 addr_conti addr_incr4
-            data_conti data_incr4)
+            data_conti data_incr4 adr_i2c_psw_lb addr_ctrl_fw_isr
+            addr_fw_define_2nd_flash_reload data_clear)
         himax_raw_reference_register("${registers}" "${field}")
     endforeach()
     set(generated
@@ -32,10 +39,16 @@ function(himax_prepare_ahb_reference directory output)
 namespace Himax {
 enum class ChipError { CommunicationError, InvalidOperation };
 template<class T = void> using ChipResult = std::expected<T, ChipError>;
+enum class DeviceType { Master };
 struct HalDevice {
     const hx_ahb_bus* bus;
     int error = -EIO;
     bool IsValid() const { return true; }
+    ChipResult<> SetReset(bool high) {
+        int result = bus->set_reset(bus->context, high);
+        if (result) { error = result; return std::unexpected(ChipError::CommunicationError); }
+        return {};
+    }
     ChipResult<> ReadBus(uint8_t command, uint8_t* data, uint32_t length) {
         int result = bus->read(bus->context, command, data, length);
         if (result) { error = result; return std::unexpected(ChipError::CommunicationError); }
@@ -57,6 +70,9 @@ class Chip {
 public:
     explicit Chip(const hx_ahb_bus* bus) : m_master(std::make_unique<HalDevice>(bus)) {}
     ChipResult<> himax_mcu_interface_on();
+    ChipResult<> hx_hw_reset_ahb_intf(DeviceType);
+    ChipResult<> hx_sense_on(bool);
+    ChipResult<HalDevice*> SelectDevice(DeviceType) { return m_master.get(); }
     void Sleep(unsigned int ms) { m_master->bus->sleep_ms(m_master->bus->context, ms); }
     std::unique_ptr<HalDevice> m_master;
     struct {
@@ -65,10 +81,20 @@ public:
         uint8_t addr_incr4 = ${addr_incr4};
         uint8_t data_conti = ${data_conti};
         uint8_t data_incr4 = ${data_incr4};
+        uint8_t adr_i2c_psw_lb = ${adr_i2c_psw_lb};
     } pic_op;
+    struct {
+        uint32_t data_clear = ${data_clear};
+        uint32_t addr_ctrl_fw_isr = ${addr_ctrl_fw_isr};
+    } pfw_op;
+    struct {
+        uint32_t addr_fw_define_2nd_flash_reload = ${addr_fw_define_2nd_flash_reload};
+    } pdriver_op;
 };
 ${bus_functions}
 ${interface_on}
+${hw_reset}
+${sense_on}
 }
 extern \"C\" int hx_ahb_reference(const hx_ahb_bus* bus, unsigned int operation,
                                  uint32_t address, uint8_t* data, uint32_t length) {
@@ -79,6 +105,9 @@ extern \"C\" int hx_ahb_reference(const hx_ahb_bus* bus, unsigned int operation,
     case 1: result = Himax::HimaxProtocol::register_read(chip.m_master.get(), address, data, length); break;
     case 2: result = Himax::HimaxProtocol::register_write(chip.m_master.get(), address, data, length); break;
     case 3: result = chip.himax_mcu_interface_on(); break;
+    case 4: result = chip.hx_hw_reset_ahb_intf(Himax::DeviceType::Master); break;
+    case 5: result = chip.hx_sense_on(false); break;
+    case 6: result = chip.hx_sense_on(true); break;
     default: return -EINVAL;
     }
     if (result) return 0;

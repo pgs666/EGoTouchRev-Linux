@@ -96,3 +96,45 @@ int hx_ahb_interface_on(const struct hx_ahb_bus *bus)
 	}
 	return 0;
 }
+
+int hx_ahb_hw_reset(const struct hx_ahb_bus *bus)
+{
+	const u8 clear[4] = { 0 };
+	int ret;
+
+	if (!bus || !bus->write || !bus->set_reset)
+		return -EINVAL;
+	ret = hx_ahb_register_write(bus, 0x100072c0, clear, sizeof(clear));
+	if (ret)
+		return ret;
+	ret = bus->set_reset(bus->context, false);
+	if (ret)
+		return ret;
+	ret = bus->set_reset(bus->context, true);
+	if (ret)
+		return ret;
+	return hx_ahb_burst(bus, true);
+}
+
+int hx_ahb_sense_on(const struct hx_ahb_bus *bus, bool flash_mode)
+{
+	const u8 clear[4] = { 0 };
+	int ret;
+
+	if (!bus || !bus->write || !bus->read || !bus->sleep_ms ||
+	    (!flash_mode && !bus->set_reset))
+		return -EINVAL;
+	ret = hx_ahb_interface_on(bus);
+	if (ret)
+		return ret;
+	ret = hx_ahb_register_write(bus, 0x9000005c, clear, sizeof(clear));
+	if (ret)
+		return ret;
+	bus->sleep_ms(bus->context, 11);
+	if (flash_mode)
+		return bus->write(bus->context, 0x31, NULL, clear, 2);
+	ret = bus->set_reset(bus->context, false);
+	if (ret)
+		return ret;
+	return bus->set_reset(bus->context, true);
+}

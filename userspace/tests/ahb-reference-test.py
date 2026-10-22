@@ -38,12 +38,18 @@ with tempfile.TemporaryDirectory(prefix="himax-ahb-reference-") as directory:
          "    void HimaxProtocol::build_command_packet("),
         ("HimaxChipLifecycle.cpp", "ChipResult<> Chip::himax_mcu_interface_on(",
          "ChipResult<> Chip::hx_sense_on("),
+        ("HimaxChipLifecycle.cpp", "ChipResult<> Chip::hx_hw_reset_ahb_intf(",
+         "ChipResult<> Chip::hx_sw_reset_ahb_intf("),
+        ("HimaxChipLifecycle.cpp", "ChipResult<> Chip::hx_sense_on(",
+         "ChipResult<> Chip::hx_sense_off("),
     ):
         text = originals[name].decode()
         body = text[text.index(first):text.index(last)]
         assert generated.count(body) == 1, f"must compile exact original section: {first}"
     for constant in ("addr_ahb_rdata_byte_0 = 0x08", "addr_conti = 0x13",
-                     "addr_incr4 = 0x0D", "data_conti = 0x31", "data_incr4 = 0x12"):
+                     "addr_incr4 = 0x0D", "data_conti = 0x31", "data_incr4 = 0x12",
+                     "adr_i2c_psw_lb = 0x31", "addr_ctrl_fw_isr = 0x9000005C",
+                     "addr_fw_define_2nd_flash_reload = 0x100072C0", "data_clear = 0x00000000"):
         assert constant in generated, constant
     assert 'extern "C" int hx_ahb_reference' in generated
     assert "#include <windows.h>" not in generated

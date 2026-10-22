@@ -69,7 +69,8 @@ A8==5 门槛。RawOut 重试传输和比较失败；耗尽后保留最后一次�
 
 默认路径不再随后调用 legacy `himax_restore_raw_runtime()` 重写 AP notify、
 sorting/N-frame、RawOut 和握手；Linux 充电状态仍由独立 `charger_work` 应用。
-native sense-on 在 ISR 清零后至少等待 11 ms，再执行 Linux 平台的 GPIO reset。
+native sense-on 由共享 `hx_ahb_sense_on()` 执行：接口唤醒、ISR 清零后至少等待
+11 ms，再执行 Linux 平台的 GPIO reset。
 `HIMAX_V4L2=0` 仍走既有 `hx_raw_power_on()`：保留 sorting 读回、A8 检查和 legacy
 runtime 重放。这条旧路径的故障测试继续保留。
 
@@ -84,8 +85,14 @@ HAL 读写、sense-on 和 Sleep 为共用 fake bus；对照每笔事务、延时
 正常事务故障、20/10/30/50 次边界、低位/全字比较、状态读取错误和最后一次错误优先级。
 引用实现仅链接到测试，不进入模块或 daemon。
 
-完整启动仍有差异：Linux 在前面做 IC 探测/进入 safe mode；native sense-on、GPIO
-时序尚未纳入上述 oracle。Linux GPIO 保持原有 20/50 ms 复位等待，
+启动 reset 已接入 `hx_ahb_hw_reset()`：清 `0x100072c0` → RESET 低/高 → 开启 burst，
+随后等待 10 ms，再执行 Linux 的只读 IC ID 检查；首次 OTP 后再执行同一 reset。
+不再每次为读 IC ID 而走旧 `himax_sense_off(false)` 的 safe-mode 路径，OTP 自己的
+安全模式序列仍保留。probe 必须获得 reset GPIO，并以 logical low/released 获取、
+等待 50 ms；不能像旧入口一样先保持 reset asserted，使协议的第一笔清 reload
+写入失效。GPIO 映射沿用本机 ACPI 极性，低/高两步分别保留原有 20/50 ms 等待。
+
+完整启动仍有差异：Linux 保留只读 IC ID 检查；GPIO 实际时序未纳入 oracle。
 Windows `SetReset` IOCTL 内部时序未知，不能用无延时脉冲替代。Linux 的充电集成、
 清帧及 IRQ 接口也不同，slave/pen 按本项目范围保持关闭。不能据此声称完整
 `Chip::Init()`、物理 SPI 生命周期或手动切频已验收。
@@ -112,11 +119,17 @@ OTP 专用序列原本就使用独立的 `0x12/0x13` 原语，本轮未改动。
 
 [`AhbReference.cmake`](cmake/AhbReference.cmake) 在测试中直接编译未经修改的
 `burst_enable`、`ConfigureBurstForLength`、`register_read`、`register_write`
-和 `himax_mcu_interface_on`；四份来源文件（含寄存器常量与 ByteUtils）校验完整哈希。
+和 `himax_mcu_interface_on`，以及 `hx_hw_reset_ahb_intf`、`hx_sense_on`；四份来源
+文件（含寄存器常量与 ByteUtils）校验完整哈希。
 共用 fake bus 对照命令、地址、全部 payload、返回值、调用后缓冲区、延时与停止位置。
 覆盖四种地址、0～512 长度域、所有有效事务步骤的故障、十次 interface-on 边界、
 native 容量错误和最大 u32 长度。源码提取集成测试验证原函数未改、哈希漂移/缺失拒绝
 和无变化配置不改写产物。
+
+reset/sense-on 对照逐笔验证 reload 清零、GPIO 两次切换、burst、ISR 和 11 ms 等待，
+覆盖普通与延迟 interface-on 的所有总线/GPIO 故障停止点。sense-on(false) 为实际
+生产路径；true 分支只验证不会切 GPIO、而是写 `0x31` 两字节零，并不在默认启动中
+启用。GPIO 回调缺失在任何 I/O 前拒绝，native GPIO 缺失也不再被当作复位成功。
 
 这个 oracle 的边界在 Windows `ReadBus/WriteBus/Sleep`：native SPI 封包、重试、
 控制器实际传输长度、GPIO、Windows THP IOCTL 内部时序仍需单独验证。

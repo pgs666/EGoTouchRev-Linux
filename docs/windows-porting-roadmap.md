@@ -41,9 +41,12 @@ Linux 充电状态仍由独立 work 应用。旧检查和 replay 只保留在 le
 故障/重试结果。默认 AHB 原语另接入 `hx-ahb.c`，使用 Windows `0x12/0x13`，
 移除寄存器事务结束的反向 burst 切换，并对齐 interface-on 轮询与错误返回。
 AHB oracle 直接编译上游总线协议函数，对照实际命令/地址/payload/停止位置；
-native SPI 封包、重试与物理控制器仍在 oracle 边界之外。
-这不代表 Windows 整个 `Chip::Init()` 已经逐笔等价：前置 IC 探测/
-安全模式、native sense-on、GPIO 时序、IRQ/清帧及 Linux 充电集成仍有差异，验证边界
+启动 reset 与 sense-on 也已接入共享 AHB 层及上游原函数对照。默认入口清 reload 后
+切 reset、开 burst、等 10 ms、只读 IC ID；首次 OTP 后再 reset。不再每次读 IC ID
+都进入旧 safe mode，OTP 自己的安全模式不变。probe 先释放 GPIO，避免 reset 中
+执行第一笔寄存器写入。native SPI 封包、重试与物理控制器仍在 oracle 边界之外。
+这不代表 Windows 整个 `Chip::Init()` 已经逐笔等价：只读 IC 检查、
+GPIO 时序、IRQ/清帧及 Linux 充电集成仍有差异，验证边界
 见 [用户态运行说明](../userspace/README.md)。
 
 `33b01f5` 已经完成本机普通模块试运行及正式安装，运行模块与磁盘/DKMS 缓存一致。
@@ -51,8 +54,9 @@ native SPI 封包、重试与物理控制器仍在 oracle 边界之外。
 显式校准、清状态、IDLE 可确认。带诊断模块 full AFE 重测中频点 1 仍未观察到完成，
 五秒后 sequence 638 仍为 slot=0/done=0，测试返回 1 并恢复旧模块。保留失败结果，
 不能把 AHB/初始化事务对齐当作切频恢复的证明。
-后续核对 reset 前 reload 清零、IC 探测额外 safe-mode 和 native sense-on/物理 reset，
-再做受控实机验证。寄存器级与总线命令级 oracle 都不覆盖物理 SPI/IOCTL 差异，
+当前代码进一步移植 reset/sense-on 和 IC 探测入口，后续核对 native SPI 封包、
+实际传输长度、重试、清帧与 IRQ，再做受控实机验证。
+寄存器级与总线命令/GPIO回调级 oracle 都不覆盖物理 SPI/IOCTL 差异，
 不能仅凭帧流正常就宣布完整移植完成。
 
 ---

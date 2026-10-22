@@ -22,6 +22,10 @@ struct hx_ahb_bus {
 		     const u8 *data, u32 length);
 	int (*read)(void *context, u8 command, u8 *data, u32 length);
 	void (*sleep_ms)(void *context, unsigned int milliseconds);
+	/* Physical pin level, matching Windows SetReset: false=low/asserted,
+	 * true=high/released. Native code owns GPIO polarity and settling time.
+	 */
+	int (*set_reset)(void *context, bool high);
 };
 
 #ifdef __cplusplus
@@ -38,6 +42,9 @@ int hx_ahb_register_read(const struct hx_ahb_bus *bus, u32 address,
  * the caller must still complete IC identity/reload/raw validation.
  */
 int hx_ahb_interface_on(const struct hx_ahb_bus *bus);
+/* Init caller waits 10 ms after this helper, before OTP/scan preparation. */
+int hx_ahb_hw_reset(const struct hx_ahb_bus *bus);
+int hx_ahb_sense_on(const struct hx_ahb_bus *bus, bool flash_mode);
 
 #ifdef __cplusplus
 }
