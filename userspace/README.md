@@ -661,3 +661,27 @@ Android 仍未迁移或部署此用户态架构。
 这排除了“参数 1 没写入邮箱”和本次“紧接显式校准过快发命令”两个解释，但没有证明
 Windows 上同一命令会生效。应将其标为本机手动跳频能力未验收，而不是已证实的
 Linux 专属回归。当前不因此更改 `freqHopMode`、扩展未验证的固件命令或启用笔路径。
+
+2026-10-23 RawOut 启动顺序与部署交接验证：
+
+- 启动修复 `cd772a9`、部署脚本修复 `f1bcef3`。`make check` 通过，Release 26 项通过，
+  新增 raw-power-on 故障测试的 ASan/UBSan 通过；legacy + 邮箱诊断构建也通过。
+  这不是实机 SPI 故障注入，也未执行系统休眠；
+- 首次临时模块检查 `deploy-logs/v4l2-20261023-042055/`：514 个有效 smoke 帧，
+  bad/stale/dropped/recording_error 全零，solver/watchdog/MMAP 解绑通过。
+  首次正式安装 `.../v4l2-20261023-042158/` 则有两个启动 sync 错误，随后 515 帧有效；
+- 这两轮部署前旧常驻服务在 `mask --now` 期间被 watchdog 终止，journal 显示通知被
+  拒收，core 堆栈在 poll。没有把这两次异常算成正常停止。修改顺序后，
+  `.../v4l2-20261023-042802/` 临时试验记录 `previous_service_stop=success`，
+  516 帧中仅首个 all-zero 帧被启动容错接纳，后续 515 帧有效；全套临时检查通过；
+- 新脚本正式安装 `deploy-logs/v4l2-20261023-043011/`：旧服务正常停止，515 个
+  smoke 帧全有效；DKMS/dracut 期间临时求解服务保持 active 且只有一个触摸 input。
+  临时服务从 04:30:32 到 04:32:39 共处理 911 帧，bad/stale 为零（进入 IDLE 后
+  帧流稀疏），最后正常停止并移交给常驻服务；后者和方向桥接均 active，
+  `NRestarts=0`。临时服务 `touch_reports=0`，不能据此证明真实触控手感；
+- 仓库、磁盘和 DKMS 缓存模块 SHA-256 均为
+  `eabb60168f3e35310dffa4e8d4eb2b843ac6d59412823b96026ecbffea1135bd`，
+  运行中 build ID 核对为 `5ca58ad4ba07b5075c4abf7bc04385c78b1fd729`。
+  模块未编译邮箱诊断，daemon 算法二进制未变化；新版离线 replay 已随安装更新。
+
+本轮不声称修复快速滑入首点回归、手动切频或掌压亮屏问题；没有部署 Android。
