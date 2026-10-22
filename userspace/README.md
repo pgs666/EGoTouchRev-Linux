@@ -751,3 +751,36 @@ Linux 专属回归。当前不因此更改 `freqHopMode`、扩展未验证的固
   replay：
   `4ea59585674ef0682b043f924d7c6ae59d225a16f9294aa03152e2887e664ed3`。
   磁盘模块仍为上述 `eabb6016…`。本轮未部署 Android。
+
+2026-10-23 inspection/N-frame 准备移植与实机验证：
+
+- 实现和直接源码参考在 `6a819ad`；`make check` 通过，包括 legacy 算法 host
+  回归、普通 V4L2 模块和 29 项 Release CTest。新增 raw-scan-preparation、
+  原有 raw-power-on 及源码提取集成测试的 sanitizer 构建通过；另行编译 legacy
+  与 V4L2 邮箱诊断模式均通过。这不表示重新运行了全部 29 项 sanitizer 测试；
+- 临时普通模块：`deploy-logs/v4l2-20261023-050318/`，513 帧全部有效，
+  bad/stale/dropped/recording_error 均为零；solver/watchdog/MMAP 解绑测试通过，
+  随后恢复原模块；
+- 正式安装：`deploy-logs/v4l2-20261023-050426/`，smoke 共 513 帧，其中首个
+  sync 错误由既有启动容错接纳，其后 512 帧有效。临时 solver 的另一次 AFE
+  启动也有一个 sync 错误，至正常交接共 909 帧，之后未新增错误，stale=0。
+  DKMS/dracut 期间服务保持 active 且只有一个触摸 input，交接正常；
+- 仓库产物、磁盘模块、DKMS 缓存 SHA-256 一致：
+  `08601d1e3e76bab95c75da4ad78bb14a408b4b8afc43594c119f91e5d162641f`。
+  运行 build ID 与磁盘核对一致：
+  `93c947280180af45512928e6d2d797a6cda2e2ff`。普通模块未启用邮箱诊断；
+  daemon 保持上一项边缘修复的 `b190856f…`，本轮没有修改求解算法；
+- 新初始化下完整 AFE 测试仍在切频步骤失败：
+  `deploy-logs/afe-A3sqeYoQ/`。清状态、显式校准及 ack 均成功；sequence 38 的
+  frequency=1 命令传输成功，到 sequence 637、五秒期限仍为 freq_slot=0 /
+  freq_done=0。637 个原始帧全部校验通过。完整测试如实返回 1，没有把传输成功
+  认作切频完成；
+- 单独 `--basic`：`deploy-logs/afe-lGFIQZB2/`，显式校准、清状态、IDLE 后续
+  suffix 均确认，38 帧有效，startup_invalid=0。此次 IDLE 标志在命令后约 11 ms
+  出现；没有受控 A/B 证据证明相比旧记录的时序差异来自本次改动。扫描率仍只有
+  传输证据。两项测试结束均恢复常驻服务，服务与方向桥接 active、NRestarts=0。
+
+这些窗口没有真实触点，不证明快速手势、真实 suspend/resume、掌压亮屏或长期负载
+验收通过；也没有部署 Android。前置准备的事务对照已完成，完整硬件生命周期仍需
+继续核对，尤其是初次 reset 前的 reload 清零、Linux IC 检测的额外 safe-mode 动作、
+raw 类型选择的验证/重试，以及后置 AP/USB/sorting/N-frame 重放与 Windows 的差别。
