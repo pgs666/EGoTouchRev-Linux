@@ -23,6 +23,8 @@ unit="himax-touchd-trial-$stamp"
 old_module=$(modinfo -n himax_spi 2>/dev/null || true)
 changed=0
 persistent=0
+module_unloaded=0
+runtime_mask_added=0
 old_service_active=0
 old_service_enabled=0
 systemctl is-active --quiet himax-touchd.service && old_service_active=1
@@ -54,52 +56,79 @@ module_paths() {
 		-o -name himax-spi.ko.zst -o -name himax-spi.ko.gz \) -print0
 }
 
+load_dependencies() {
+	local dependencies
+	local -a modules
+
+	dependencies=$(modinfo -F depends "$1") || return
+	IFS=, read -r -a modules <<< "$dependencies"
+	if (( ${#modules[@]} )); then
+		sudo modprobe -a -- "${modules[@]}" || return
+	fi
+}
+
+unmask_trial_service() {
+	if (( runtime_mask_added )); then
+		sudo systemctl unmask --runtime himax-touchd.service || return
+		runtime_mask_added=0
+	fi
+}
+
 restore() {
 	sudo systemctl stop "$unit.service" 2>/dev/null || true
 	sudo systemctl stop "$unit-watchdog.service" "$unit-unbind.service" 2>/dev/null || true
 	sudo systemctl stop himax-touchd.service 2>/dev/null || true
-	sudo modprobe -r himax_spi || return
+	if (( module_unloaded )); then
+		sudo modprobe -r himax_spi || return
+	fi
 	if (( persistent )); then
 		# Keep failed source/cache for diagnosis, and restore the complete
 		# prior DKMS registration rather than leaving a new cached .ko.
-		sudo mv /usr/src/himax-spi-0.1 "$state_dir/failed-dkms-source"
+		sudo mv /usr/src/himax-spi-0.1 "$state_dir/failed-dkms-source" || return
 		if [[ -d "$state_dir/dkms-source" ]]; then
-			sudo cp -a "$state_dir/dkms-source" /usr/src/himax-spi-0.1
+			sudo cp -a "$state_dir/dkms-source" /usr/src/himax-spi-0.1 || return
 		fi
-		sudo mv "$dkms_tree" "$state_dir/failed-dkms-state"
+		sudo mv "$dkms_tree" "$state_dir/failed-dkms-state" || return
 		if [[ -d "$state_dir/dkms-state" ]]; then
-			sudo cp -a "$state_dir/dkms-state" "$dkms_tree"
+			sudo cp -a "$state_dir/dkms-state" "$dkms_tree" || return
 		fi
 		local path index=0
 		while IFS= read -r -d '' path; do
 			if [[ ! -f "$state_dir/modules$path" ]]; then
-				sudo mv -- "$path" "$state_dir/failed-module-$index"
+				sudo mv -- "$path" "$state_dir/failed-module-$index" || return
 				index=$((index + 1))
 			fi
 		done < <(module_paths)
 		while IFS= read -r -d '' path; do
-			sudo install -Dpm644 "$path" "${path#"$state_dir/modules"}"
+			sudo install -Dpm644 "$path" "${path#"$state_dir/modules"}" || return
 		done < <(find "$state_dir/modules" -type f -print0)
 		if (( ! old_service_enabled )); then
 			sudo systemctl disable himax-touchd.service 2>/dev/null || true
 		fi
 		for path in "${installed_paths[@]}"; do
 			if [[ -f "$state_dir/installed$path" ]]; then
-				sudo cp -p "$state_dir/installed$path" "$path"
+				sudo cp -p "$state_dir/installed$path" "$path" || return
 			else
-				sudo rm -f -- "$path"
+				sudo rm -f -- "$path" || return
 			fi
 		done
-		sudo udevadm control --reload-rules
-		sudo systemctl daemon-reload
-		sudo depmod -a "$kernel_version"
+		sudo udevadm control --reload-rules || return
+		sudo systemctl daemon-reload || return
+		sudo depmod -a "$kernel_version" || return
 		if (( old_service_enabled )); then
-			sudo systemctl enable himax-touchd.service
+			sudo systemctl enable himax-touchd.service || return
 		fi
 	fi
-	sudo insmod "$state_dir/previous-himax-spi.ko"
+	if (( module_unloaded )); then
+		load_dependencies "$state_dir/previous-himax-spi.ko" || return
+		sudo insmod "$state_dir/previous-himax-spi.ko" || return
+	fi
+	[[ -L /sys/bus/spi/devices/spi0.0/driver ]] || return
+	unmask_trial_service || return
 	if (( old_service_active )); then
-		sudo systemctl start himax-touchd.service
+		sudo systemctl reset-failed himax-touchd.service || return
+		sudo systemctl start himax-touchd.service || return
+		sudo systemctl is-active --quiet himax-touchd.service || return
 	fi
 	echo "Restored previous touch module"
 }
@@ -127,10 +156,26 @@ elif ! modinfo uinput >/dev/null 2>&1; then
 else
 	sudo modprobe uinput
 fi
-sudo modprobe videobuf2_vmalloc
-sudo systemctl stop himax-touchd.service 2>/dev/null || true
-sudo modprobe -r himax_spi
 changed=1
+# A newly registered video node must not let udev start the installed daemon
+# against a trial module with a different ABI or steal the trial capture queue.
+case "$(systemctl is-enabled himax-touchd.service 2>/dev/null || true)" in
+	masked*) sudo systemctl stop himax-touchd.service 2>/dev/null || true ;;
+	*)
+		[[ ! -e /run/systemd/system/himax-touchd.service &&
+		   ! -L /run/systemd/system/himax-touchd.service ]] || {
+			echo "Refusing to overwrite an existing runtime service unit" >&2
+			exit 1
+		}
+		runtime_mask_added=1
+		sudo systemctl mask --runtime --now himax-touchd.service
+		;;
+esac
+sudo modprobe -r himax_spi
+module_unloaded=1
+# rmmod may also remove unused dependencies of the old V4L2 driver. Load the
+# exact new module's dependencies after unloading, on forward and rollback paths.
+load_dependencies "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko"
 sudo insmod "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko"
 udevadm settle --timeout=10
 [[ "$(basename "$(readlink -f /sys/bus/spi/devices/spi0.0/driver)")" == himax-spi ]]
@@ -228,6 +273,7 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=video4linux
 sudo udevadm settle --timeout=10
 sudo systemctl daemon-reload
+unmask_trial_service
 sudo systemctl enable --now himax-touchd.service
 sleep 2
 sudo systemctl is-active --quiet himax-touchd.service

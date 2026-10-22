@@ -27,7 +27,7 @@ AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、充电状
 这里的“原版”是上游 EGoTouchRev v1.4.0 的 C++ 重写实现，不能据此声称直接运行
 华为原厂 DLL，或已经通过零售驱动的逐帧等价验证。
 
-## V4L2 ABI v1
+## V4L2 ABI v2
 
 源定义以 [`hx-v4l2-uapi.h`](../touchscreen-hx83121a-dkms/hx-v4l2-uapi.h) 为准。
 所有结构使用固定宽度字段、显式版本/长度和零保留字段，64 位字段显式对齐。
@@ -39,13 +39,41 @@ AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、充电状
 | epoch/sequence | 每次 AFE 重启/屏幕停止改变 epoch；成功读取后 sequence 递增 |
 | timestamp_ns | IRQ 线程入口的 CLOCK_MONOTONIC 时间，不是硬件采样时间 |
 | flags | AFE SOS 恢复原因、当前充电状态 |
-| `VIDIOC_HIMAX_INFO` | ABI、网格 40×60、payload 长度、OTP project ID |
+| `VIDIOC_HIMAX_INFO` | ABI、网格 40×60、payload 长度、OTP project ID、固件坐标变换 |
 | `VIDIOC_HIMAX_COMMAND` | ClearStatus、频点、扫描率、IDLE、calibration、reset |
 | `V4L2_EVENT_HIMAX_STATE` | running/epoch；即使屏灭不再产帧也能及时释放触点 |
 
 命令必须来自当前 vb2 queue owner，并与当前 epoch、最近八帧内的 sequence 关联。
 校验 action、参数和保留字段；普通 action 最短间隔 20 ms，reset 最短一秒。
 这是邮箱传输确认，calibration-done 仍通过后续帧状态确认，不能把写入成功称为校准完成。
+
+ABI v2 将 INFO 的原保留字段定义为 `coordinate_flags`，结构仍为 40 字节。
+bit 0/1/2 分别是 invert X、invert Y 和 swap XY；其他位必须为零。内核从固件
+touchscreen 属性读取，用户态先翻转再交换轴，然后声明对应的 uinput 量程。
+本机是 `5`，uinput 坐标量程为 `15999×25599`；solver 和回放 CSV 仍在原始
+`2560×1600` 面板方向工作。compositor 的桌面旋转与这项接线变换分开，
+向算法传入动态握持方向仍待实现。live daemon 要求 ABI v2，不与 ABI v1 模块混用。
+
+`--info` 使用只读 fd 查询 QUERYCAP/INFO，不分配 buffer、不启动 AFE、不申请
+队列所有权，可以在常驻服务运行时使用。本接口是项目私有的 V4L2 metadata 格式，
+不是标准 V4L2 touch 矩阵格式，通用 touch 工具不能直接解析 HXST event stack。
+
+### 录制容器
+
+录制文件在 HXST 帧之前保存 32 字节 `HXRC` 头。整数均为 little-endian：
+
+| 偏移 | 长度 | 内容 |
+|---|---|---|
+| 0 | 4 | ASCII `HXRC` |
+| 4 | 2 | 容器版本 `1` |
+| 6 | 2 | 头长度 `32` |
+| 8 | 4 | 后续帧长度 `5184` |
+| 12 | 16 | NUL 补齐的 project ID |
+| 28 | 4 | `coordinate_flags` |
+
+头在实际 AFE 身份确定后写出一次，随后是未经修改的 `hx_raw_frame`。
+回放优先使用记录的 project ID；显式覆盖会输出提示。仍可读取旧的无头 ABI v1/v2
+录制，旧文件应由操作者提供正确面板身份。容器头不改变 live HXST buffer 格式。
 
 ## 队列和时序
 
@@ -83,6 +111,8 @@ OTP 使用原版独立的 AHB burst、DD access 解锁和只读槽位选择流�
 并在成功和失败路径恢复 DD/safe-mode 状态；控制触发寄存器不强求等值读回。
 本机已从槽位 `0x0f18` 读出 `W273AS2700`，算法据此选择参数。
 寄存器协议测试还覆盖部分读取失败、清理失败和逐次总线操作故障注入。
+屏灭期间 STREAMON 不启动硬件，也没有可用 OTP。daemon 等首个运行 epoch 才重新
+查询 INFO 和选择参数；同一会话内身份变化会退出，不允许在已有状态中静默换 profile。
 
 收到新的 epoch 时，用户态释放旧 slot、通知 OnAfeStopped/OnAfeStarted；SOS 重启
 额外通知 OnAfeSos。TSACore 对 calibration-done 上升沿、baseline reset、保留状态和
@@ -106,10 +136,14 @@ OTP 使用原版独立的 AHB burst、DD access 解锁和只读槽位选择流�
 - systemd 三秒 watchdog 覆盖算法挂住的情况，停止/休眠期间也持续喂狗。
 - 运行中四秒没有新帧则退出，由 supervisor 重建 stream/AFE；允许原版 IDLE
   约三秒的 master 间隔，屏灭不计入超时；重复 running 事件不能掩盖停帧。
+- supervisor 等待两秒后持续重试，不因十次启动限制而永久停止硬件恢复。
 - 多个消费者不能同时拥有采集队列；不允许内核和用户态同时上报同一块触屏。
 
 服务退出后桌面触控暂时消失，由 systemd 重建服务；没有运行时内核求解 fallback。
 保留旧实现的价值是显式恢复构建/部署，不是假装两套 baseline 可以无缝交接。
+升级试用期间临时 mask 常驻服务，避免 udev 让旧 daemon 抢占新版队列。
+卸载模块可能连带卸载依赖，部署和回退均在卸载后重新加载目标模块的依赖，
+并在恢复后核实设备绑定及原服务状态。
 
 ## Linux 与 Android
 

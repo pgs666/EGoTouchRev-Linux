@@ -1,15 +1,14 @@
 [Unit]
 Description=Himax HX83121A userspace touch solver
 After=systemd-udev-trigger.service
-StartLimitIntervalSec=60
-StartLimitBurst=10
+StartLimitIntervalSec=0
 
 [Service]
 Type=notify
 NotifyAccess=main
 ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/himax-touchd
 Restart=on-failure
-RestartSec=1
+RestartSec=2
 WatchdogSec=3
 WatchdogSignal=SIGKILL
 TimeoutStartSec=30
