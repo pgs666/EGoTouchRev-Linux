@@ -10,6 +10,7 @@
 #include <drm/drm_panel.h>
 #include <media/v4l2-device.h>
 #include <media/videobuf2-v4l2.h>
+#include "hx-raw-policy.h"
 #include "hx-v4l2-uapi.h"
 
 #define HIMAX_MAX_RX 60U
@@ -39,16 +40,12 @@ struct himax_ts_data {
 	struct vb2_queue queue;
 	struct drm_panel_follower panel_follower;
 	struct delayed_work panel_reinit_work;
-	struct work_struct charger_work;
+	struct delayed_work charger_work;
 	struct notifier_block charger_notifier;
 	bool irq_enabled;
-	bool panel_prepared;
-	bool panel_enabled;
-	bool controller_initialized;
-	bool streaming;
-	bool shutting_down;
+	struct hx_raw_power_state power;
+	struct hx_raw_charger_state charger;
 	bool otp_tried;
-	bool charger_connected;
 	u8 afe_command_slot;
 	u8 read_errors;
 	u64 epoch;

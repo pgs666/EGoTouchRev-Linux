@@ -424,8 +424,7 @@ int himax_set_charger(struct himax_ts_data *ts, bool connected)
 
 	ret = himax_mcu_write_verify_u32(ts, HIMAX_DSRAM_ADDR_USB_DETECT,
 		connected ? HIMAX_DSRAM_DATA_USB_CONNECTED : 0, 3);
-	if (!ret)
-		ts->charger_connected = connected;
+	hx_raw_charger_write_result(&ts->charger, connected, ret);
 	return ret;
 }
 
@@ -814,16 +813,17 @@ int himax_restore_raw_runtime(struct himax_ts_data *ts)
 	supplied = power_supply_is_system_supplied();
 	if (supplied >= 0) {
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
-		ts->charger_connected = supplied > 0;
+		ts->charger.connected = supplied > 0;
+		ret = himax_set_charger(ts, ts->charger.connected);
 #else
 		struct hx_baseline_platform_state state = ts->algo->platform;
 
 		state.charger_connected = supplied > 0;
 		hx_safe_baseline_set_platform_state(ts->algo, &state);
-#endif
 		ret = himax_mcu_write_verify_u32(ts,
 			HIMAX_DSRAM_ADDR_USB_DETECT,
 			supplied ? HIMAX_DSRAM_DATA_USB_CONNECTED : 0, 3);
+#endif
 		if (ret)
 			dev_warn(ts->dev,
 				 "failed to replay charger interference mode: %d\n",

@@ -10,6 +10,7 @@
 #include <linux/interrupt.h>
 #include <linux/ktime.h>
 #include <linux/module.h>
+#include <linux/pm.h>
 #include <linux/power_supply.h>
 #include <linux/property.h>
 #include <linux/slab.h>
@@ -61,12 +62,15 @@ static int himax_start_afe(struct himax_ts_data *ts)
 {
 	int attempt, i, ret = -EIO;
 
-	ts->controller_initialized = false;
+	ts->power.controller_initialized = false;
 	ts->epoch++;
 	ts->sequence = 0;
-	memset(ts->last_command_ns, 0, sizeof(ts->last_command_ns));
+	/* A new epoch does not grant permission for another immediate reset. */
+	memset(ts->last_command_ns, 0,
+	       HX_RAW_RESET * sizeof(ts->last_command_ns[0]));
 	himax_state_event(ts, false);
 	for (attempt = 0; attempt < 3; attempt++) {
+		ts->charger.applied_valid = false;
 		ret = hx83121a_chip_detect(ts);
 		if (ret)
 			continue;
@@ -103,10 +107,11 @@ static int himax_start_afe(struct himax_ts_data *ts)
 		ret = himax_afe_command(ts, HX_RAW_FORCE_RATE, 0);
 		if (ret)
 			dev_warn(ts->dev, "initial scan-rate transport: %d\n", ret);
-		ts->controller_initialized = true;
+		ts->power.controller_initialized = true;
 		ts->read_errors = 0;
 		himax_state_event(ts, true);
 		himax_int_enable(ts, true);
+		mod_delayed_work(system_wq, &ts->charger_work, 0);
 		return 0;
 	}
 	dev_err(ts->dev, "raw AFE startup failed: %d\n", ret);
@@ -137,14 +142,13 @@ static irqreturn_t himax_raw_irq(int irq, void *data)
 	int ret;
 
 	mutex_lock(&ts->op_lock);
-	if (!ts->streaming || !ts->controller_initialized ||
-	    !ts->panel_enabled || ts->shutting_down)
+	if (!hx_raw_can_read(&ts->power))
 		goto out;
 	ret = himax_read_raw(ts);
 	if (ret) {
 		if (++ts->read_errors >= 3) {
 			himax_int_enable(ts, false);
-			ts->controller_initialized = false;
+			ts->power.controller_initialized = false;
 			ts->frame_flags = HX_RAW_FRAME_SOS;
 			himax_state_event(ts, false);
 			mod_delayed_work(system_wq, &ts->panel_reinit_work, 0);
@@ -169,7 +173,7 @@ static irqreturn_t himax_raw_irq(int irq, void *data)
 	frame->sequence = ts->sequence;
 	frame->timestamp_ns = now;
 	frame->flags = ts->frame_flags |
-		(ts->charger_connected ? HX_RAW_FRAME_CHARGER : 0);
+		(ts->charger.connected ? HX_RAW_FRAME_CHARGER : 0);
 	frame->payload_size = HX_RAW_PAYLOAD_SIZE;
 	memcpy(frame->payload, ts->event_buf, sizeof(frame->payload));
 	buf->vb.sequence = ts->sequence;
@@ -218,16 +222,16 @@ static int himax_stream_start(struct vb2_queue *q, unsigned int count)
 	int ret = 0;
 
 	himax_lock(ts);
-	if (ts->shutting_down) {
+	if (ts->power.shutting_down) {
 		ret = -ENODEV;
 	} else {
-		ts->streaming = true;
+		ts->power.streaming = true;
 		ts->frame_flags = 0;
-		if (ts->panel_prepared && ts->panel_enabled)
+		if (hx_raw_can_start(&ts->power))
 			ret = himax_start_afe(ts);
 	}
 	if (ret) {
-		ts->streaming = false;
+		ts->power.streaming = false;
 		himax_return_buffers(ts, VB2_BUF_STATE_QUEUED);
 	}
 	himax_unlock(ts);
@@ -239,12 +243,12 @@ static void himax_stream_stop(struct vb2_queue *q)
 	struct himax_ts_data *ts = vb2_get_drv_priv(q);
 
 	/* After unbind, the SPI and GPIO resources are no longer available. */
-	if (!ts->shutting_down)
+	if (!ts->power.shutting_down)
 		himax_lock(ts);
 	else
 		mutex_lock(&ts->op_lock);
-	ts->streaming = false;
-	ts->controller_initialized = false;
+	ts->power.streaming = false;
+	ts->power.controller_initialized = false;
 	ts->epoch++;
 	himax_state_event(ts, false);
 	himax_return_buffers(ts, VB2_BUF_STATE_ERROR);
@@ -308,7 +312,7 @@ static long himax_private_ioctl(struct file *file, void *priv,
 	int ret = 0;
 
 	mutex_lock(&ts->op_lock);
-	if (ts->shutting_down) {
+	if (ts->power.shutting_down) {
 		ret = -ENODEV;
 		goto out;
 	}
@@ -340,7 +344,7 @@ static long himax_private_ioctl(struct file *file, void *priv,
 		ret = -EBUSY;
 		goto out;
 	}
-	if (!ts->streaming || !ts->controller_initialized || !ts->panel_enabled ||
+	if (!hx_raw_can_read(&ts->power) ||
 	    c->epoch != ts->epoch || !c->sequence || c->sequence > ts->sequence ||
 	    ts->sequence - c->sequence > 8) {
 		ret = -ESTALE;
@@ -355,7 +359,7 @@ static long himax_private_ioctl(struct file *file, void *priv,
 	ts->last_command_ns[c->action] = now;
 	if (c->action == HX_RAW_RESET) {
 		himax_int_enable(ts, false);
-		ts->controller_initialized = false;
+		ts->power.controller_initialized = false;
 		ts->frame_flags = HX_RAW_FRAME_SOS;
 		himax_state_event(ts, false);
 		mod_delayed_work(system_wq, &ts->panel_reinit_work, 0);
@@ -400,30 +404,47 @@ static void himax_panel_work(struct work_struct *work)
 	struct himax_ts_data *ts = container_of(to_delayed_work(work),
 					       struct himax_ts_data, panel_reinit_work);
 
-	himax_lock(ts);
-	if (!ts->shutting_down && ts->streaming && !ts->controller_initialized &&
-	    ts->panel_prepared && ts->panel_enabled &&
-	    himax_start_afe(ts))
-		vb2_queue_error(&ts->queue);
+	mutex_lock(&ts->op_lock);
+	if (hx_raw_can_start(&ts->power)) {
+		/* The IRQ thread uses op_lock too. Do not synchronize an IRQ
+		 * waiting for this mutex, or disable a healthy stream's IRQ
+		 * when a duplicate work item has nothing to initialize.
+		 */
+		himax_int_enable(ts, false);
+		if (himax_start_afe(ts))
+			vb2_queue_error(&ts->queue);
+	}
 	himax_unlock(ts);
 }
 
 static void himax_charger_work(struct work_struct *work)
 {
-	struct himax_ts_data *ts = container_of(work, struct himax_ts_data,
-					       charger_work);
-	int supplied = power_supply_is_system_supplied();
+	struct himax_ts_data *ts = container_of(to_delayed_work(work),
+					       struct himax_ts_data, charger_work);
+	int supplied;
 	int ret;
 
-	if (supplied < 0)
-		return;
 	mutex_lock(&ts->op_lock);
-	if (!ts->shutting_down && ts->controller_initialized &&
-	    ts->charger_connected != (supplied > 0)) {
-		ret = himax_set_charger(ts, supplied > 0);
-		if (ret)
-			dev_warn_ratelimited(ts->dev, "charger update: %d\n", ret);
+	if (!hx_raw_can_read(&ts->power))
+		goto out;
+	supplied = power_supply_is_system_supplied();
+	if (supplied < 0)
+		goto retry;
+	ts->charger.connected = supplied > 0;
+	if (!hx_raw_charger_needs_write(&ts->charger))
+		goto out;
+	ret = himax_set_charger(ts, ts->charger.connected);
+	if (ret) {
+		dev_warn_ratelimited(ts->dev, "charger update: %d\n", ret);
+		goto retry;
 	}
+	goto out;
+retry:
+	/* Retry a failed query/write without requiring another power event.
+	 * Suspend, panel-off and remove close the gate before draining work.
+	 */
+	mod_delayed_work(system_wq, &ts->charger_work, msecs_to_jiffies(1000));
+out:
 	mutex_unlock(&ts->op_lock);
 }
 
@@ -434,7 +455,7 @@ static int himax_charger_notify(struct notifier_block *nb,
 					       charger_notifier);
 
 	if (event == PSY_EVENT_PROP_CHANGED)
-		schedule_work(&ts->charger_work);
+		mod_delayed_work(system_wq, &ts->charger_work, 0);
 	return NOTIFY_OK;
 }
 
@@ -444,7 +465,7 @@ static int himax_panel_prepared(struct drm_panel_follower *follower)
 					       panel_follower);
 
 	mutex_lock(&ts->op_lock);
-	ts->panel_prepared = true;
+	ts->power.panel_prepared = true;
 	mutex_unlock(&ts->op_lock);
 	return 0;
 }
@@ -455,10 +476,11 @@ static int himax_panel_enabled(struct drm_panel_follower *follower)
 					       panel_follower);
 
 	mutex_lock(&ts->op_lock);
-	ts->panel_enabled = true;
+	ts->power.panel_enabled = true;
 	ts->frame_flags = 0;
+	if (hx_raw_can_start(&ts->power))
+		mod_delayed_work(system_wq, &ts->panel_reinit_work, msecs_to_jiffies(300));
 	mutex_unlock(&ts->op_lock);
-	mod_delayed_work(system_wq, &ts->panel_reinit_work, msecs_to_jiffies(300));
 	return 0;
 }
 
@@ -467,13 +489,15 @@ static int himax_panel_disabling(struct drm_panel_follower *follower)
 	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
 					       panel_follower);
 
-	cancel_delayed_work_sync(&ts->panel_reinit_work);
 	himax_lock(ts);
-	ts->panel_enabled = false;
-	ts->controller_initialized = false;
+	ts->power.panel_enabled = false;
+	ts->power.controller_initialized = false;
 	ts->epoch++;
 	himax_state_event(ts, false);
 	himax_unlock(ts);
+	/* Publish the gate first. Never wait for a worker while holding op_lock. */
+	cancel_delayed_work_sync(&ts->panel_reinit_work);
+	cancel_delayed_work_sync(&ts->charger_work);
 	return 0;
 }
 
@@ -484,7 +508,7 @@ static int himax_panel_unpreparing(struct drm_panel_follower *follower)
 
 	himax_panel_disabling(follower);
 	mutex_lock(&ts->op_lock);
-	ts->panel_prepared = false;
+	ts->power.panel_prepared = false;
 	mutex_unlock(&ts->op_lock);
 	return 0;
 }
@@ -495,6 +519,53 @@ static const struct drm_panel_follower_funcs himax_panel_ops = {
 	.panel_disabling = himax_panel_disabling,
 	.panel_unpreparing = himax_panel_unpreparing,
 };
+
+static int himax_raw_suspend(struct device *dev)
+{
+	struct himax_ts_data *ts = dev_get_drvdata(dev);
+
+	himax_lock(ts);
+	ts->power.system_suspended = true;
+	ts->power.controller_initialized = false;
+	ts->epoch++;
+	himax_state_event(ts, false);
+	himax_unlock(ts);
+	cancel_delayed_work_sync(&ts->panel_reinit_work);
+	cancel_delayed_work_sync(&ts->charger_work);
+	/* Match Chip::Quiesce: no sense-off, reset GPIO or SPI during stop. */
+	return 0;
+}
+
+static int himax_raw_resume(struct device *dev)
+{
+	struct himax_ts_data *ts = dev_get_drvdata(dev);
+
+	mutex_lock(&ts->op_lock);
+	ts->power.system_suspended = false;
+	/* The SPI parent has resumed. Panel callbacks may precede or follow us;
+	 * whichever opens the last gate queues a full AFE initialization.
+	 */
+	if (hx_raw_can_start(&ts->power))
+		mod_delayed_work(system_wq, &ts->panel_reinit_work, msecs_to_jiffies(300));
+	mutex_unlock(&ts->op_lock);
+	return 0;
+}
+
+static DEFINE_SIMPLE_DEV_PM_OPS(himax_raw_pm_ops, himax_raw_suspend, himax_raw_resume);
+
+static void himax_raw_shutdown(struct spi_device *spi)
+{
+	struct himax_ts_data *ts = spi_get_drvdata(spi);
+
+	himax_lock(ts);
+	ts->power.shutting_down = true;
+	ts->power.controller_initialized = false;
+	ts->epoch++;
+	himax_state_event(ts, false);
+	himax_unlock(ts);
+	cancel_delayed_work_sync(&ts->panel_reinit_work);
+	cancel_delayed_work_sync(&ts->charger_work);
+}
 
 static void himax_v4l2_release(struct v4l2_device *v4l2)
 {
@@ -554,7 +625,7 @@ static int himax_raw_probe(struct spi_device *spi)
 	mutex_init(&ts->video_lock);
 	INIT_LIST_HEAD(&ts->buffers);
 	INIT_DELAYED_WORK(&ts->panel_reinit_work, himax_panel_work);
-	INIT_WORK(&ts->charger_work, himax_charger_work);
+	INIT_DELAYED_WORK(&ts->charger_work, himax_charger_work);
 	ts->charger_notifier.notifier_call = himax_charger_notify;
 	ret = v4l2_device_register(ts->dev, &ts->v4l2);
 	if (ret)
@@ -605,11 +676,11 @@ static int himax_raw_probe(struct spi_device *spi)
 	ret = drm_panel_add_follower(ts->dev, &ts->panel_follower);
 	if (ret) {
 		power_supply_unreg_notifier(&ts->charger_notifier);
-		cancel_work_sync(&ts->charger_work);
-		cancel_delayed_work_sync(&ts->panel_reinit_work);
 		himax_lock(ts);
-		ts->shutting_down = true;
+		ts->power.shutting_down = true;
 		himax_unlock(ts);
+		cancel_delayed_work_sync(&ts->charger_work);
+		cancel_delayed_work_sync(&ts->panel_reinit_work);
 		goto unregister_video;
 	}
 	dev_info(ts->dev, "raw SPI capture registered as %s\n",
@@ -637,14 +708,15 @@ static void himax_raw_remove(struct spi_device *spi)
 {
 	struct himax_ts_data *ts = spi_get_drvdata(spi);
 
+	himax_raw_shutdown(spi);
 	drm_panel_remove_follower(&ts->panel_follower);
 	power_supply_unreg_notifier(&ts->charger_notifier);
-	cancel_work_sync(&ts->charger_work);
+	cancel_delayed_work_sync(&ts->charger_work);
 	cancel_delayed_work_sync(&ts->panel_reinit_work);
 	mutex_lock(&ts->video_lock);
 	himax_lock(ts);
-	ts->shutting_down = true;
-	ts->controller_initialized = false;
+	ts->power.shutting_down = true;
+	ts->power.controller_initialized = false;
 	himax_state_event(ts, false);
 	himax_return_buffers(ts, VB2_BUF_STATE_ERROR);
 	vb2_queue_error(&ts->queue);
@@ -673,9 +745,11 @@ static struct spi_driver himax_raw_driver = {
 	.driver = {
 		.name = "himax-spi",
 		.of_match_table = himax_raw_of_match,
+		.pm = pm_sleep_ptr(&himax_raw_pm_ops),
 	},
 	.probe = himax_raw_probe,
 	.remove = himax_raw_remove,
+	.shutdown = himax_raw_shutdown,
 	.id_table = himax_raw_ids,
 };
 module_spi_driver(himax_raw_driver);

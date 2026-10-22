@@ -65,6 +65,10 @@ journalctl -u himax-touchd -b
 但会按需加载 uinput/videobuf2 依赖。
 常驻安装会强制重建 DKMS 缓存，并核对仓库产物、缓存、磁盘模块和运行中 build ID；
 失败时恢复原模块、DKMS 源码/注册状态和原服务状态。
+安装后可另跑 `bash scripts/test-v4l2-transport.sh`，用真实 ioctl 验证队列 owner、
+非法参数、过期 epoch、跨 AFE 重建的一秒 reset 限频，以及 STREAMOFF 后拒绝命令。
+测试会暂停服务并执行两次硬件 reset，退出后恢复原服务状态；它不进入普通 CTest。
+系统 PM 的状态检查有 host 回归测试，但屏幕 DPMS 测试不等于真实系统休眠验收。
 启动校准后可能有短暂无效原始帧；安装检查明确记录并最多容忍每个 epoch 的前四个
 无效帧。一旦出现首个有效帧，后续任何坏帧仍使安装检查失败；全坏、连续五个启动
 坏帧和截断文件也失败。运行服务的连续五坏帧规则独立负责请求 AFE reset。
@@ -336,3 +340,29 @@ Android init/SELinux、内核配置和设备映射也需要独立集成。
 - 用户态更新已安装到本机，内核模块未重载。默认服务为单线程、没有开启录制，
   处理 911 帧时 bad/stale 均为 0，`NRestarts=0`，方向为 3；
   安装前备份为 `deploy-logs/userspace-session-20261023-KEK1N5/`。
+
+2026-10-23 系统 PM 与硬件恢复增量验证：
+
+- 系统 suspend/freeze/poweroff 有独立状态，不依赖面板通知是否及时到达；所有运行期
+  硬件入口共用状态检查。panel enabled 不能绕过系统休眠，重复初始化任务也不会再
+  关闭正常采集的 IRQ；停止与 shutdown 不主动发送 sense-off 或拉 reset；
+- 充电的物理状态与固件确认状态分开保存；查询或写入失败会延迟重试，硬件重建后
+  重新确认。host tests 覆盖生产状态检查的全部 64 种 power 组合、恢复顺序及写失败
+  状态，但未对真实 SPI 注入充电写失败，也未做物理拔插验收；
+- `make check` 通过；Release 与 ASan/UBSan 各 17 组通过，仍未启用 leak 检查；
+- 真实 ioctl 测试通过：非法参数 `EINVAL`、非 owner `EBUSY`、过期 epoch/
+  STREAMOFF 后 `ESTALE`。reset 后 387 ms、已进入新 epoch 时，第二次请求正确
+  返回 `EAGAIN`；超过一秒后成功，采集 epoch 为 `7 → 8 → 9`；
+- 试用的采集、watchdog 和打开 fd/MMAP 时解绑通过；屏灭冷启动测试通过，灭屏时
+  OTP 为空，亮屏后同一 daemon 获得 `W273AS2700`。最终常驻服务处理 880 帧，
+  bad/stale 均为 0，`NRestarts=0`，方向为 3；该样本没有实际触点；
+- 本机已部署新版模块。仓库产物、安装文件和 DKMS 缓存 SHA-256 均为
+  `c27fcdacdd7591d28abad65a7b32b21fc33fa79bf29449665060b3dd6c7bc946`，
+  运行中 build ID 与安装文件均为 `08debfe4e179a3a67f53fa4f8d4b870f8f27704b`；
+- 备份：`deploy-logs/v4l2-20261023-020055/`；真实命令测试：
+  `deploy-logs/transport-iTfKxv9b/`；屏幕测试：
+  `deploy-logs/panel-20261023-020435/`。
+
+本轮没有执行真正的系统 suspend/resume 或 hibernation，不能用状态测试或 DPMS
+结果替代这些验收。Android 仍未迁移/部署；真实手势、多指、掌压亮屏和长期表现
+仍需单独采集并验证。

@@ -19,7 +19,7 @@ SPI IRQ
 内核仅有 `himax-v4l2.c`、共享的 `himax-spi-hw.c` 和可单独 host 测试的 OTP 协议
 `hx-otp.c` 三个编译单元。不链接 baseline、
 peak detection、tracker、滤波、input 或旧诊断 ring。保留的硬件职责包括 GPIO reset、
-AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、充电状态和命令邮箱。
+AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、系统 PM、充电状态和命令邮箱。
 这些必须由硬件拥有者串行执行，无法可靠地简化为毫无生命周期的 SPI 字节转发器。
 
 用户态通过 submodule 编译原版全部启用算法，保留上游模块边界与面板参数表。
@@ -44,7 +44,8 @@ AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、充电状
 | `V4L2_EVENT_HIMAX_STATE` | running/epoch；即使屏灭不再产帧也能及时释放触点 |
 
 命令必须来自当前 vb2 queue owner，并与当前 epoch、最近八帧内的 sequence 关联。
-校验 action、参数和保留字段；普通 action 最短间隔 20 ms，reset 最短一秒。
+校验 action、参数和保留字段；普通 action 最短间隔 20 ms，reset 最短一秒，
+重建 AFE epoch 不清除 reset 的限频时间戳。
 这是邮箱传输确认，calibration-done 仍通过后续帧状态确认，不能把写入成功称为校准完成。
 
 ABI v2 将 INFO 的原保留字段定义为 `coordinate_flags`，结构仍为 40 字节。
@@ -178,8 +179,23 @@ OTP 使用原版独立的 AHB burst、DD access 解锁和只读槽位选择流�
 频点切换的处理直接沿用上游。不能把上游 profile 未启用的 SafeBaseline 五槽描述为
 当前有效功能，也不能假设 reset 就能解决掌压亮屏。
 
-充电变化通过 power_supply notifier 排队，在硬件互斥锁下更新 firmware，并把状态
-随帧交给原版 adapter；没有在 IRQ 里查询整套电源属性。
+系统 suspend/freeze/poweroff 与 panel 开关是独立输入。系统休眠先同步关闭 IRQ，
+在 `op_lock` 下设置休眠状态、使 AFE 失效并发出 stopped/新 epoch，然后在锁外
+取消初始化和充电任务。停止不发送 sense-off、不拉 reset，也不访问 SPI。
+IRQ、AFE 启动、命令和充电任务共用 `hx-raw-policy.h` 的状态检查；休眠期间晚到的
+panel enabled 不能重新启动硬件。resume/thaw/restore 在 SPI 父设备恢复后解除系统
+休眠状态，仅在 streaming、panel prepared/enabled 全部满足时排队完整初始化。
+因此两种 panel/system 恢复顺序都可工作，休眠期间 STREAMOFF 则不会重启。
+shutdown/remove 先关闭入口再取消任务，不在持有 `op_lock` 时等待 worker。
+
+充电变化通过 power_supply notifier 排队，在硬件互斥锁下更新 firmware。分别保存
+物理连接状态和固件已确认应用的状态，前者随帧交给原版 adapter；没有在 IRQ 里查询
+整套电源属性。启动时或通知后的写入失败，不会被误记为已应用；每秒重试电源查询/
+写入，成功后停止重试，每次硬件初始化都会使已应用状态失效。屏灭、系统休眠、
+STREAMOFF 和 shutdown 阻止后台硬件访问；新 AFE 启动时重新安排检查。
+
+状态测试覆盖生产代码使用的全部 64 种 power flag 组合、两种恢复顺序和充电失败
+状态；它不能替代真实系统 suspend/resume、物理拔插和 SPI 故障注入测试。
 
 锁顺序为 video_lock → op_lock → buffer_lock。IRQ 不获取 video_lock；
 硬件事务不持 buffer_lock。停止/解绑先同步 IRQ，再归还队列。IRQ 和 notifier/work

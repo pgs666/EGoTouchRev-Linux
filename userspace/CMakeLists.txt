@@ -98,6 +98,17 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-otp-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME otp-protocol COMMAND himax-otp-test)
+    add_executable(himax-raw-policy-test ../tests/hx-raw-policy-test.c)
+    target_include_directories(himax-raw-policy-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_options(himax-raw-policy-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME raw-transport-policy COMMAND himax-raw-policy-test)
+    # Requires an idle real device and performs hardware resets. Invoke using
+    # scripts/test-v4l2-transport.sh; never run as a normal host test.
+    add_executable(himax-transport-test tests/transport-test.cpp v4l2-capture.cpp)
+    target_include_directories(himax-transport-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_options(himax-transport-test PRIVATE -Wall -Wextra -Werror)
     add_executable(himax-rotation-test tests/rotation-test.cpp screen-rotation.cpp)
     target_include_directories(himax-rotation-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(himax-rotation-test PRIVATE -Wall -Wextra -Werror)

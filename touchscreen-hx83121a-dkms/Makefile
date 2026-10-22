@@ -69,7 +69,7 @@ DKMS_SOURCES = Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
 	       hx-safe-baseline-judge.c hx-safe-baseline-queue.c hx-algo-track.c \
 	       hx-algo.h hx-algo-internal.h hx-frame-status.h hx-stylus.h \
 	       hx-panel-profile.c hx-panel-profile.h himax-v4l2.c \
-	       himax-v4l2.h hx-v4l2-uapi.h hx-otp.c hx-otp.h
+	       himax-v4l2.h hx-v4l2-uapi.h hx-raw-policy.h hx-otp.c hx-otp.h
 
 .PHONY: all clean test deploy-local dkmsinstall dkmsremove print-dkms-sources
 
