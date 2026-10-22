@@ -8,6 +8,15 @@ MODVER = 0.1
 HIMAX_STYLUS ?= 0
 HIMAX_V4L2 ?= 1
 
+# Sparse mailbox transaction logging only. No raw-frame capture, additional
+# hardware reads or per-frame work. Runtime logging still defaults to off.
+HIMAX_AFE_DIAGNOSTICS ?= 0
+ifeq ($(HIMAX_AFE_DIAGNOSTICS),1)
+ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS=1
+else ifneq ($(HIMAX_AFE_DIAGNOSTICS),0)
+$(error HIMAX_AFE_DIAGNOSTICS must be 0 or 1)
+endif
+
 # The multi-slot SafeBaseline, held-in-hand reacquire, SHB extension and
 # automatic BLRecal paths are still experimental.  They remain enabled by
 # default for the current development branch, but can be disabled as one

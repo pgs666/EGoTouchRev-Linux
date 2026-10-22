@@ -68,6 +68,10 @@ Linux 有两处宿主方向适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys
 2026-10-23 本机校准、清状态、IDLE 已观察到完成状态，但频点 1 命令后，五秒内
 `word[10]` 和 `word[2]` 未变化，跳频仍未验收。当前上游 caps 的 `freqHopMode=0`，
 手指默认管线不主动请求手动跳频；不得为通过测试就擅自改为 host 跳频。
+临时模块试验可用 `HIMAX_TRIAL_AFE=basic|full|frequency` 配合 `--trial`，只在此时
+启用独立的邮箱诊断编译选项，记录现有 16 字节读回；默认普通模块不包含日志或参数。
+隔离实验在不再显式校准、稳定等待两秒后仍未见手动切频完成；命令参数写入已由
+读回确认，但尚无 Windows 同命令序列对照，不应直接称为移植回归。
 
 ABI v2 将 INFO 的原保留字段定义为 `coordinate_flags`，结构仍为 40 字节。
 bit 0/1/2 分别是 invert X、invert Y 和 swap XY；其他位必须为零。内核从固件

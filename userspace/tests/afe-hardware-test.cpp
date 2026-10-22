@@ -133,11 +133,15 @@ private:
 
 int main(int argc, char** argv) {
     const bool basic = argc == 4 && std::strcmp(argv[3], "--basic") == 0;
-    if (argc != 3 && !basic) {
-        std::cerr << "Usage: himax-afe-hardware-test /dev/himax-raw OUTPUT.hxst [--basic]\n"
+    const bool frequencyOnly = argc == 4 && std::strcmp(argv[3], "--frequency-only") == 0;
+    if (argc != 3 && !basic && !frequencyOnly) {
+        std::cerr << "Usage: himax-afe-hardware-test /dev/himax-raw OUTPUT.hxst\n"
+                  << "       [--basic | --frequency-only]\n"
                   << "Stop touch service and keep hands off; test recalibrates, switches\n"
                   << "both supported frequencies and enters IDLE. --basic skips frequency\n"
-                  << "commands (not frequency acceptance). Restart service afterward.\n";
+                  << "commands (not frequency acceptance). --frequency-only skips explicit\n"
+                  << "recalibration and IDLE; waits 240 clean frames before switching.\n"
+                  << "Restart service afterward.\n";
         return 2;
     }
     try {
@@ -149,10 +153,19 @@ int main(int argc, char** argv) {
         test.Wait("hands-off-24-frames", [&](const auto&) { return ++clean == 24; });
         auto sent = test.Send(HX_RAW_CLEAR_STATUS, 8);
         test.Wait("calibration-marker-cleared", [](const auto& s) { return s.diagStatus() != 0xbb; }, sent);
-        sent = test.Send(HX_RAW_CALIBRATE, 0);
-        test.Wait("explicit-calibration-done", [](const auto& s) { return s.diagStatus() == 0xbb; }, sent);
-        sent = test.Send(HX_RAW_CLEAR_STATUS, 8);
-        test.Wait("explicit-calibration-ack", [](const auto& s) { return s.diagStatus() != 0xbb; }, sent);
+        if (!frequencyOnly) {
+            sent = test.Send(HX_RAW_CALIBRATE, 0);
+            test.Wait("explicit-calibration-done", [](const auto& s) { return s.diagStatus() == 0xbb; }, sent);
+            sent = test.Send(HX_RAW_CLEAR_STATUS, 8);
+            test.Wait("explicit-calibration-ack", [](const auto& s) { return s.diagStatus() != 0xbb; }, sent);
+        } else {
+            std::cout << "explicit-calibration: SKIPPED (--frequency-only)" << std::endl;
+            clean = 0;
+            test.Wait("settled-240-frames", [&](const auto& s) {
+                Check(s.diagStatus() != 0xbb, "Calibration marker unexpectedly relatched while settling");
+                return ++clean == 240;
+            });
+        }
 
         if (!basic) {
             const unsigned int original = test.suffix.words[10] != 0;
@@ -169,14 +182,18 @@ int main(int argc, char** argv) {
         } else {
             std::cout << "frequency: SKIPPED (--basic); no frequency acceptance claim" << std::endl;
         }
-        test.Send(HX_RAW_FORCE_RATE, 0);
-        std::cout << "rate0: transport verified only; adapter reports a fixed 120 Hz,\n"
-                  << "so this is not independent scan-rate completion proof." << std::endl;
-        sent = test.Send(HX_RAW_ENTER_IDLE, 0);
-        test.Wait("idle-entered", [](const auto& s) { return s.idleFlag() == 1; }, sent);
+        if (!frequencyOnly) {
+            test.Send(HX_RAW_FORCE_RATE, 0);
+            std::cout << "rate0: transport verified only; adapter reports a fixed 120 Hz,\n"
+                      << "so this is not independent scan-rate completion proof." << std::endl;
+            sent = test.Send(HX_RAW_ENTER_IDLE, 0);
+            test.Wait("idle-entered", [](const auto& s) { return s.idleFlag() == 1; }, sent);
+        } else {
+            std::cout << "rate/IDLE: SKIPPED (--frequency-only)" << std::endl;
+        }
         test.Finish();
-        std::cout << "AFE calibration/status/IDLE suffix handshakes passed; frequency="
-                  << (basic ? "SKIPPED" : "PASS") << std::endl;
+        std::cout << "Selected AFE suffix handshakes passed: mode="
+                  << (basic ? "basic" : frequencyOnly ? "frequency-only" : "full") << std::endl;
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL: " << error.what() << '\n';

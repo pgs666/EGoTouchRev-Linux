@@ -4,6 +4,7 @@
 #include <linux/delay.h>
 #include <linux/dev_printk.h>
 #include <linux/interrupt.h>
+#include <linux/moduleparam.h>
 #include <linux/power_supply.h>
 #include <linux/slab.h>
 
@@ -12,6 +13,15 @@
 #include "hx-otp.h"
 #ifndef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
 #include "hx-panel-profile.h"
+#endif
+
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
+static bool himax_afe_mailbox_debug;
+module_param_named(afe_mailbox_debug, himax_afe_mailbox_debug, bool, 0600);
+MODULE_PARM_DESC(afe_mailbox_debug,
+		"Log existing AFE mailbox readback (no extra hardware reads)");
+#else
+#define himax_afe_mailbox_debug false
 #endif
 
 #define HIMAX_BUS_RETRY					3
@@ -368,7 +378,17 @@ static int himax_afe_reg_write(void *context, u32 address, const u8 *data,
 
 static int himax_afe_reg_read(void *context, u32 address, u8 *data, size_t length)
 {
-	return himax_mcu_register_read(context, address, data, length);
+	struct himax_ts_data *ts = context;
+	int ret;
+
+	ret = himax_mcu_register_read(ts, address, data, length);
+	/* Opt-in diagnostic build: reuse the protocol's existing readback.
+	 * Do not add register polling or interpret this as firmware completion.
+	 */
+	if (!ret && himax_afe_mailbox_debug)
+		dev_info(ts->dev, "AFE mailbox addr=0x%08x readback=%*ph\n",
+			address, (int)length, data);
+	return ret;
 }
 
 static int himax_afe_send_command(struct himax_ts_data *ts, u8 *slot,
@@ -379,8 +399,14 @@ static int himax_afe_send_command(struct himax_ts_data *ts, u8 *slot,
 		.write = himax_afe_reg_write,
 		.read = himax_afe_reg_read,
 	};
+	u8 sent_slot = *slot;
+	int ret;
 
-	return hx_afe_send(&bus, slot, command, value);
+	ret = hx_afe_send(&bus, slot, command, value);
+	if (himax_afe_mailbox_debug)
+		dev_info(ts->dev, "AFE command=0x%02x value=0x%02x slot=%u next=%u transport=%d\n",
+			command, value, sent_slot, *slot, ret);
+	return ret;
 }
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2

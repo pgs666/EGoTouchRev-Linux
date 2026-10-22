@@ -5,6 +5,8 @@ set -Eeuo pipefail
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 trial=0
 trial_seconds=${HIMAX_TRIAL_SECONDS:-5}
+trial_afe=${HIMAX_TRIAL_AFE:-none}
+afe_diagnostics=${HIMAX_AFE_DIAGNOSTICS:-0}
 [[ "$trial_seconds" =~ ^[0-9]+$ ]] && (( trial_seconds >= 5 && trial_seconds <= 120 )) || {
 	echo "HIMAX_TRIAL_SECONDS must be between 5 and 120" >&2
 	exit 2
@@ -14,6 +16,18 @@ case "${1:-}" in
 	"") ;;
 	*) echo "Usage: bash scripts/deploy-v4l2-local.sh [--trial]" >&2; exit 2 ;;
 esac
+case "$trial_afe" in
+	none) ;;
+	basic|full|frequency)
+		(( trial )) || { echo "HIMAX_TRIAL_AFE requires --trial" >&2; exit 2; }
+		afe_diagnostics=1
+		;;
+	*) echo "HIMAX_TRIAL_AFE must be none, basic, full or frequency" >&2; exit 2 ;;
+esac
+[[ "$afe_diagnostics" == 0 || "$afe_diagnostics" == 1 ]] || {
+	echo "HIMAX_AFE_DIAGNOSTICS must be 0 or 1" >&2
+	exit 2
+}
 kernel_version=$(uname -r)
 dkms_tree=/var/lib/dkms/himax-spi
 dkms_module="$dkms_tree/0.1/$kernel_version/$(uname -m)/module/himax-spi.ko"
@@ -45,6 +59,7 @@ exec 9>"$repo_dir/deploy-logs/.v4l2-deploy.lock"
 flock -n 9 || { echo "Another V4L2 deployment is running" >&2; exit 1; }
 exec > >(tee -a "$state_dir/deploy.log") 2>&1
 echo "checkpoint=$state_dir"
+echo "afe_diagnostics=$afe_diagnostics trial_afe=$trial_afe"
 [[ -f "$old_module" && "$old_module" == *.ko ]] || {
 	echo "Need an existing uncompressed known-good himax-spi.ko for rollback" >&2
 	exit 1
@@ -149,7 +164,8 @@ trap 'exit 143' TERM
 cmake -S "$repo_dir/userspace" -B "$repo_dir/userspace/build" \
 	-DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
 make -C "$repo_dir" userspace test
-make -C "$repo_dir/touchscreen-hx83121a-dkms" -j4 HIMAX_V4L2=1
+make -C "$repo_dir/touchscreen-hx83121a-dkms" -j4 HIMAX_V4L2=1 \
+	HIMAX_AFE_DIAGNOSTICS="$afe_diagnostics"
 if [[ -e /dev/uinput ]]; then
 	:
 elif ! modinfo uinput >/dev/null 2>&1; then
@@ -178,7 +194,12 @@ module_unloaded=1
 # rmmod may also remove unused dependencies of the old V4L2 driver. Load the
 # exact new module's dependencies after unloading, on forward and rollback paths.
 load_dependencies "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko"
-sudo insmod "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko"
+module_options=()
+afe_since=$(date --iso-8601=seconds)
+if [[ "$trial_afe" != none ]]; then
+	module_options+=(afe_mailbox_debug=1)
+fi
+sudo insmod "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko" "${module_options[@]}"
 udevadm settle --timeout=10
 [[ "$(basename "$(readlink -f /sys/bus/spi/devices/spi0.0/driver)")" == himax-spi ]]
 echo "Capturing five seconds of HXST metadata"
@@ -190,6 +211,29 @@ sudo timeout --signal=TERM --kill-after=3 5 \
 [[ -s "$state_dir/smoke.hxst" ]]
 "$repo_dir/userspace/build/himax-replay" --allow-startup-invalid --hxst "$state_dir/smoke.hxst" \
 	> "$state_dir/smoke.csv"
+if [[ "$trial_afe" != none ]]; then
+	# Exercise the temporary module, not the installed .ko. The normal test
+	# wrapper deliberately requires equality with the installed artifact.
+	# Any failure below goes through restore(), including disabling logging
+	# by unloading this diagnostic module and reinstating the previous one.
+	afe_options=()
+	[[ "$trial_afe" != basic ]] || afe_options+=(--basic)
+	[[ "$trial_afe" != frequency ]] || afe_options+=(--frequency-only)
+	afe_result=0
+	sudo timeout --signal=TERM --kill-after=3 60 \
+		"$repo_dir/userspace/build/himax-afe-hardware-test" \
+		/dev/himax-raw "$state_dir/afe.hxst" "${afe_options[@]}" \
+		> "$state_dir/afe-test.log" 2>&1 || afe_result=$?
+	sudo journalctl -k --since "$afe_since" --no-pager > "$state_dir/afe-kernel.log"
+	cat "$state_dir/afe-test.log"
+	printf '%s\n' 0 | sudo tee /sys/module/himax_spi/parameters/afe_mailbox_debug >/dev/null
+	if (( afe_result )); then
+		echo "Selected AFE handshake test failed: $afe_result; restoring previous module" >&2
+		exit "$afe_result"
+	fi
+	"$repo_dir/userspace/build/himax-replay" --allow-startup-invalid --hxst "$state_dir/afe.hxst" \
+		> "$state_dir/afe.csv"
+fi
 sudo systemd-run --quiet --unit="$unit" --property=Type=notify \
 	--property=WatchdogSec=3 --property=TimeoutStopSec=3 \
 	"$repo_dir/userspace/build/himax-touchd"

@@ -118,6 +118,7 @@ journalctl -u himax-touchd -b
 ```sh
 bash scripts/test-v4l2-afe.sh          # 全套；当前设备的频点切换检查尚不通过，见文末
 bash scripts/test-v4l2-afe.sh --basic  # 只检查校准、清状态、IDLE；明确跳过跳频，不算全套通过
+bash scripts/test-v4l2-afe.sh --frequency-only # 不再显式校准；等待 240 个无手指帧后单独检查切频
 ```
 
 原始 HXRC/HXST、各命令的 epoch/sequence 和观察到的 suffix 状态、内核及服务日志
@@ -125,6 +126,22 @@ bash scripts/test-v4l2-afe.sh --basic  # 只检查校准、清状态、IDLE；�
 充当完成回执；读回成功与固件完成分别记录。扫描率命令目前只能验证传输，adapter
 固定报告 120 Hz，不应据此声称验证了真实扫描率。该录制不是同步求解 session，
 不宣称严格输出等价；失败录制仍保留供离线分析。
+
+需要同时查看现有邮箱读回时，优先用临时诊断模块，测试后自动恢复当前安装的模块：
+
+```sh
+HIMAX_TRIAL_AFE=basic bash scripts/deploy-v4l2-local.sh --trial
+HIMAX_TRIAL_AFE=full bash scripts/deploy-v4l2-local.sh --trial
+HIMAX_TRIAL_AFE=frequency bash scripts/deploy-v4l2-local.sh --trial
+```
+
+该选项仅允许用于 `--trial`，会自动启用 `HIMAX_AFE_DIAGNOSTICS=1`，在模块加载时打开
+`afe_mailbox_debug`，保存 `afe-test.log`、`afe-kernel.log` 和 `afe.hxst`；随后关闭日志。
+实机检查失败会返回非零并恢复原模块，不把跳频失败改成安装成功。基础检查通过后还会
+继续普通 solver/watchdog/解绑试验再恢复。手动构建诊断模块时，`afe_mailbox_debug`
+默认仍为 false，仅 root 可改；它只打印协议本来就会读回的 16 字节，没有额外 SPI
+访问或逐帧回调。默认 `HIMAX_AFE_DIAGNOSTICS=0`，连日志与模块参数都不编译进普通模块，
+无需内核启用 dynamic debug。该编译开关与 legacy 的全速原始帧诊断开关相互独立。
 
 系统 PM 的状态检查有 host 回归测试，但屏幕 DPMS 测试不等于真实系统休眠验收。
 启动校准后可能有短暂无效原始帧；安装检查明确记录并最多容忍每个 epoch 的前四个
@@ -569,3 +586,22 @@ Android 仍未迁移或部署此用户态架构。
 后续应优先定位“命令被接受但频点/完成位不变”：核对当前固件支持与原厂自动/手动
 跳频模式、初始化前后寄存器状态，拿同样命令序列的 Windows raw 作对照；不能仅凭
 上游函数存在就宣称已在两端验证，也不应盲目向默认路径追加关闭自动跳频的命令。
+
+同日邮箱读回及校准时序隔离实验：
+
+- 临时诊断模块完整测试：`deploy-logs/v4l2-20261023-034913/`，仍在频点 1 完成
+  检查失败。读回为 `a8 8a 0c 00 01 00 00 00 00 00 00 00 00 00 4b 75`，
+  确认命令、参数及 checksum 字节确实写入预期槽位；这仍不是固件完成证明；
+- 不再显式校准的隔离实验：`deploy-logs/v4l2-20261023-035122/`。清除启动校准标记后
+  等待 240 个无手指帧（2,000 ms），sequence 272 发送切频，到 sequence 872 仍无
+  频点/完成位变化。现有读回里该命令头已变为零，参数 1 和 checksum 保留，符合
+  固件消费邮箱的行为，但不能据此认定切频完成。872 个试验帧均通过 checksum；
+  此前独立 smoke 中有 3 个启动 sync 错误，随后 512 帧正常，未掩盖为全零错误；
+- `basic` 临时模块试验：`deploy-logs/v4l2-20261023-035404/`，显式校准、清状态、IDLE
+  通过；关掉邮箱日志后的正常求解、watchdog 和带 MMAP 解绑同样通过；
+- 三次试验均恢复之前安装的普通模块和常驻服务，没有持久化诊断模块，也未改算法、
+  baseline、参数或 Android。普通构建检查确认不含邮箱日志格式串和模块参数。
+
+这排除了“参数 1 没写入邮箱”和本次“紧接显式校准过快发命令”两个解释，但没有证明
+Windows 上同一命令会生效。应将其标为本机手动跳频能力未验收，而不是已证实的
+Linux 专属回归。当前不因此更改 `freqHopMode`、扩展未验证的固件命令或启用笔路径。

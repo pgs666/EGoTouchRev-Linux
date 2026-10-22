@@ -4,8 +4,9 @@ set -Eeuo pipefail
 test_options=()
 case "${1:-}" in
     --basic) test_options+=(--basic) ;;
+    --frequency-only) test_options+=(--frequency-only) ;;
     "") ;;
-    *) echo "Usage: bash scripts/test-v4l2-afe.sh [--basic]" >&2; exit 2 ;;
+    *) echo "Usage: bash scripts/test-v4l2-afe.sh [--basic | --frequency-only]" >&2; exit 2 ;;
 esac
 (( $# <= 1 )) || { echo "Too many arguments" >&2; exit 2; }
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
