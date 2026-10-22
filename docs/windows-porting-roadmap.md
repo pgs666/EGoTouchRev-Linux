@@ -38,17 +38,20 @@
 路径额外的 A8 ready gate、power-on sorting 读回和后置 legacy AP/N-frame/raw 重放；
 Linux 充电状态仍由独立 work 应用。旧检查和 replay 只保留在 legacy 入口。
 测试直接编译上游八个原始函数体和 Init 的 master 调用片段，比较实际事务、延时和
-故障/重试结果。这不代表 Windows 整个 `Chip::Init()` 已经逐笔等价：前置 IC 探测/
+故障/重试结果。默认 AHB 原语另接入 `hx-ahb.c`，使用 Windows `0x12/0x13`，
+移除寄存器事务结束的反向 burst 切换，并对齐 interface-on 轮询与错误返回。
+AHB oracle 直接编译上游总线协议函数，对照实际命令/地址/payload/停止位置；
+native SPI 封包、重试与物理控制器仍在 oracle 边界之外。
+这不代表 Windows 整个 `Chip::Init()` 已经逐笔等价：前置 IC 探测/
 安全模式、native sense-on、GPIO 时序、IRQ/清帧及 Linux 充电集成仍有差异，验证边界
 见 [用户态运行说明](../userspace/README.md)。
 
 `c496521` 已经完成本机普通模块试运行及正式安装，运行模块与磁盘/DKMS 缓存一致。
 30 项 Release 测试、相关四项 sanitizer 及 basic AFE 检查通过；显式校准、清状态、
 IDLE 可确认。频点 1 在上一轮仍未观察到完成，本轮未重测；完整 AFE 测试的失败结果
-保留，不能把初始化事务对齐当作切频恢复的证明。下一轮继续核对 native AHB burst
-（Windows 基值 `0x12`，Linux
-`0x10` 且事务后反向切换）、reset 前 reload 清零、IC 探测额外 safe-mode 和 native
-sense-on/物理 reset，再做受控实机验证。寄存器层 oracle 不覆盖总线层差异，
+保留，不能把初始化事务对齐当作切频恢复的证明。当前代码已继续移植 AHB 协议，
+后续核对 reset 前 reload 清零、IC 探测额外 safe-mode 和 native sense-on/物理 reset，
+再做受控实机验证。寄存器级与总线命令级 oracle 都不覆盖物理 SPI/IOCTL 差异，
 不能仅凭帧流正常就宣布完整移植完成。
 
 ---

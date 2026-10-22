@@ -12,7 +12,9 @@
 #include "hx-afe.h"
 #include "hx-otp.h"
 #include "hx-raw-init.h"
-#ifndef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+#include "hx-ahb.h"
+#else
 #include "hx-panel-profile.h"
 #endif
 
@@ -171,7 +173,7 @@ static int himax_spi_write(struct himax_ts_data *ts, u8 *tx_buf, u32 len)
 	return 0;
 }
 
-static int himax_write(struct himax_ts_data *ts, u8 cmd, u8 *addr,
+static int himax_write(struct himax_ts_data *ts, u8 cmd, const u8 *addr,
 		       const u8 *data, u32 len)
 {
 	u8 *ptr = ts->xfer_buf;
@@ -195,6 +197,55 @@ static int himax_write(struct himax_ts_data *ts, u8 cmd, u8 *addr,
 	return himax_spi_write(ts, ts->xfer_buf, len);
 }
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+static int himax_ahb_write(void *context, u8 command, const u8 *address,
+			  const u8 *data, u32 length)
+{
+	struct himax_ts_data *ts = context;
+	u32 address_length = address ? HIMAX_REG_SZ : 0;
+
+	/* Check before addition/conversion, including a maximal u32 length. */
+	if (ts->xfer_buf_sz < HIMAX_BUS_W_HLEN + address_length ||
+	    length > ts->xfer_buf_sz - HIMAX_BUS_W_HLEN - address_length)
+		return -EMSGSIZE;
+	return himax_write(ts, command, address, data, length + address_length);
+}
+
+static int himax_ahb_read(void *context, u8 command, u8 *data, u32 length)
+{
+	return himax_spi_read(context, command, data, length);
+}
+
+static void himax_ahb_sleep(void *context, unsigned int milliseconds)
+{
+	usleep_range(milliseconds * 1000, milliseconds * 1000 + 100);
+}
+
+static struct hx_ahb_bus himax_ahb_bus(struct himax_ts_data *ts)
+{
+	return (struct hx_ahb_bus) {
+		.context = ts,
+		.write = himax_ahb_write,
+		.read = himax_ahb_read,
+		.sleep_ms = himax_ahb_sleep,
+	};
+}
+
+static int himax_mcu_register_read(struct himax_ts_data *ts, u32 addr, u8 *buf, u32 len)
+{
+	const struct hx_ahb_bus bus = himax_ahb_bus(ts);
+
+	return hx_ahb_register_read(&bus, addr, buf, len);
+}
+
+static int himax_mcu_register_write(struct himax_ts_data *ts, u32 addr,
+				   const u8 *buf, u32 len)
+{
+	const struct hx_ahb_bus bus = himax_ahb_bus(ts);
+
+	return hx_ahb_register_write(&bus, addr, buf, len);
+}
+#else
 /**
  * himax_mcu_set_burst_mode() - Set burst mode for MCU
  * @ts: Himax touch screen data
@@ -289,6 +340,7 @@ static int himax_mcu_register_write(struct himax_ts_data *ts, u32 addr, const u8
 	restore = himax_mcu_set_burst_mode(ts, !(len > HIMAX_REG_SZ));
 	return ret ? ret : restore;
 }
+#endif
 
 static int himax_otp_bus_read(void *context, u8 command, u8 *data, size_t length)
 {
@@ -498,6 +550,11 @@ int himax_process_blrecal_request(struct himax_ts_data *ts)
  */
 static int himax_mcu_interface_on(struct himax_ts_data *ts)
 {
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+	const struct hx_ahb_bus bus = himax_ahb_bus(ts);
+
+	return hx_ahb_interface_on(&bus);
+#else
 	int ret;
 	u8 buf[HIMAX_REG_SZ];
 	u8 buf2[HIMAX_REG_SZ];
@@ -533,6 +590,7 @@ err:
 	dev_err(ts->dev, "%s: failed!\n", __func__);
 
 	return -EIO;
+#endif
 }
 
 static void himax_pin_reset(struct himax_ts_data *ts)

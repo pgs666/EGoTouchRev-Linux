@@ -111,6 +111,21 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-otp-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME otp-protocol COMMAND himax-otp-test)
+    include(cmake/AhbReference.cmake)
+    himax_prepare_ahb_reference("${UPSTREAM}/EGoTouchService/Device/himax"
+        "${TSACORE_OVERLAY}/ahb-reference.cpp")
+    add_executable(himax-ahb-test ../tests/hx-ahb-test.c
+        ../touchscreen-hx83121a-dkms/hx-ahb.c
+        "${TSACORE_OVERLAY}/ahb-reference.cpp")
+    target_include_directories(himax-ahb-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_definitions(himax-ahb-test PRIVATE HX_AHB_UPSTREAM_REFERENCE=1)
+    target_compile_options(himax-ahb-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME ahb-protocol COMMAND himax-ahb-test)
+    add_test(NAME ahb-reference-integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/ahb-reference-test.py" "${CMAKE_COMMAND}"
+        "${UPSTREAM}/EGoTouchService/Device/himax"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AhbReference.cmake")
     include(cmake/AfeReference.cmake)
     himax_prepare_afe_reference(
         "${UPSTREAM}/EGoTouchService/Device/himax/HimaxProtocol.cpp"

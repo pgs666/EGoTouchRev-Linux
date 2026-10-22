@@ -85,16 +85,42 @@ HAL 读写、sense-on 和 Sleep 为共用 fake bus；对照每笔事务、延时
 引用实现仅链接到测试，不进入模块或 daemon。
 
 完整启动仍有差异：Linux 在前面做 IC 探测/进入 safe mode；native sense-on、GPIO
-时序、总线事务原语尚未纳入上述 oracle。Linux GPIO 保持原有 20/50 ms 复位等待，
+时序尚未纳入上述 oracle。Linux GPIO 保持原有 20/50 ms 复位等待，
 Windows `SetReset` IOCTL 内部时序未知，不能用无延时脉冲替代。Linux 的充电集成、
 清帧及 IRQ 接口也不同，slave/pen 按本项目范围保持关闭。不能据此声称完整
 `Chip::Init()`、物理 SPI 生命周期或手动切频已验收。
 
-下一层已确认的源码差异是 AHB burst：Windows 的 `0x0d` 基值为 `0x12`，Linux
-仍为 `0x10`；Linux 的寄存器事务结束还会切到相反的增址模式，Windows 则保持当前
-事务选择的模式。上述 oracle 在寄存器边界替换 HAL，因此无法覆盖这两项；
-应先对照真实总线原语和故障路径，再移植与实测，不能从 raw 帧有效推断两者等价，
-也不能直接认定它们导致手动切频未完成。
+### AHB 总线协议
+
+默认 V4L2 的寄存器读写和 interface-on 已接入共享
+[`hx-ahb.c`](../touchscreen-hx83121a-dkms/hx-ahb.c)，对应固定版本
+`HimaxProtocol.cpp` 和 `HimaxChipLifecycle.cpp`：
+
+- 每笔寄存器事务先写 `0x13=0x31`，再写 `0x0d=0x12`（长度 ≤4）或 `0x13`
+  （长度 >4）。使用四字节小端地址；写回调的 length 仅指 payload，地址另计四字节；
+- 读取经 `0x00` 选址、`0x0c=0` 选择读方向，再从 `0x08` 取数据。
+  长度 >256 在任何 I/O 前返回 `EINVAL`；写入容量由 native SPI 回调在加地址长度前
+  检查，超出返回 `EMSGSIZE`；
+- 成功和失败均保持当笔事务选择的 burst 模式，不再额外反向切换；
+  原始总线错误立即返回，不增加协议层重试或恢复事务；
+- interface-on 先 dummy-read `0x08`，再配置/读回 burst，最多十次，每次不匹配后
+  等 1 ms。按上游行为，十次传输成功但仍不匹配时继续启动；任一传输失败立即返回。
+  这不证明固件就绪，仍必须完成后续 IC ID/reload/raw producer 验证。
+
+旧 `HIMAX_V4L2=0` 保留 `0x10/0x11`、事务结束反向切换和严格 interface-on 失败策略。
+OTP 专用序列原本就使用独立的 `0x12/0x13` 原语，本轮未改动。
+
+[`AhbReference.cmake`](cmake/AhbReference.cmake) 在测试中直接编译未经修改的
+`burst_enable`、`ConfigureBurstForLength`、`register_read`、`register_write`
+和 `himax_mcu_interface_on`；四份来源文件（含寄存器常量与 ByteUtils）校验完整哈希。
+共用 fake bus 对照命令、地址、全部 payload、返回值、调用后缓冲区、延时与停止位置。
+覆盖四种地址、0～512 长度域、所有有效事务步骤的故障、十次 interface-on 边界、
+native 容量错误和最大 u32 长度。源码提取集成测试验证原函数未改、哈希漂移/缺失拒绝
+和无变化配置不改写产物。
+
+这个 oracle 的边界在 Windows `ReadBus/WriteBus/Sleep`：native SPI 封包、重试、
+控制器实际传输长度、GPIO、Windows THP IOCTL 内部时序仍需单独验证。
+不能由协议级对照或 raw 帧有效直接推断物理 SPI、完整生命周期、手动切频均已对齐。
 
 ### 边缘滑入的首报修正
 
