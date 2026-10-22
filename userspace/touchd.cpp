@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "native-frame.h"
-#include "recording.h"
+#include "capture-session.h"
+#include "afe-action.h"
 #include "TsaCoreSolver.h"
 #include "input.h"
 #include "v4l2-capture.h"
@@ -15,7 +16,6 @@
 #include <cmath>
 #include <csignal>
 #include <cstring>
-#include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -34,19 +34,6 @@ uint64_t NowNs() {
     return static_cast<uint64_t>(now.tv_sec) * 1000000000 + now.tv_nsec;
 }
 }  // namespace
-
-// Keep the public transport command ABI independent of upstream enum ordering.
-static hx_raw_action HardwareAction(Solvers::Tsa::AfeActionType action) {
-    using Action = Solvers::Tsa::AfeActionType;
-    switch (action) {
-    case Action::ClearStatus: return HX_RAW_CLEAR_STATUS;
-    case Action::ForceToFreqPoint: return HX_RAW_FORCE_FREQ;
-    case Action::ForceToScanRate: return HX_RAW_FORCE_RATE;
-    case Action::EnterIdle: return HX_RAW_ENTER_IDLE;
-    case Action::StartCalibration: return HX_RAW_CALIBRATE;
-    }
-    return HX_RAW_RESET;  // Unknown actions are rejected by the caller below.
-}
 
 int main(int argc, char** argv) {
     std::string device, project, recording, rotationFile;
@@ -70,7 +57,7 @@ int main(int argc, char** argv) {
         } else {
             std::cerr << "Usage: himax-touchd [--device /dev/videoN] [--project ID]\n"
                       << "                    [--rotation 0..3|90|180|270] [--rotation-file FILE]\n"
-                      << "                    [--observe [--record FILE.hxst]]\n"
+                      << "                    [--observe] [--record FILE.hxst]\n"
                       << "       himax-touchd [--device /dev/videoN] --info\n";
             return arg == "--help" ? 0 : 2;
         }
@@ -83,10 +70,6 @@ int main(int argc, char** argv) {
     if (infoOnly && (observe || !recording.empty() || !autoProject ||
                      fixedRotation || !rotationFile.empty())) {
         std::cerr << "--info cannot be combined with solver/capture options\n";
-        return 2;
-    }
-    if (!recording.empty() && !observe) {
-        std::cerr << "Recording currently requires --observe\n";
         return 2;
     }
     struct sigaction action {};
@@ -119,14 +102,31 @@ int main(int argc, char** argv) {
         std::cerr << input.Error() << '\n';
         return 1;
     }
-    std::ofstream output;
+    std::unique_ptr<himax::SessionRecorder> recorder;
+    std::unique_ptr<himax::SessionEvent> recordedFrame;
     if (!recording.empty()) {
-        output.open(recording, std::ios::binary | std::ios::trunc);
-        if (!output) {
-            std::cerr << "Cannot open recording\n";
+        recorder = std::make_unique<himax::SessionRecorder>(recording);
+        recordedFrame = std::make_unique<himax::SessionEvent>();
+        if (recorder->Error()) {
+            std::cerr << "Cannot create recording: " << std::strerror(recorder->Error()) << '\n';
             return 1;
         }
     }
+    // Early error returns must release input before joining the optional disk
+    // writer. A stalled filesystem must not leave the last contact held.
+    struct ReleaseOnExit {
+        himax::Input& input;
+        bool observe;
+        ~ReleaseOnExit() { if (!observe) input.Release(); }
+    } releaseOnExit{input, observe};
+    bool recordingFailed = false;
+    const auto recordEvent = [&](const himax::SessionEvent& event) {
+        if (recorder && !recorder->Submit(event) && !recordingFailed) {
+            recordingFailed = true;
+            std::cerr << "Recording incomplete; touch continues: "
+                      << std::strerror(recorder->Error()) << '\n';
+        }
+    };
     auto solver = std::make_unique<Solvers::Tsa::TsaCoreSolver>();
     himax::ScreenRotationProvider rotationProvider(rotationFile);
     rotationProvider.SetFixed(fixedRotation);
@@ -186,6 +186,9 @@ int main(int argc, char** argv) {
                       << " failed=" << resetRequests - resetSuccess << '\n';
         std::cerr << "screen_rotation=" << solverScreen.Rotation()
                   << " (-1 means no host orientation)\n";
+        if (recorder)
+            std::cerr << "recording_error=" << recorder->Error()
+                      << " dropped=" << recorder->Dropped() << '\n';
     };
     const auto pollRotation = [&](uint64_t now) {
         if (now < nextRotationPoll) return;
@@ -222,6 +225,12 @@ int main(int argc, char** argv) {
         }
         if (!observe && input.Active() && NowNs() - lastNs > 250000000) {
             if (!input.Release()) { exitCode = 1; break; }
+            if (recorder) {
+                himax::SessionEvent event;
+                event.kind = himax::SessionKind::Release;
+                event.hostTimeNs = NowNs();
+                recordEvent(event);
+            }
             std::cerr << "No fresh frames for 250 ms; released contacts\n";
         }
         if (!ret) continue;
@@ -233,7 +242,15 @@ int main(int argc, char** argv) {
         if (pending.revents & POLLPRI) {
             hx_raw_state state{};
             while (capture.Event(state)) {
-                if (stream.State(state, NowNs()) && (!state.running || state.epoch != epoch)) {
+                if (!stream.State(state, NowNs())) continue;
+                if (recorder) {
+                    himax::SessionEvent event;
+                    event.kind = himax::SessionKind::State;
+                    event.hostTimeNs = NowNs();
+                    event.state = state;
+                    recordEvent(event);
+                }
+                if (!state.running || state.epoch != epoch) {
                     if (!observe && !input.Release()) return 1;
                     solver->OnAfeStopped();
                     afeStarted = false;
@@ -277,6 +294,15 @@ int main(int argc, char** argv) {
                 return 1;
             }
             profileSelected = true;
+            if (recorder && !recordingHeaderWritten) {
+                himax::SessionEvent event;
+                event.kind = himax::SessionKind::Begin;
+                std::copy(project.begin(), project.end(), event.project.begin());
+                event.coordinateFlags = capture.Info().coordinate_flags;
+                event.observe = observe;
+                recordEvent(event);
+                recordingHeaderWritten = true;
+            }
             if (!observe && !input.Release()) return 1;
             solver->OnAfeStopped();
             if (packet->flags & HX_RAW_FRAME_SOS) solver->OnAfeSos();
@@ -287,6 +313,12 @@ int main(int argc, char** argv) {
             std::cerr << "AFE epoch=" << epoch << " project=" << project << '\n';
         }
         solver->SetChargerPlugged(packet->flags & HX_RAW_FRAME_CHARGER);
+        if (recorder) {
+            *recordedFrame = {};
+            recordedFrame->packet = *packet;
+            recordedFrame->hostTimeNs = now; // Exact time used by StreamState::Accept.
+            recordedFrame->rotation = solverScreen.Rotation();
+        }
         const auto error = himax::ToThpMaster(packet->payload, thp);
         bool requestReset = false;
         if (error != himax::FrameError::None) {
@@ -309,6 +341,12 @@ int main(int argc, char** argv) {
             if (!solver->IsAvailable()) {
                 std::cerr << "TSACore initialization failed\n";
                 return 1;
+            }
+            if (recorder) {
+                recordedFrame->report = report;
+                recordedFrame->status = solver->LastAfeStatus();
+                recordedFrame->ctrl = solver->LastCtrlFlags();
+                recordedFrame->digest = himax::ContactDigest(*frame);
             }
             requestReset = solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kSos;
             if (!requestReset && !observe && report) {
@@ -337,49 +375,52 @@ int main(int argc, char** argv) {
             }
             if (!requestReset) {
                 for (const auto& request : solver->PendingAfeActions()) {
-                    const auto actionType = HardwareAction(request.type);
+                    const auto actionType = himax::HardwareAction(request.type);
                     if (actionType == HX_RAW_RESET) {
                         std::cerr << "Unknown upstream AFE action\n";
                         return 1;
                     }
                     const bool ok = !observe && capture.Command(epoch, packet->sequence, actionType, request.param);
+                    const int commandError = ok ? 0 : errno;
+                    if (recorder)
+                        recordedFrame->actions[recordedFrame->actionCount++] = {
+                            actionType, request.param, observe ? -1 : commandError};
                     if (!observe) {
                         ++actionRequests[actionType];
                         actionSuccess[actionType] += ok;
                     }
                     solver->OnAfeActionExecuted(request, ok);
-                    if (!observe && !ok && errno != ESTALE && errno != EAGAIN)
-                        std::cerr << "AFE action failed: " << std::strerror(errno) << '\n';
+                    if (!observe && !ok && commandError != ESTALE && commandError != EAGAIN)
+                        std::cerr << "AFE action failed: " << std::strerror(commandError) << '\n';
                 }
             }
         }
         if (requestReset && !observe) {
             if (!input.Release()) return 1;
             ++resetRequests;
-            if (capture.Command(epoch, packet->sequence, HX_RAW_RESET, 0)) {
+            const bool ok = capture.Command(epoch, packet->sequence, HX_RAW_RESET, 0);
+            const int commandError = ok ? 0 : errno;
+            if (recorder)
+                recordedFrame->actions[recordedFrame->actionCount++] = {
+                    HX_RAW_RESET, 0, commandError};
+            if (ok) {
                 ++resetSuccess;
-            } else if (errno != ESTALE && errno != EAGAIN) {
-                std::cerr << "AFE reset request failed: " << std::strerror(errno) << '\n';
+            } else if (commandError != ESTALE && commandError != EAGAIN) {
+                std::cerr << "AFE reset request failed: " << std::strerror(commandError) << '\n';
                 exitCode = 1;
-                break;
             }
         }
-        if (output.is_open()) {
-            if (!recordingHeaderWritten) {
-                if (!himax::WriteHxstHeader(output, project, capture.Info().coordinate_flags)) {
-                    std::cerr << "Recording header write failed\n";
-                    return 1;
-                }
-                recordingHeaderWritten = true;
-            }
-            output.write(reinterpret_cast<const char*>(packet.get()), sizeof(*packet));
-            if (!output) {
-                std::cerr << "Recording write failed\n";
-                return 1;
-            }
-        }
+        if (recorder) recordEvent(*recordedFrame);
+        if (exitCode) break;
     }
-    if (!observe) input.Release();
+    if (!observe) {
+        if (!input.Release()) exitCode = 1;
+        else releaseOnExit.observe = true;
+    }
+    if (recorder && !recorder->Close(exitCode == 0)) {
+        std::cerr << "Recording incomplete: " << std::strerror(recorder->Error()) << '\n';
+        exitCode = 1;
+    }
     printStats();
     return exitCode;
 }

@@ -128,6 +128,7 @@ bool RecordingReader::Next(RecordedFrame& frame) {
         frame.length = sizeof(packet.payload);
         frame.timeNs = packet.timestamp_ns;
         frame.epoch = packet.epoch;
+        frame.sequence = packet.sequence;
         frame.sos = packet.flags & HX_RAW_FRAME_SOS;
         frame.charger = packet.flags & HX_RAW_FRAME_CHARGER;
     } else if (m_format == RecordingFormat::Trace) {

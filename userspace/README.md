@@ -148,22 +148,67 @@ bash scripts/test-v4l2-panel.sh
 
 它测试 DPMS 与屏灭冷启动，不会执行系统 suspend，也不能替代实际滑动验收。
 
-## 原始帧采集和回放
+## 正常触控采集和严格回放
 
-观察模式独占 V4L2 队列，不创建输入设备，也不执行算法请求的 AFE 命令。
-因此采集期间触屏不可操作，请使用键盘/鼠标；它不等价于正常服务下的 AFE 闭环。
+`--record FILE.hxst` 可在正常求解模式使用：触摸输入和 AFE 闭环继续工作，另一个
+后台线程保存 raw 和宿主状态。只有启用录制时才分配 128 个事件的 SPSC 队列并复制
+诊断数据；正常默认服务不分配队列、不创建写盘线程、不计算输出摘要。
+
+录制创建两个新文件，不覆盖已有文件：
+
+- `FILE.hxst`：原有 HXRC v1 面板头及未经修改的 HXST 帧；
+- `FILE.hxst.events`：HXSE v1 侧车，保存每帧使用的方向、求解结果摘要、AFE 请求及
+  执行退出状态、panel 生命周期和超时释放事件，以及完整性尾记录。
+
+输入线程不等待磁盘：队列满或后台写入失败会禁用录制并记录错误，触控继续。
+结束时检查尾记录和 raw/元数据数量；丢记录、截断、后台写失败、提前异常退出和
+文件配对错误不能被当作成功。退出时先释放输入，再等待后台线程排空。
+这些文件通过普通 write/flush 保存，没有逐帧 fsync，不保证突然断电后的持久性。
+
+先从服务启动时开始录制，才能重建相同的初始算法状态：
+
+```sh
+bash scripts/capture-v4l2-session.sh 10
+```
+
+脚本使用当前仓库构建产物，保存二进制哈希和源码版本，创建独立的 `deploy-logs/`
+目录。它在正常/失败/中断时恢复此前运行的常驻服务，随后严格回放；采集期间仍有
+触摸输入。需要手动运行时：
 
 ```sh
 sudo systemctl stop himax-touchd
-sudo timeout --signal=TERM 5 userspace/build/himax-touchd \
-    --observe --record /tmp/capture.hxst
+sudo timeout --signal=TERM 10 userspace/build/himax-touchd \
+    --record /tmp/capture.hxst
 sudo systemctl start himax-touchd
+userspace/build/himax-replay --session /tmp/capture.hxst > /tmp/contacts.csv
+```
+
+`timeout` 到时通常返回 124；采集是否完整以 daemon 的录制错误统计和
+`--session` 回放结果为准。上面的命令会重建 AFE/求解器，不能用来保留已经运行中的
+故障 baseline；当前还没有给常驻进程提供运行中开启录制或状态快照接口。
+录制从第一个实际面板身份确定的帧开始，因此屏灭期间启动也不会使用猜测的面板头。
+
+严格回放按录制方向、panel/epoch 事件和命令成功/失败结果驱动同一 solver，逐帧比较
+report、AFE status、ctrl、触点输出摘要和 AFE 请求；任何不一致都返回失败。
+成功时输出 `live_output_verified=1`。这证明该录制在当前二进制下可重现，
+不证明触控效果正确，也不证明已经与原厂 DLL 等价。摘要含浮点位表示，跨编译器/
+算法版本回放可能出现差异，应保留构建版本；新旧求解器间的差异需要单独分析。
+`--session` 禁止覆盖面板或方向；若有意改变算法条件，使用普通 raw 回放：
+
+```sh
 userspace/build/himax-replay --hxst /tmp/capture.hxst > /tmp/contacts.csv
-# 固定方向重放；旧 HXRC/HXST 没有记录动态方向：
+# 普通 raw 回放不使用 .events，不校验现场输出：
 userspace/build/himax-replay --rotation 3 --hxst /tmp/capture.hxst > /tmp/contacts.csv
 ```
 
-正常服务不写逐帧文件；`--record` 仅允许观察模式，避免同步磁盘 I/O 进入输入路径。
+观察模式仍独占 V4L2 队列，不创建输入设备，也不执行算法请求的 AFE 命令。
+因此观察期间触屏不可操作，不等价于正常服务下的 AFE 闭环。需要保持原有行为时使用：
+
+```sh
+sudo userspace/build/himax-touchd --observe --record /tmp/observe.hxst
+```
+
+观察录制也有侧车，未执行的命令结果为 `-1`，不能冒充固件已执行成功。
 只有原版 solver 请求上报时才写入 uinput；无触点的正常帧不会产生逐帧空快照。
 正常服务退出时输出 solver 平均/最大用时、IRQ 到 uinput 的 p95/p99 上界及最大用时，
 以及 IDLE/校准完成/切频完成状态帧数和各类 AFE 命令的请求、成功、失败次数。
@@ -189,7 +234,7 @@ userspace/build/himax-replay --allow-startup-invalid --hxst /tmp/capture.hxst
 ```
 
 HXST/旧 trace 使用记录的单调时间戳；裸帧按 120 Hz 重建，不能用于真实时延测量。
-新录制文件使用 32 字节 `HXRC` 容器头，保存 project ID 和固件坐标标志，后接
+raw 录制文件使用 32 字节 `HXRC` 容器头，保存 project ID 和固件坐标标志，后接
 5184 字节的 HXST 帧。回放自动使用记录的面板参数；显式传入不同 project ID 时，
 会输出覆盖提示。仍兼容旧的无容器头 ABI v1/v2 HXST；旧文件没有面板身份，
 回放其他面板时应显式指定 project ID。文件格式详见架构说明。
@@ -274,3 +319,17 @@ Android init/SELinux、内核配置和设备映射也需要独立集成。
 
 这些测试不覆盖复位帧内部各阶段的瞬时方向值。适配层在帧前后恢复方向，上游复位
 仍可能在当帧中途清零；不能声称已经证明该边界与 Windows 宿主完全相同。
+
+2026-10-23 正常闭环录制增量验证：
+
+- `make check` 通过；Release 与 ASan/UBSan 各 16 组测试通过，未启用 leak 检查；
+- 新测试包括持续合成触点、方向/charger/校准转换、命令失败和反馈、五次坏帧后的
+  reset/new epoch、SPSC 并发与容量上限、实际后台写失败、缺失/伪造尾记录、
+  raw/元数据配对错误、输出摘要篡改及 panel-off 后的非法旧帧；
+- 本机正常闭环录制 873 帧、观察模式 904 帧，均为 `recording_error=0 dropped=0`，
+  严格回放全部一致。正常模式清除了 calibration-done 并进入 IDLE；观察模式的
+  904 帧均保留 calibration-done，符合不执行命令的设计；
+- 最终采集脚本另外验证 548 帧，严格回放一致；SIGTERM 中断测试确认采集子进程
+  退出、原常驻服务恢复。记录位于 `deploy-logs/session-20261023-kj9dYT/`、
+  `deploy-logs/session-aIoHbNTN/` 和 `deploy-logs/session-CuChHiDX/`；
+- 实机样本没有实际触点，不能代替真实快速滑动、多指、握持或掌压亮屏验收。

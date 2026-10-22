@@ -8,6 +8,7 @@ include(CTest)
 include(GNUInstallDirs)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(SYSTEMD REQUIRED IMPORTED_TARGET libsystemd)
+find_package(Threads REQUIRED)
 
 set(UPSTREAM "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/EGoTouchRev")
 set(SOLVERS "${UPSTREAM}/EGoTouchService/Solvers")
@@ -28,7 +29,7 @@ endif()
 file(GLOB_RECURSE TSACORE_SOURCES CONFIGURE_DEPENDS "${TSACORE}/src/*.cpp")
 add_library(himax-tsacore STATIC ${TSACORE_SOURCES}
     "${TSACORE}/HimaxAfeAdapter.cpp" "${TSACORE}/TsaCoreSolver.cpp"
-    native-frame.cpp recording.cpp)
+    native-frame.cpp recording.cpp capture-session.cpp session-replay.cpp)
 target_include_directories(himax-tsacore
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${TSACORE}" "${SOLVERS}"
         "${UPSTREAM}/Common/include"
@@ -37,6 +38,7 @@ target_include_directories(himax-tsacore
 target_compile_options(himax-tsacore PRIVATE
     -fno-strict-aliasing -fwrapv -ffp-contract=off -ftrivial-auto-var-init=zero)
 target_compile_definitions(himax-tsacore PUBLIC EGOTOUCH_DIAG=0)
+target_link_libraries(himax-tsacore PUBLIC Threads::Threads)
 if(HIMAX_PROFILE)
     target_compile_definitions(himax-tsacore PRIVATE TSACORE_PROFILE)
 endif()
@@ -85,6 +87,11 @@ if(BUILD_TESTING)
     target_link_libraries(himax-recording-test PRIVATE himax-tsacore)
     target_compile_options(himax-recording-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME recording-validation COMMAND himax-recording-test $<TARGET_FILE:himax-replay>)
+    add_executable(himax-session-test tests/session-test.cpp)
+    target_link_libraries(himax-session-test PRIVATE himax-tsacore)
+    target_compile_options(himax-session-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME normal-session-recording COMMAND himax-session-test $<TARGET_FILE:himax-replay>)
+    set_tests_properties(normal-session-recording PROPERTIES TIMEOUT 30)
     add_executable(himax-otp-test ../tests/hx-otp-test.c
         ../touchscreen-hx83121a-dkms/hx-otp.c)
     target_include_directories(himax-otp-test PRIVATE

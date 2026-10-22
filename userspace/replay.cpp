@@ -3,6 +3,7 @@
 #include "recording.h"
 #include "TsaCoreSolver.h"
 #include "solver-screen.h"
+#include "session-replay.h"
 
 #include <array>
 #include <charconv>
@@ -14,10 +15,12 @@
 int main(int argc, char** argv) {
     himax::RecordingFormat format = himax::RecordingFormat::Native;
     bool startupGrace = false;
+    bool session = false;
     himax::SolverScreenState screen;
     while (argc > 1) {
         const std::string_view option(argv[1]);
         if (option == "--allow-startup-invalid") startupGrace = true;
+        else if (option == "--session") session = true;
         else if (option == "--trace") format = himax::RecordingFormat::Trace;
         else if (option == "--hxst") format = himax::RecordingFormat::Hxst;
         else if (option == "--rotation" && argc > 2) {
@@ -38,8 +41,17 @@ int main(int argc, char** argv) {
     if (argc < 2 || argc > 4) {
         std::cerr << "Usage: himax-replay [--allow-startup-invalid] [--rotation 0..3] [--trace|--hxst]\n"
                   << "                    FRAMES [PROJECT_ID] [RECORD_BYTES]\n"
+                  << "       himax-replay --session CAPTURE.hxst\n"
                   << "Input: concatenated 5132-byte native frames (or 5060 with RECORD_BYTES).\n";
         return 2;
+    }
+    if (session) {
+        if (argc != 2 || startupGrace || format != himax::RecordingFormat::Native ||
+            screen.Rotation() >= 0) {
+            std::cerr << "--session requires recorded identity, orientation and strict validation\n";
+            return 2;
+        }
+        return himax::ReplaySession(argv[1]);
     }
     size_t recordBytes = himax::kNativeTransportSize;
     if (argc == 4) {

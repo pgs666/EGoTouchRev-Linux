@@ -20,6 +20,7 @@ struct RecordedFrame {
     size_t length = 0;
     uint64_t timeNs = 0;
     uint64_t epoch = 0;
+    uint64_t sequence = 0;
     bool sos = false;
     bool charger = false;
     bool readOk = true;

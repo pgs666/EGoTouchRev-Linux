@@ -73,7 +73,7 @@ live daemon 要求 ABI v2，不与 ABI v1 模块混用。
 手写笔状态不会被用作传送显示方向的假通道，上游 submodule 无本地修改。
 四种初始方向及校准/IDLE/AFE epoch 的 host tests 检查实际 Core 状态；实际四方向
 边缘手势和握持手感仍须实机验收。原始 HXRC v1 不保存方向变化，固定方向回放可使用
-`himax-replay --rotation 0..3`，不能宣称已有动态旋转录制的逐帧等价。
+`himax-replay --rotation 0..3`；带 HXSE 侧车的新录制使用 `--session` 重放每帧实际方向。
 
 `--info` 使用只读 fd 查询 QUERYCAP/INFO，不分配 buffer、不启动 AFE、不申请
 队列所有权，可以在常驻服务运行时使用。本接口是项目私有的 V4L2 metadata 格式，
@@ -95,6 +95,44 @@ live daemon 要求 ABI v2，不与 ABI v1 模块混用。
 头在实际 AFE 身份确定后写出一次，随后是未经修改的 `hx_raw_frame`。
 回放优先使用记录的 project ID；显式覆盖会输出提示。仍可读取旧的无头 ABI v1/v2
 录制，旧文件应由操作者提供正确面板身份。容器头不改变 live HXST buffer 格式。
+
+### 正常 AFE 闭环录制
+
+`--record PATH` 在正常输入或观察模式均可使用，另建 `PATH.events`，不改变 HXRC/HXST
+格式。两文件以独占创建方式打开。录制初始化在输入循环之前完成；启用时分配 128
+个事件的 SPSC 队列，生产者只做有界复制/原子操作和 nonblocking eventfd 通知。
+后台线程写 raw 和侧车；队列满或写入失败后停止接受新证据，输入保持运行。
+退出先释放输入，再排空队列；异常退出、丢事件或缺少尾记录均不能通过严格回放。
+未启用录制时没有队列、写盘线程、raw 诊断复制或输出摘要计算。
+
+HXSE v1 为 ASCII、十进制整数、每行一条记录，解析限长 1023 字节：
+
+```text
+HXSE 1
+B PROJECT_ID coordinate_flags observe
+S host_ns epoch running
+R host_ns
+F index host_ns rotation report afe_status ctrl contact_digest action_count [action parameter result]...
+END frame_count dropped errno
+```
+
+`B` 只出现一次；身份尚未确定前可先出现 `S`。每个 `F` 对应 raw 中一个完整 HXST
+包（仅记录进入求解/原始帧校验路径的 accepted 帧），保留原包的 epoch、sequence 和
+IRQ 时间戳；被 transport 时序策略丢弃的旧帧不进入求解或录制。`S` 是主线程实际处理
+的有效生命周期事件；`R` 是无新帧 250 ms 的输入释放，不复位算法 mapper。
+`F` 的方向为 TSACore 的 `-1/0..3`；`-1` 表示宿主尚未获得方向。
+
+`action` 使用 `hx_raw_action` ABI，`parameter` 为原始参数，`result=0` 表示命令
+传输成功、正数为 Linux errno、`-1` 表示观察模式没有执行。后续 raw 状态仍是固件
+完成的证据。触点摘要为 FNV-1a 64：先送入触点数量，再按 mapper 顺序送入每点的
+id、x/y 的 IEEE float32 位、state、isReported、reportEvent、signalSum；各值均按
+32-bit little-endian 展开，不包含 padding/地址。
+
+`--session` 同时检查 raw 与侧车、面板/方向/生命周期、命令请求和执行反馈、逐帧
+report/status/ctrl/触点摘要。只有收到 `END`、两文件数量匹配、dropped/errno 为零且
+至少有一帧实际求解成功，才报告 `live_output_verified=1`。正常采集包含完整初始化
+历史；它不是既有进程的中途状态 checkpoint，也不能把跨编译器浮点差异当作同一输出。
+录制没有逐帧 fsync，完整性检查不承诺掉电持久性。
 
 ## 队列和时序
 
