@@ -185,8 +185,25 @@ case "$(systemctl is-enabled himax-touchd.service 2>/dev/null || true)" in
 			echo "Refusing to overwrite an existing runtime service unit" >&2
 			exit 1
 		}
+		# On this host mask --now left the running daemon's notifications
+		# rejected while its watchdog was still armed. Stop under the
+		# original unit definition, then block udev activation before
+		# changing hardware.
+		sudo systemctl stop himax-touchd.service
+		if (( old_service_active )); then
+			old_stop_result=$(systemctl show -p Result --value himax-touchd.service)
+			echo "previous_service_stop=$old_stop_result"
+			[[ "$old_stop_result" == success ]] || {
+				echo "Previous touch service did not stop cleanly" >&2
+				exit 1
+			}
+		fi
 		runtime_mask_added=1
-		sudo systemctl mask --runtime --now himax-touchd.service
+		sudo systemctl mask --runtime himax-touchd.service
+		if systemctl is-active --quiet himax-touchd.service; then
+			echo "Touch service unexpectedly active after stop/mask" >&2
+			exit 1
+		fi
 		;;
 esac
 sudo modprobe -r himax_spi
@@ -245,7 +262,9 @@ for ((i=0; i<trial_seconds; i++)); do
 	fi
 done
 awk '/^N: Name="Himax Capacitive TouchScreen"$/{n++} END{exit n != 1}' /proc/bus/input/devices
-sudo systemctl stop "$unit.service"
+if (( trial )); then
+	sudo systemctl stop "$unit.service"
+fi
 sudo journalctl -u "$unit.service" --no-pager > "$state_dir/solver.log"
 if (( trial )); then
 	echo "Checking hung solver watchdog"
@@ -319,6 +338,11 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger --subsystem-match=video4linux
 sudo udevadm settle --timeout=10
 sudo systemctl daemon-reload
+# The temporary solver keeps touch working through DKMS/dracut and file
+# installation. Hand off only now, while udev still cannot start a duplicate.
+sudo systemctl is-active --quiet "$unit.service"
+sudo systemctl stop "$unit.service"
+sudo journalctl -u "$unit.service" --no-pager > "$state_dir/solver.log"
 unmask_trial_service
 sudo systemctl enable --now himax-touchd.service
 sleep 2

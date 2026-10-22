@@ -154,6 +154,12 @@ systemctl status himax-touchd
 journalctl -u himax-touchd -b
 ```
 
+部署时先在原 unit 定义下停止常驻服务，再加 runtime mask，防止 udev 抢占临时
+采集。不要换回 `mask --now`：本机曾在替换运行中的 notify unit 后拒收其通知，
+导致旧服务被 watchdog 终止。正式安装通过短时验证后，会保留临时求解服务运行，
+直到 DKMS/dracut 与文件安装结束，再移交给常驻服务；交接前检查临时服务仍 active。
+临时试验仍按原流程停止求解服务，进行 watchdog/解绑检查，最后恢复之前的模块。
+
 脚本要求有现存、可恢复的未压缩模块；备份和日志保留在
 `deploy-logs/v4l2-时间戳/`。`--trial` 不替换启动时使用的模块或启用常驻服务，
 但会按需加载 uinput/videobuf2 依赖。
