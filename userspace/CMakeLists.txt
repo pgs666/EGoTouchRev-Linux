@@ -134,6 +134,11 @@ if(BUILD_TESTING)
     target_include_directories(himax-transport-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}"
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-transport-test PRIVATE -Wall -Wextra -Werror)
+    # Also opt-in: sends real calibration/frequency/IDLE commands, records raw
+    # suffix transitions and restores the daemon via scripts/test-v4l2-afe.sh.
+    add_executable(himax-afe-hardware-test tests/afe-hardware-test.cpp v4l2-capture.cpp)
+    target_link_libraries(himax-afe-hardware-test PRIVATE himax-tsacore)
+    target_compile_options(himax-afe-hardware-test PRIVATE -Wall -Wextra -Werror)
     add_executable(himax-rotation-test tests/rotation-test.cpp screen-rotation.cpp)
     target_include_directories(himax-rotation-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
     target_compile_options(himax-rotation-test PRIVATE -Wall -Wextra -Werror)

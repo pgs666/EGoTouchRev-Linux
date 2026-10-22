@@ -112,6 +112,20 @@ journalctl -u himax-touchd -b
 安装后可另跑 `bash scripts/test-v4l2-transport.sh`，用真实 ioctl 验证队列 owner、
 非法参数、过期 epoch、跨 AFE 重建的一秒 reset 限频，以及 STREAMOFF 后拒绝命令。
 测试会暂停服务并执行两次硬件 reset，退出后恢复原服务状态；它不进入普通 CTest。
+固件完成握手另用以下 opt-in 测试；测试期间不要触摸屏幕，发现固件 finger 状态会
+中止。测试会重建 AFE、显式校准、尝试两个频点并进入 IDLE，退出时恢复原常驻服务：
+
+```sh
+bash scripts/test-v4l2-afe.sh          # 全套；当前设备的频点切换检查尚不通过，见文末
+bash scripts/test-v4l2-afe.sh --basic  # 只检查校准、清状态、IDLE；明确跳过跳频，不算全套通过
+```
+
+原始 HXRC/HXST、各命令的 epoch/sequence 和观察到的 suffix 状态、内核及服务日志
+保留在 `deploy-logs/afe-*/`。只在命令之后采集到的帧确认状态，不能用队列中的旧帧
+充当完成回执；读回成功与固件完成分别记录。扫描率命令目前只能验证传输，adapter
+固定报告 120 Hz，不应据此声称验证了真实扫描率。该录制不是同步求解 session，
+不宣称严格输出等价；失败录制仍保留供离线分析。
+
 系统 PM 的状态检查有 host 回归测试，但屏幕 DPMS 测试不等于真实系统休眠验收。
 启动校准后可能有短暂无效原始帧；安装检查明确记录并最多容忍每个 epoch 的前四个
 无效帧。一旦出现首个有效帧，后续任何坏帧仍使安装检查失败；全坏、连续五个启动
@@ -531,3 +545,27 @@ Android 仍未迁移或部署此用户态架构。
 
 这组测试未覆盖真实 SPI 事务故障注入、所有动作的固件完成握手、物理充电切换或
 真实系统 suspend/resume。算法和参数未改，Android 未部署。
+
+同日真实固件完成握手补充（独立于上述 25 项 host tests）：
+
+- `scripts/test-v4l2-afe.sh --basic` 通过，证据在 `deploy-logs/afe-7FIbU1vL/`：
+  先观察 24 个无手指帧；`ClearStatus(8)` 后 `word[3]: 0xbb → 0`，
+  `StartCalibration(0)` 后 `0 → 0xbb`，再清除后回到 0。`EnterIdle(0)` 后约
+  3.06 秒收到 `word[0]=1`。38 帧原始录制全部校验通过；扫描率仅计传输验证；
+- 完整测试两次在跳频步骤失败，原始证据分别为 `deploy-logs/afe-b1gkGwrJ/`、
+  `deploy-logs/afe-qcq3EloU/`。两次都在 sequence 38 成功传输 `ForceToFreqPoint(1)`，
+  到 sequence 638 仍为 `word[10]=0, word[2]=0`；各 638 帧均通过 checksum。
+  不是 SPI 读帧停滞，也不能把 ioctl 成功算成频点 1 生效；
+- 当前上游 `TsaCoreSolver::InitCore()` 不填写 `freqHopMode`，默认值为 0；
+  `Afe::GetNextScanFreqIndex()` 只有模式 1 才请求手动跳频。Linux 保留该默认值，
+  没有因此启用新的手指跳频策略。原厂反编译 `thp_afe_force_to_freq_point`
+  也使用 `0x0c, idx`，且从 suffix word10 选频率表；命令未见完成的原因仍待定位，
+  可能涉及初始化/固件模式，但目前没有证据足以据此修改生产寄存器或 suffix 映射；
+- `scripts/test-v4l2-transport.sh` 在新模块上通过，跨 epoch 的第二次 reset 于
+  381 ms 被正确拒绝；记录在 `deploy-logs/transport-RTZkp9sV/`；
+- 所有实机检查退出后都恢复常驻服务。完整测试仍如实返回非零；`--basic` 是用于
+  单独检查其余已完成握手的选择，不表示已完成全部 AFE 验收。
+
+后续应优先定位“命令被接受但频点/完成位不变”：核对当前固件支持与原厂自动/手动
+跳频模式、初始化前后寄存器状态，拿同样命令序列的 Windows raw 作对照；不能仅凭
+上游函数存在就宣称已在两端验证，也不应盲目向默认路径追加关闭自动跳频的命令。
