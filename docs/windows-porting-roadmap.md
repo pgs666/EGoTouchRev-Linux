@@ -46,10 +46,11 @@ native SPI 封包、重试与物理控制器仍在 oracle 边界之外。
 安全模式、native sense-on、GPIO 时序、IRQ/清帧及 Linux 充电集成仍有差异，验证边界
 见 [用户态运行说明](../userspace/README.md)。
 
-`c496521` 已经完成本机普通模块试运行及正式安装，运行模块与磁盘/DKMS 缓存一致。
-30 项 Release 测试、相关四项 sanitizer 及 basic AFE 检查通过；显式校准、清状态、
-IDLE 可确认。频点 1 在上一轮仍未观察到完成，本轮未重测；完整 AFE 测试的失败结果
-保留，不能把初始化事务对齐当作切频恢复的证明。当前代码已继续移植 AHB 协议，
+`33b01f5` 已经完成本机普通模块试运行及正式安装，运行模块与磁盘/DKMS 缓存一致。
+32 项 Release 测试、AHB 相关两项 sanitizer、三种模块构建及 basic AFE 检查通过；
+显式校准、清状态、IDLE 可确认。带诊断模块 full AFE 重测中频点 1 仍未观察到完成，
+五秒后 sequence 638 仍为 slot=0/done=0，测试返回 1 并恢复旧模块。保留失败结果，
+不能把 AHB/初始化事务对齐当作切频恢复的证明。
 后续核对 reset 前 reload 清零、IC 探测额外 safe-mode 和 native sense-on/物理 reset，
 再做受控实机验证。寄存器级与总线命令级 oracle 都不覆盖物理 SPI/IOCTL 差异，
 不能仅凭帧流正常就宣布完整移植完成。

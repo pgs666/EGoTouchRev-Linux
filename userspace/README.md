@@ -861,3 +861,36 @@ raw 类型选择的验证/重试，以及后置 AP/USB/sorting/N-frame 重放与
 这些实机检查无真实触点，不能据此宣称手势、掌压亮屏、真实系统睡眠或长期触控性能
 已经验收；Android 未修改。接下来先对照 AHB 原语的 `0x12`/`0x10` 与增址模式差异，
 再移植 initial reset/IC detect/sense-on 的剩余行为。
+
+2026-10-23 AHB 协议移植（`33b01f5`）：
+
+- 默认寄存器事务接入共享 `hx-ahb.c`，对齐 `0x12/0x13` burst、无反向切换、
+  256 字节读限制和 interface-on 的十次轮询语义；legacy 与 OTP 专用序列保持不变。
+  `make check`（checkpatch、全部 host、普通模块、32 项 Release CTest）通过；
+  AHB 协议及源码提取集成两项 ASan/UBSan 通过；legacy、邮箱诊断 V4L2 和普通
+  V4L2 三种模块配置均编译成功。未重新执行完整 32 项 sanitizer；
+- 带邮箱诊断的 full AFE 试载 `deploy-logs/v4l2-20261023-053704/`：smoke
+  517 帧，首个全零、其后 516 帧有效；校准、清状态与 ack 均成功。切频 1 在
+  sequence 38 传输成功，五秒后 sequence 638 仍为 freq_slot=0 / freq_done=0，
+  测试返回 1 并恢复旧模块。638 个 AFE raw 帧全部校验通过。此次协议对齐未解决
+  手动切频未完成的问题，也没有足够证据将其归为 Linux 独有故障；
+- 普通模块试载 `deploy-logs/v4l2-20261023-053804/`：514 个 smoke 帧，首个全零
+  由既有启动容错接纳，其后 513 帧有效，stale/dropped/recording_error=0。
+  solver 至停止共 873 帧、bad/stale=0、touch_reports=0；watchdog 与持有 MMAP
+  时解绑设备检查通过，结束恢复旧模块。
+- 正式安装普通模块 `deploy-logs/v4l2-20261023-053908/`：517 个 smoke 帧，首个
+  全零、后续 516 帧有效，stale/dropped/recording_error=0；临时 solver 在
+  DKMS/dracut 期间保持运行，至交接共 913 帧、bad/stale=0、touch_reports=0。
+  仓库产物、磁盘和 DKMS 缓存 SHA-256 均为
+  `55514d534aac55dd376274d9e9623cd5b42874ef2da95983c0cf3d1d2842adb7`，
+  运行 build ID 与磁盘一致：`cb0207f211b27fa3308407f625dc886aff9f6389`；
+- 安装后 ordinary basic AFE 检查 `deploy-logs/afe-RIWk28Qf/`：校准、完成标志
+  清除/ack、IDLE suffix 均确认，39 个 raw 帧全部有效、startup_invalid=0。
+  IDLE 此次耗时约 3057 ms；扫描率仍仅有传输证据，不能推断性能提升；
+- 普通模块不含邮箱诊断参数；daemon 二进制和边缘补偿算法没有变化。常驻服务与
+  方向桥接均恢复运行。所有上述窗口无真实触点，不覆盖实机边缘/多指/睡眠手势、
+  掌压亮屏或长期负载验收，Android 未修改。
+
+下一阶段核对 initial reset 前的 reload 清零、IC detect 的额外安全模式和 native
+sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未启用的功能不能自行打开，
+手动切频仍需 Windows 同命令实机对照或新的固件状态证据。
