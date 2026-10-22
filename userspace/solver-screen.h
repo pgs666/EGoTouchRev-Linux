@@ -2,31 +2,24 @@
 #pragma once
 
 #include "TsaCoreSolver.h"
+#include "host-screen.h"
 
 namespace himax {
 
 // The screen belongs to the Linux host, not the optional pen channel.
-// Use the public Core API without modifying the pinned upstream submodule.
+// The checked upstream integration applies it after initialization and inside
+// reset, before the same frame's direction-dependent touch/grip processing.
 class SolverScreenState {
 public:
     void SetRotation(int rotation) noexcept { m_rotation = rotation; }
     int Rotation() const noexcept { return m_rotation; }
 
     bool Process(Solvers::Tsa::TsaCoreSolver& solver, Solvers::HeatmapFrame& frame, uint64_t timeMs) const {
-        Apply(solver);
-        const bool report = solver.Process(frame, timeMs);
-        // Upstream MsReset -> Sys::Init resets screenRotation to zero. Restore
-        // host state after reset frames as well as before ordinary frames.
-        // No input flush, mapper reset, baseline reset or AFE restart here.
-        Apply(solver);
-        return report;
+        const ScopedScreenRotation rotation(m_rotation);
+        return solver.Process(frame, timeMs);
     }
 
 private:
-    void Apply(const Solvers::Tsa::TsaCoreSolver& solver) const {
-        if (m_rotation >= 0 && solver.IsAvailable())
-            Solvers::Tsa::Core::SetScreenRotateState(m_rotation);
-    }
     int m_rotation = -1;
 };
 

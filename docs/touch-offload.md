@@ -26,6 +26,11 @@ AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、系统 PM
 不把 C++ 浮点和进程级全局状态搬进内核。手写笔采集未启用。
 这里的“原版”是上游 EGoTouchRev v1.4.0 的 C++ 重写实现，不能据此声称直接运行
 华为原厂 DLL，或已经通过零售驱动的逐帧等价验证。
+Linux 有两处明确的宿主适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys.cpp` 的副本，
+分别在 `ApplyPenSession()` 后和 `screenRotation = 0` 后应用宿主方向。
+[`PrepareUpstream.cmake`](../userspace/cmake/PrepareUpstream.cmake) 校验两份原始源文件
+的完整 SHA-256；源文件变化就停止配置并要求审查。submodule 本身不被修改，
+其余算法源文件、接口布局和参数表不变，不能将生成副本误认为没有宿主适配的原文件。
 
 ## V4L2 ABI v2
 
@@ -69,11 +74,18 @@ live daemon 要求 ABI v2，不与 ABI v1 模块混用。
 桥接每秒重发，覆盖主服务重启；无新来源时保留最近方向，首次无来源时使用上游默认值。
 
 方向变化不重置 AFE/control/mapper/baseline，不强制触点抬起，也不重复变换上报坐标。
-适配层在 `Process` 前后设置 Core 的宿主方向，因为上游 `MsReset -> Sys::Init` 会把
-`screenRotation` 清回 0；复位帧的算法仍保持上游的复位处理，之后的普通帧使用宿主方向。
-手写笔状态不会被用作传送显示方向的假通道，上游 submodule 无本地修改。
-四种初始方向及校准/IDLE/AFE epoch 的 host tests 检查实际 Core 状态；实际四方向
-边缘手势和握持手感仍须实机验收。原始 HXRC v1 不保存方向变化，固定方向回放可使用
+`SolverScreenState::Process()` 建立仅限当前线程、当前求解调用的方向作用域；
+求解器初始化及笔默认状态应用后，通过上述宿主入口设置实际方向。`MsReset` 在当帧内
+继续执行检测与握持流程，因此 `Sys::Init` 清零方向时就立即应用宿主值，不能等
+`Process` 返回才补救。没有方向来源（`-1`）时两处入口均不覆盖上游默认行为。
+线程局部状态不在不同线程、嵌套作用域或后续无方向的会话间泄漏，不增加等待或 I/O。
+手写笔状态不会被用作传送显示方向的假通道。
+
+四种初始方向及校准/IDLE/AFE epoch 的 host tests 检查实际 Core 状态；
+另直接调用生产的 `Sys::Init`、`MsReset` 和 `GripFilter::RegionProcess`，确认
+复位内部的方向和随后生成的握持区域与显式宿主方向一致。构建测试检查上游漂移/
+缺失文件被拒绝、submodule 源文件未修改、无变化配置不会强制重编。
+实际四方向边缘手势和握持手感仍须实机验收。原始 HXRC v1 不保存方向变化，固定方向回放可使用
 `himax-replay --rotation 0..3`；带 HXSE 侧车的新录制使用 `--session` 重放每帧实际方向。
 
 `--info` 使用只读 fd 查询 QUERYCAP/INFO，不分配 buffer、不启动 AFE、不申请

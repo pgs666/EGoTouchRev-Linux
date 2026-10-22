@@ -3,14 +3,18 @@
 #include "screen-rotation.h"
 #include "solver-screen.h"
 #include "App/Buffer.h"
+#include "App/Sys.h"
+#include "App/Tsa.h"
 #include "App/TsaBuffer.h"
 #include "App/TsaStatic.h"
+#include "Rejection/GripFilter/GripFilter.h"
 
 #include <algorithm>
 #include <array>
 #include <cstdlib>
 #include <iostream>
 #include <memory>
+#include <thread>
 
 static void Check(bool pass, const char* message) {
     if (!pass) {
@@ -108,5 +112,53 @@ int main(int argc, char** argv) {
         }
     }
     Check(contactId >= 0 && moves >= 100, "real solver reports sustained synthetic finger");
+
+    // Check the actual reset functions before Process can return and a wrapper
+    // could hide an incorrect direction. Build the real grip map immediately.
+    for (int rotation = 0; rotation < 4; ++rotation) {
+        const himax::ScopedScreenRotation scope(rotation);
+        Solvers::Tsa::Core::Sys::Init();
+        Check(Solvers::Tsa::Core::Static().screenRotation == rotation,
+              "Sys::Init applies the host direction internally");
+        Solvers::Tsa::Core::Tsa::MsReset();
+        Check(Solvers::Tsa::Core::Static().screenRotation == rotation,
+              "MsReset preserves host direction before any later frame processing");
+        Solvers::Tsa::Core::GripFilter::RegionProcess();
+        std::array<uint8_t, Frame::kMatrixCells> resetRegion{};
+        std::copy_n(Solvers::Tsa::Core::Buffers().gripRegion, resetRegion.size(), resetRegion.begin());
+        Solvers::Tsa::Core::SetScreenRotateState(0);
+        Solvers::Tsa::Core::GripFilter::RegionProcess();
+        if (rotation != 0)
+            Check(!std::equal(resetRegion.begin(), resetRegion.end(),
+                              Solvers::Tsa::Core::Buffers().gripRegion),
+                  "nonzero orientation produces a genuinely different grip region");
+        Solvers::Tsa::Core::SetScreenRotateState(rotation);
+        Solvers::Tsa::Core::GripFilter::RegionProcess();
+        Check(std::equal(resetRegion.begin(), resetRegion.end(),
+                         Solvers::Tsa::Core::Buffers().gripRegion),
+              "reset-frame grip map matches explicit host direction");
+    }
+    {
+        const himax::ScopedScreenRotation outer(3);
+        {
+            const himax::ScopedScreenRotation unknown(-1);
+            Solvers::Tsa::Core::Sys::Init();
+            Check(Solvers::Tsa::Core::Static().screenRotation == 0,
+                  "no host direction leaves upstream reset default intact");
+        }
+        Solvers::Tsa::Core::Sys::Init();
+        Check(Solvers::Tsa::Core::Static().screenRotation == 3, "nested scope restores override");
+        Solvers::Tsa::Core::SetScreenRotateState(0);
+        std::thread other([] { himax::ApplyHostScreenRotation(); });
+        other.join();
+        Check(Solvers::Tsa::Core::Static().screenRotation == 0,
+              "another thread never inherits the solver-thread override");
+        himax::ApplyHostScreenRotation();
+        Check(Solvers::Tsa::Core::Static().screenRotation == 3,
+              "owning thread retains its override");
+    }
+    Solvers::Tsa::Core::Sys::Init();
+    Check(Solvers::Tsa::Core::Static().screenRotation == 0,
+          "host override cannot leak into a later unscoped solver session");
     std::cout << "solver screen state regression passed\n";
 }

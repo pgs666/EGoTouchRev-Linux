@@ -27,8 +27,13 @@ endif()
 # Compile every active upstream module, without the Windows service, IPC or UI.
 # Keep the upstream arithmetic contract; in particular, do not fuse FP operations.
 file(GLOB_RECURSE TSACORE_SOURCES CONFIGURE_DEPENDS "${TSACORE}/src/*.cpp")
+include(cmake/PrepareUpstream.cmake)
+set(TSACORE_OVERLAY "${CMAKE_CURRENT_BINARY_DIR}/upstream-overlay")
+himax_prepare_upstream("${TSACORE}" "${TSACORE_OVERLAY}")
+list(REMOVE_ITEM TSACORE_SOURCES "${TSACORE}/src/App/Sys.cpp")
 add_library(himax-tsacore STATIC ${TSACORE_SOURCES}
-    "${TSACORE}/HimaxAfeAdapter.cpp" "${TSACORE}/TsaCoreSolver.cpp"
+    "${TSACORE}/HimaxAfeAdapter.cpp" "${TSACORE_OVERLAY}/TsaCoreSolver.cpp"
+    "${TSACORE_OVERLAY}/src/App/Sys.cpp" host-screen.cpp
     native-frame.cpp recording.cpp capture-session.cpp session-replay.cpp)
 target_include_directories(himax-tsacore
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${TSACORE}" "${SOLVERS}"
@@ -122,6 +127,10 @@ if(BUILD_TESTING)
     find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME desktop-screen-bridge COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/screen-bridge-test.py")
+    add_test(NAME upstream-host-integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/upstream-overlay-test.py"
+        "${CMAKE_COMMAND}" "${TSACORE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/PrepareUpstream.cmake")
     add_executable(himax-solver-screen-test tests/solver-screen-test.cpp screen-rotation.cpp)
     target_include_directories(himax-solver-screen-test PRIVATE "${TSACORE}/src")
     target_link_libraries(himax-solver-screen-test PRIVATE himax-tsacore PkgConfig::SYSTEMD)

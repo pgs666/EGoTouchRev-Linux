@@ -14,6 +14,7 @@
 - panel suspend/resume 与完整硬件恢复；
 - V4L2 metadata/HXST 有界采集队列、epoch/单调时间戳和受限 AFE 命令；
 - 用户态直接编译上游 v1.4.0 的完整已启用 TSACore、adapter、面板参数和输出映射；
+- 独立桌面方向桥接，以及两处经过源文件哈希检查的初始化/复位方向适配；
 - uinput 唯一输入设备、systemd watchdog、HXST 录制与旧 trace 回放；
 - 独立 legacy 构建保留原内核算法和诊断 ring，供开发恢复；
 - 不依赖硬件的算法、输入生命周期及帧协议回归测试。
