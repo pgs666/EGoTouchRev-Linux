@@ -3,8 +3,10 @@
 
 #ifdef __KERNEL__
 #include <linux/errno.h>
+#include <linux/kernel.h>
 #else
 #include <errno.h>
+#define ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 #endif
 
 #define HX_RAW_OUT		0x100072ecU
@@ -14,6 +16,9 @@
 #define HX_FW_STATUS		0x900000a8U
 #define HX_RAW_PASSWORD		0x10000000U
 #define HX_FLASH_RELOAD		0x10007f00U
+#define HX_FW_DEBUG		0x10007f40U
+#define HX_DD_STATUS		0x900000e8U
+#define HX_RESET_EVENT		0x900000e4U
 
 static int write_u32(const struct hx_raw_init_bus *bus, u32 address, u32 value)
 {
@@ -89,6 +94,91 @@ int hx_raw_prepare_scan(const struct hx_raw_init_bus *bus,
 		return ret;
 	*step = HX_RAW_INIT_NFRAME_MODE;
 	ret = write_verify_low16(bus, HX_NFRAME, 0x7f0c0001);
+	if (!ret)
+		*step = HX_RAW_INIT_COMPLETE;
+	return ret;
+}
+
+static void read_fw_status(const struct hx_raw_init_bus *bus)
+{
+	static const u32 registers[] = {
+		HX_FW_DEBUG, HX_FW_STATUS, HX_DD_STATUS, HX_RESET_EVENT,
+	};
+	unsigned int i;
+	u32 value;
+
+	/* Windows ignores this helper's result, but it stops reading at the
+	 * first bus error. These reads occur only while reload is incomplete.
+	 */
+	for (i = 0; i < ARRAY_SIZE(registers); i++)
+		if (read_u32(bus, registers[i], &value))
+			return;
+}
+
+int hx_raw_start_scan(const struct hx_raw_init_bus *bus,
+		      enum hx_raw_init_step *step)
+{
+	unsigned int i;
+	u32 value;
+	int ret;
+
+	if (!bus || !step || !bus->write || !bus->read ||
+	    !bus->sense_on || !bus->sleep_ms)
+		return -EINVAL;
+	ret = hx_raw_prepare_scan(bus, step);
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_RAW_CLEAR;
+	ret = write_u32(bus, HX_RAW_OUT, 0);
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_SORTING_CLEAR;
+	ret = write_u32(bus, HX_SORTING_MODE, 0);
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_NFRAME;
+	ret = write_u32(bus, HX_NFRAME, 1);
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_RELOAD_CLEAR;
+	ret = write_u32(bus, HX_RELOAD_DONE, 0);
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_SENSE_ON;
+	ret = bus->sense_on(bus->context);
+	if (ret)
+		return ret;
+
+	/* The full reload word is the active Windows readiness gate. A8 is
+	 * debug information, not an additional prerequisite for raw selection.
+	 */
+	*step = HX_RAW_INIT_RELOAD_DONE;
+	for (i = 0; i < 30; i++) {
+		ret = read_u32(bus, HX_RELOAD_DONE, &value);
+		if (ret)
+			return ret;
+		if (value == 0x72c0)
+			break;
+		read_fw_status(bus);
+		bus->sleep_ms(bus->context, 11);
+	}
+	if (i == 30)
+		return -ETIMEDOUT;
+
+	*step = HX_RAW_INIT_RAW_SELECT;
+	/* Unlike preparation's unlock/sorting loops, switch_data_type returns
+	 * the LAST failure after 50 attempts, including a transport failure.
+	 */
+	for (i = 0; i < 50; i++) {
+		ret = write_verify_low16(bus, HX_RAW_OUT, 0xf6);
+		if (!ret)
+			break;
+	}
+	if (ret)
+		return ret;
+	*step = HX_RAW_INIT_PASSWORD;
+	/* The producer consumes this word; equality readback is not valid. */
+	ret = write_u32(bus, HX_RAW_PASSWORD, 0x5aa5);
 	if (!ret)
 		*step = HX_RAW_INIT_COMPLETE;
 	return ret;

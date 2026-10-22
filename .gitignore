@@ -22,3 +22,4 @@ Module.symvers
 modules.order
 /tests/hx-raw-init-test
 /tests/hx-raw-prepare-test
+/tests/hx-raw-start-test

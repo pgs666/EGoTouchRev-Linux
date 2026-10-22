@@ -148,6 +148,14 @@ if(BUILD_TESTING)
     target_compile_definitions(himax-raw-prepare-test PRIVATE HX_RAW_INIT_UPSTREAM_REFERENCE=1)
     target_compile_options(himax-raw-prepare-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME raw-scan-preparation COMMAND himax-raw-prepare-test)
+    add_executable(himax-raw-start-test ../tests/hx-raw-start-test.c
+        ../touchscreen-hx83121a-dkms/hx-raw-init.c
+        "${TSACORE_OVERLAY}/raw-prepare-reference.cpp")
+    target_include_directories(himax-raw-start-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_definitions(himax-raw-start-test PRIVATE HX_RAW_INIT_UPSTREAM_REFERENCE=1)
+    target_compile_options(himax-raw-start-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME raw-master-startup COMMAND himax-raw-start-test)
     add_test(NAME raw-preparation-reference-integration COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/raw-prepare-reference-test.py"
         "${CMAKE_COMMAND}" "${UPSTREAM}/EGoTouchService/Device/himax"

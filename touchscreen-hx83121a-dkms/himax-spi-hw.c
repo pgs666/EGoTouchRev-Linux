@@ -702,7 +702,12 @@ static int himax_sense_on(struct himax_ts_data *ts, bool sw_reset)
 	ret = himax_mcu_register_write(ts, HIMAX_REG_ADDR_CTRL_FW, re_init.byte, 4);
 	if (ret < 0)
 		return ret;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+	/* Active upstream hx_sense_on waits 11 ms before the reset pair. */
+	usleep_range(11000, 12000);
+#else
 	usleep_range(10000, 11000);
+#endif
 	if (!sw_reset) {
 		himax_mcu_ic_reset(ts, false);
 	} else {
@@ -873,18 +878,9 @@ int himax_mcu_power_on_init(struct himax_ts_data *ts)
 	int ret;
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
-	/* The active Windows Init calls inspection unlock and BOTH N-frame
-	 * writes before power_on_init rewrites N-frame and resets the MCU.
-	 * Preserve these transactions instead of assuming final-value equality
-	 * makes them redundant. Legacy retains its existing setup entry point.
-	 */
-	ret = hx_raw_prepare_scan(&bus, &step);
-	if (ret)
-		goto report;
-#endif
+	ret = hx_raw_start_scan(&bus, &step);
+#else
 	ret = hx_raw_power_on(&bus, &step);
-#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
-report:
 #endif
 	if (ret)
 		dev_err(ts->dev, "raw power-on %s failed: %d\n",

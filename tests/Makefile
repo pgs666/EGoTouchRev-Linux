@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -Wall -Wextra -Werror
 
 .PHONY: all clean test
 
-all: hx-algo-test hx-otp-test hx-raw-policy-test hx-afe-test hx-raw-init-test hx-raw-prepare-test
+all: hx-algo-test hx-otp-test hx-raw-policy-test hx-afe-test hx-raw-init-test hx-raw-prepare-test hx-raw-start-test
 
 ALGO_DIR := ../touchscreen-hx83121a-dkms
 ALGO_SOURCES := $(ALGO_DIR)/hx-algo.c $(ALGO_DIR)/hx-algo-preprocess.c \
@@ -49,6 +49,9 @@ hx-raw-init-test: hx-raw-init-test.c $(ALGO_DIR)/hx-raw-init.c $(ALGO_DIR)/hx-ra
 hx-raw-prepare-test: hx-raw-prepare-test.c $(ALGO_DIR)/hx-raw-init.c $(ALGO_DIR)/hx-raw-init.h
 	$(CC) $(CFLAGS) -I$(ALGO_DIR) $(ALGO_DIR)/hx-raw-init.c hx-raw-prepare-test.c -o $@
 
+hx-raw-start-test: hx-raw-start-test.c $(ALGO_DIR)/hx-raw-init.c $(ALGO_DIR)/hx-raw-init.h
+	$(CC) $(CFLAGS) -I$(ALGO_DIR) $(ALGO_DIR)/hx-raw-init.c hx-raw-start-test.c -o $@
+
 test: all
 	./hx-algo-test
 	./hx-otp-test
@@ -56,6 +59,7 @@ test: all
 	./hx-afe-test
 	./hx-raw-init-test
 	./hx-raw-prepare-test
+	./hx-raw-start-test
 
 clean:
-	rm -f hx-algo-test hx-otp-test hx-raw-policy-test hx-afe-test hx-raw-init-test hx-raw-prepare-test
+	rm -f hx-algo-test hx-otp-test hx-raw-policy-test hx-afe-test hx-raw-init-test hx-raw-prepare-test hx-raw-start-test

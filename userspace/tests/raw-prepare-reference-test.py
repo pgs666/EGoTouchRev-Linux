@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
-"""Check exact Windows preparation source extraction and hash drift guards."""
+"""Check exact Windows master startup extraction and hash drift guards."""
 from pathlib import Path
 import os
 import subprocess
@@ -44,11 +44,21 @@ with tempfile.TemporaryDirectory(prefix="himax-raw-reference-") as directory:
          "\n} // namespace Himax"),
         ("HimaxProtocol.cpp", "    ChipResult<> HimaxProtocol::write_and_verify(",
          "    ChipResult<> HimaxProtocol::safeModeSetRaw("),
+        ("HimaxChipMode.cpp", "ChipResult<> Chip::himax_switch_data_type(",
+         "ChipResult<> Chip::hx_set_N_frame("),
+        ("HimaxChipLifecycle.cpp", "ChipResult<> Chip::himax_mcu_read_FW_status(",
+         "ChipResult<> Chip::himax_mcu_interface_on("),
+        ("HimaxChipLifecycle.cpp", "ChipResult<> Chip::himax_mcu_power_on_init(",
+         "\nnamespace {"),
+        ("HimaxChipLifecycle.cpp",
+         "    std::array<uint8_t, 4> tmp_data = {0xA5, 0x5A, 0x00, 0x00};",
+         "    if (auto res = himax_switch_data_type(DeviceType::Slave"),
     ):
         text = originals[name].decode()
         body = text[text.index(first):text.index(last)]
         assert generated.count(body) == 1, f"must compile the exact original body: {first}"
     assert 'extern "C" int hx_raw_prepare_reference' in generated
+    assert 'extern "C" int hx_raw_start_reference' in generated
     assert "#include <Windows.h>" not in generated
     os.utime(output, ns=(1_000_000_000, 1_000_000_000))
     assert prepare().returncode == 0
@@ -65,4 +75,5 @@ with tempfile.TemporaryDirectory(prefix="himax-raw-reference-") as directory:
         assert result.returncode != 0 and "Missing upstream raw preparation source" in result.stderr
         path.write_bytes(contents)
 
-print("Five exact source bodies, register/hash guards, no-op configure and missing-source rejection passed")
+print("Nine exact startup source sections, register/hash guards, no-op configure "
+      "and missing-source rejection passed")

@@ -83,11 +83,12 @@ static int himax_start_afe(struct himax_ts_data *ts)
 			if (ret)
 				continue;
 		}
-		/* Includes upstream reload/inspection/N-frame preparation. */
+		/* Includes upstream preparation, power-on, verified raw selection
+		 * and producer handshake. Do not follow it with legacy runtime
+		 * replay: that rewrites the just-completed scan configuration.
+		 * Native charger policy is applied by charger_work below.
+		 */
 		ret = himax_mcu_power_on_init(ts);
-		if (ret)
-			continue;
-		ret = himax_restore_raw_runtime(ts);
 		if (ret)
 			continue;
 		/* Upstream thp_afe_start discards three buffered master frames

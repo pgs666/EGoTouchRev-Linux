@@ -1,4 +1,4 @@
-# Test-only reference: exact active Windows preparation functions and constants.
+# Test-only reference: exact active Windows master startup and constants.
 # No Windows I/O, kernel code or daemon links this generated implementation.
 function(himax_raw_reference_source directory name expected output)
     set(source "${directory}/${name}")
@@ -54,6 +54,9 @@ function(himax_prepare_raw_reference directory output)
     himax_raw_reference_extract("${mode}"
         "ChipResult<> Chip::himax_mcu_assign_sorting_mode("
         "ChipResult<> Chip::himax_switch_data_type(" sorting)
+    himax_raw_reference_extract("${mode}"
+        "ChipResult<> Chip::himax_switch_data_type("
+        "ChipResult<> Chip::hx_set_N_frame(" data_type)
     himax_raw_reference_extract("${mode}" "ChipResult<> Chip::hx_set_N_frame("
         "ChipResult<> Chip::himax_switch_mode_inspection(" nframe)
     himax_raw_reference_extract("${mode}" "ChipResult<> Chip::himax_switch_mode_inspection("
@@ -61,13 +64,23 @@ function(himax_prepare_raw_reference directory output)
     himax_raw_reference_extract("${protocol}"
         "    ChipResult<> HimaxProtocol::write_and_verify("
         "    ChipResult<> HimaxProtocol::safeModeSetRaw(" verify)
+    himax_raw_reference_extract("${lifecycle}"
+        "ChipResult<> Chip::himax_mcu_read_FW_status("
+        "ChipResult<> Chip::himax_mcu_interface_on(" fw_status)
+    himax_raw_reference_extract("${lifecycle}"
+        "ChipResult<> Chip::himax_mcu_power_on_init("
+        "\nnamespace {" power_on)
+    himax_raw_reference_extract("${lifecycle}"
+        "    std::array<uint8_t, 4> tmp_data = {0xA5, 0x5A, 0x00, 0x00};"
+        "    if (auto res = himax_switch_data_type(DeviceType::Slave" master_start)
     foreach(field IN ITEMS addr_fw_define_flash_reload data_fw_define_flash_reload_dis
             data_fw_define_flash_reload_en addr_rawdata_addr addr_rawdata_end
-            addr_sorting_mode_en addr_set_frame_addr)
+            addr_sorting_mode_en addr_set_frame_addr addr_raw_out_sel
+            addr_fw_define_2nd_flash_reload addr_fw_dbg_msg_addr addr_chk_fw_status
+            addr_chk_dd_status addr_flag_reset_event)
         himax_raw_reference_register("${registers}" "${field}")
     endforeach()
-    # Also guard the invocation order: the reference intentionally covers only
-    # this prefix, not physical reset, power-on, raw selection or calibration.
+    # Preparation's standalone oracle also checks the active Init call order.
     set(previous -1)
     foreach(call IN ITEMS "himax_mcu_reload_disable(false)" "himax_switch_mode_inspection(THP_INSPECTION_ENUM::EGO_RAWDATA)"
             "hx_set_N_frame(1)" "himax_mcu_power_on_init();")
@@ -83,6 +96,7 @@ function(himax_prepare_raw_reference directory output)
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <cstdlib>
 #include <expected>
 #include <memory>
 #include <string>
@@ -90,8 +104,9 @@ function(himax_prepare_raw_reference directory output)
 #define LOG_INFO(...) ((void)0)
 #define LOG_ERROR(...) ((void)0)
 namespace Himax {
-enum class ChipError { CommunicationError, VerificationFailed };
+enum class ChipError { CommunicationError, VerificationFailed, InternalError, Timeout };
 template<class T = void> using ChipResult = std::expected<T, ChipError>;
+enum class DeviceType { Master };
 enum class THP_INSPECTION_ENUM { HX_RAWDATA, HX_ACT_IDLE_RAWDATA, HX_LP_IDLE_RAWDATA, HX_BACK_NORMAL, EGO_RAWDATA };
 struct HalDevice {
     const hx_raw_init_bus* bus;
@@ -119,15 +134,39 @@ public:
     ChipResult<> himax_mcu_assign_sorting_mode(uint8_t*);
     ChipResult<> hx_set_N_frame(uint8_t);
     ChipResult<> himax_switch_mode_inspection(THP_INSPECTION_ENUM);
+    ChipResult<> himax_switch_data_type(DeviceType, THP_INSPECTION_ENUM);
+    ChipResult<> himax_mcu_read_FW_status();
+    ChipResult<> himax_mcu_power_on_init();
+    ChipResult<> StartMaster() {
+${master_start}
+        return {};
+    }
+    ChipResult<> InitFailed(const char*, ChipResult<> result) { return result; }
+    ChipResult<HalDevice*> SelectDevice(DeviceType) { return m_master.get(); }
+    ChipResult<> hx_sense_on(bool flash) {
+        if (flash) std::abort();
+        int error = m_master->bus->sense_on(m_master->bus->context);
+        if (error) { m_master->error = error; return std::unexpected(ChipError::CommunicationError); }
+        return {};
+    }
+    void Sleep(unsigned int milliseconds) {
+        m_master->bus->sleep_ms(m_master->bus->context, milliseconds);
+    }
     std::unique_ptr<HalDevice> m_master;
     struct {
         uint32_t addr_fw_define_flash_reload = ${addr_fw_define_flash_reload};
         uint32_t data_fw_define_flash_reload_dis = ${data_fw_define_flash_reload_dis};
         uint32_t data_fw_define_flash_reload_en = ${data_fw_define_flash_reload_en};
+        uint32_t addr_fw_define_2nd_flash_reload = ${addr_fw_define_2nd_flash_reload};
     } pdriver_op;
     struct {
         uint32_t addr_sorting_mode_en = ${addr_sorting_mode_en};
         uint32_t addr_set_frame_addr = ${addr_set_frame_addr};
+        uint32_t addr_raw_out_sel = ${addr_raw_out_sel};
+        uint32_t addr_fw_dbg_msg_addr = ${addr_fw_dbg_msg_addr};
+        uint32_t addr_chk_fw_status = ${addr_chk_fw_status};
+        uint32_t addr_chk_dd_status = ${addr_chk_dd_status};
+        uint32_t addr_flag_reset_event = ${addr_flag_reset_event};
     } pfw_op;
     struct {
         uint32_t addr_rawdata_addr = ${addr_rawdata_addr};
@@ -139,6 +178,9 @@ ${reload}
 ${sorting}
 ${nframe}
 ${inspection}
+${data_type}
+${fw_status}
+${power_on}
 }
 extern \"C\" int hx_raw_prepare_reference(const hx_raw_init_bus* bus) {
     Himax::Chip chip(bus);
@@ -146,6 +188,13 @@ extern \"C\" int hx_raw_prepare_reference(const hx_raw_init_bus* bus) {
     if (result) result = chip.himax_switch_mode_inspection(Himax::THP_INSPECTION_ENUM::EGO_RAWDATA);
     if (result) result = chip.hx_set_N_frame(1);
     if (result) return 0;
+    return result.error() == Himax::ChipError::VerificationFailed ? -EINVAL : chip.m_master->error;
+}
+extern \"C\" int hx_raw_start_reference(const hx_raw_init_bus* bus) {
+    Himax::Chip chip(bus);
+    auto result = chip.StartMaster();
+    if (result) return 0;
+    if (result.error() == Himax::ChipError::Timeout) return -ETIMEDOUT;
     return result.error() == Himax::ChipError::VerificationFailed ? -EINVAL : chip.m_master->error;
 }
 ")

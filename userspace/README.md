@@ -33,8 +33,9 @@ submodule 文件保持不变，原始文件的完整 SHA-256 不匹配时停止�
 在 `hx-afe.c`，测试比较全部命令/参数组合，并检查三步寄存器事务的顺序、失败和重试。
 
 内核的 `himax_mcu_power_on_init()` 调用共享的
-[`hx-raw-init.c`](../touchscreen-hx83121a-dkms/hx-raw-init.c)。默认 V4L2 路径先执行
-`hx_raw_prepare_scan()`，对应 Windows `Chip::Init()` 实际调用的前置事务：
+[`hx-raw-init.c`](../touchscreen-hx83121a-dkms/hx-raw-init.c)。默认 V4L2 路径执行
+`hx_raw_start_scan()`，其中 `hx_raw_prepare_scan()` 对应 Windows `Chip::Init()`
+实际调用的前置事务：
 
 ```text
 flash reload enable=0
@@ -49,32 +50,45 @@ flash reload enable=0
 N-frame 任一笔失败立即退出，不能继续启用 raw。这里没有延时或 sense-on。
 后续又写 N-frame=1，不构成省略前置事务的依据。legacy 入口保持原有准备流程。
 
-然后执行 `hx_raw_power_on()`，顺序为：
-RawOut 清零 → sorting 清零并读回 → N-frame=1 → reload 状态清零 →
-平台 sense-on/reset → A8 低字节为 5 → 完整 reload word 为 `0x72c0` →
-RawOut=`0xf6` → master SRAM password=`0x5aa5`。任何阶段的传输失败立即退出，
-上层只能从完整硬件 reset 重试；sorting 最多三次，两个 ready 阶段各最多三十次。
-reload 超时统一返回 `ETIMEDOUT`，错误日志给出失败阶段。
+随后仍在 `hx_raw_start_scan()` 内执行 Windows 的 master 后半段：
 
-RawOut 在 sense-on 之前清零来自固定版本 Windows
-`HimaxChipLifecycle.cpp::himax_mcu_power_on_init()`；此前 Linux 漏了这一步。
-power-on host 测试运行的就是内核共享实现，覆盖寄存器顺序、每笔传输失败、状态迟到、
-完整 reload word 检查和超时后禁止启用 raw producer。它使用人工核对的协议 fixture，
-并未像邮箱构包测试那样直接编译 Windows 函数；不能声称验证了整个启动流程逐笔等价。
+```text
+RawOut=0 → sorting=0（只写）→ N-frame=1 → reload 状态=0
+→ 平台 sense-on/reset
+→ 完整 reload word == 0x000072c0（最多 30 次）
+→ RawOut=0xf6（写/读低 16 位验证，最多 50 次）
+→ master SRAM password=0x5aa5（只写）
+```
 
-前置准备另有直接源码对照：测试构建通过
+每次 reload 未就绪时依次读取四个固件状态寄存器，再等待 11 ms；状态辅助读取在
+首个错误处结束，但不阻止下一次 reload 轮询。reload 本身的读取失败立即退出；
+30 次均未就绪则返回 `ETIMEDOUT`，最后一次未就绪之后也等待 11 ms。没有另设
+A8==5 门槛。RawOut 重试传输和比较失败；耗尽后保留最后一次错误，区别于前置准备
+统一返回 `EINVAL`。最终握手由固件消费，不做相等读回。外层失败从完整硬件 reset
+重试，日志给出失败阶段。
+
+默认路径不再随后调用 legacy `himax_restore_raw_runtime()` 重写 AP notify、
+sorting/N-frame、RawOut 和握手；Linux 充电状态仍由独立 `charger_work` 应用。
+native sense-on 在 ISR 清零后至少等待 11 ms，再执行 Linux 平台的 GPIO reset。
+`HIMAX_V4L2=0` 仍走既有 `hx_raw_power_on()`：保留 sorting 读回、A8 检查和 legacy
+runtime 重放。这条旧路径的故障测试继续保留。
+
+直接源码对照通过
 [`RawPrepareReference.cmake`](cmake/RawPrepareReference.cmake)，提取未经修改的
 `himax_mcu_reload_disable`、`himax_mcu_assign_sorting_mode`、`hx_set_N_frame`、
-`himax_switch_mode_inspection` 和 `write_and_verify` 五个函数体；寄存器值也从上游
-`HimaxRegisters.cpp` 提取。五份输入文件（含实际使用的 `HimaxByteUtils.h`）都校验
-完整 SHA-256，Init 调用顺序也受检查。仅 Windows HAL 读写替换成与 Linux 共用的
-fake bus；每笔完整传输、返回值、20/10 次重试边界、N-frame 两段失败和高字不同均
-与生产 C 实现比较。引用实现仅链接到测试，不进入模块或 daemon。
+`himax_switch_mode_inspection`、`write_and_verify`、`himax_mcu_power_on_init`、
+`himax_mcu_read_FW_status`、`himax_switch_data_type` 八个函数体，以及 `Init()` 从准备
+到 master password 的实际调用片段；寄存器值也从上游 `HimaxRegisters.cpp` 提取。
+五份输入文件（含实际使用的 `HimaxByteUtils.h`）都校验完整 SHA-256。引用实现只替换
+HAL 读写、sense-on 和 Sleep 为共用 fake bus；对照每笔事务、延时及返回值，包括所有
+正常事务故障、20/10/30/50 次边界、低位/全字比较、状态读取错误和最后一次错误优先级。
+引用实现仅链接到测试，不进入模块或 daemon。
 
-完整启动仍有差异：Linux 在前面做 IC 探测/进入 safe mode；保留额外的 A8 ready gate；
-后面 `himax_restore_raw_runtime()` 仍会重放 AP notify、sorting/N-frame、RawOut、USB profile
-及 SRAM password。前置 inspection/N-frame 的事务对照不涵盖这些额外检查、GPIO reset
-或完整生命周期，也不能据此声称手动切频已经生效。slave/pen 通道按本项目范围保持关闭。
+完整启动仍有差异：Linux 在前面做 IC 探测/进入 safe mode；native sense-on、GPIO
+时序、总线事务原语尚未纳入上述 oracle。Linux GPIO 保持原有 20/50 ms 复位等待，
+Windows `SetReset` IOCTL 内部时序未知，不能用无延时脉冲替代。Linux 的充电集成、
+清帧及 IRQ 接口也不同，slave/pen 按本项目范围保持关闭。不能据此声称完整
+`Chip::Init()`、物理 SPI 生命周期或手动切频已验收。
 
 ### 边缘滑入的首报修正
 

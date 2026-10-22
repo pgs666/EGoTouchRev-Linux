@@ -32,19 +32,21 @@
 上游 Windows 重写实现；掌压亮屏问题不能仅凭“导入上游代码”宣称修好。
 上游未启用的 SafeBaseline/SideTouch 等功能，不应以“完整移植”为由自行打开。
 
-初始化审计补充：共享 `hx-raw-init.c` 已补上 sensing/reset 前 RawOut 清零，保留
-Linux 的 sorting 读回和 A8 ready 检查；生产路径与 host 事务故障测试使用同一实现。
-默认 V4L2 入口另补上 Windows Init 实际调用的 reload/inspection unlock/sorting/
-两段 N-frame 准备，测试直接编译上游五个原始函数体，与 Linux 事务和重试逐笔对照。
-这不代表 Windows 整个 `Chip::Init()` 已经逐笔等价；后置 AP/USB runtime 重放、
-前置 IC 探测/安全模式、GPIO reset 和额外 ready 检查仍有差异。验证边界
+初始化审计补充：默认 V4L2 入口通过共享 `hx_raw_start_scan()` 执行 Windows Init
+实际调用的 reload/inspection unlock/sorting/两段 N-frame 准备，再执行 power-on、
+完整 reload word 轮询、最多 50 次 raw 类型校验和 SRAM producer 握手。已移除默认
+路径额外的 A8 ready gate、power-on sorting 读回和后置 legacy AP/N-frame/raw 重放；
+Linux 充电状态仍由独立 work 应用。旧检查和 replay 只保留在 legacy 入口。
+测试直接编译上游八个原始函数体和 Init 的 master 调用片段，比较实际事务、延时和
+故障/重试结果。这不代表 Windows 整个 `Chip::Init()` 已经逐笔等价：前置 IC 探测/
+安全模式、native sense-on、GPIO 时序、IRQ/清帧及 Linux 充电集成仍有差异，验证边界
 见 [用户态运行说明](../userspace/README.md)。
 
 `6a819ad` 已经完成本机普通模块试运行及正式安装，运行模块与磁盘/DKMS 缓存一致。
 新流程下显式校准、清状态、IDLE 可确认，但频点 1 仍未观察到完成；完整 AFE 测试保留
-失败结果，不能把初始化事务对齐当作切频恢复的证明。下一轮继续核对实际调用中的
-reset 前 reload 清零、IC 探测额外 safe-mode、raw 类型设置的 50 次验证重试和后置
-runtime 重放差异，再做受控实机验证；不能仅凭当前帧流正常就宣布完整移植完成。
+失败结果，不能把初始化事务对齐当作切频恢复的证明。本次源码已经推进 power-on/
+raw 类型对齐，下一轮继续核对 reset 前 reload 清零、IC 探测额外 safe-mode 和 native
+sense-on/物理 reset，再做受控实机验证；不能仅凭帧流正常就宣布完整移植完成。
 
 ---
 

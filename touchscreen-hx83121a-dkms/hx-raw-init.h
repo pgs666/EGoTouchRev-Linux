@@ -51,6 +51,12 @@ extern "C" {
  */
 int hx_raw_prepare_scan(const struct hx_raw_init_bus *bus,
 			enum hx_raw_init_step *step);
+/* Active Windows master-channel startup: preparation, power-on, full reload
+ * word polling, verified EGO_RAWDATA selection and producer handshake.
+ * Native sense_on/GPIO timing remains the platform callback's responsibility.
+ */
+int hx_raw_start_scan(const struct hx_raw_init_bus *bus,
+		      enum hx_raw_init_step *step);
 /* step identifies the failed phase on error, COMPLETE on success. */
 int hx_raw_power_on(const struct hx_raw_init_bus *bus,
 		    enum hx_raw_init_step *step);
