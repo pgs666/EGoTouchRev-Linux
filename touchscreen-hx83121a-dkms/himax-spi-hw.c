@@ -11,6 +11,7 @@
 #include "himax-spi.h"
 #include "hx-afe.h"
 #include "hx-otp.h"
+#include "hx-raw-init.h"
 #ifndef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
 #include "hx-panel-profile.h"
 #endif
@@ -52,7 +53,6 @@ MODULE_PARM_DESC(afe_mailbox_debug,
 #define HIMAX_AHB_CMD_LEAVE_SAFE_MODE			0x0000
 
 /* DSRAM flag addresses */
-#define HIMAX_DSRAM_ADDR_2ND_FLASH_RELOAD		0x100072c0
 #define HIMAX_DSRAM_ADDR_FLASH_RELOAD			0x10007f00
 #define HIMAX_DSRAM_ADDR_SORTING_MODE_EN		0x10007f04
 #define HIMAX_DSRAM_ADDR_SET_NFRAME			0x10007294
@@ -61,7 +61,6 @@ MODULE_PARM_DESC(afe_mailbox_debug,
 #define HIMAX_DSRAM_ADDR_USB_DETECT			0x10007f38
 
 /* dsram flag data */
-#define HIMAX_DSRAM_DATA_FW_RELOAD_DONE			0x000072c0
 #define HIMAX_DSRAM_DATA_AP_RESUMED			0x00000000
 #define HIMAX_DSRAM_DATA_USB_CONNECTED			0xa55aa55a
 /* hx83121a-specific register/dsram flags/data */
@@ -370,8 +369,8 @@ static int himax_mcu_write_verify_u32(struct himax_ts_data *ts, u32 addr,
 	return ret;
 }
 
-static int himax_afe_reg_write(void *context, u32 address, const u8 *data,
-			       size_t length)
+static int himax_reg_write_cb(void *context, u32 address, const u8 *data,
+			      size_t length)
 {
 	return himax_mcu_register_write(context, address, data, length);
 }
@@ -396,7 +395,7 @@ static int himax_afe_send_command(struct himax_ts_data *ts, u8 *slot,
 {
 	const struct hx_afe_bus bus = {
 		.context = ts,
-		.write = himax_afe_reg_write,
+		.write = himax_reg_write_cb,
 		.read = himax_afe_reg_read,
 	};
 	u8 sent_slot = *slot;
@@ -830,36 +829,6 @@ int himax_restore_raw_runtime(struct himax_ts_data *ts)
 					password.byte, sizeof(password.byte));
 }
 
-static int himax_mcu_assign_sorting_mode(struct himax_ts_data *ts, u8 *tmp_data_in)
-{
-	int ret;
-	u8 rdata[4];
-	u32 retry_cnt;
-	const u32 retry_limit = 3;
-
-	for (retry_cnt = 0; retry_cnt < retry_limit; retry_cnt++) {
-		ret = himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_SORTING_MODE_EN,
-					       tmp_data_in, HIMAX_REG_SZ);
-		if (ret < 0) {
-			dev_err(ts->dev, "%s: write sorting mode fail\n", __func__);
-			return ret;
-		}
-		usleep_range(1000, 1100);
-		ret = himax_mcu_register_read(ts, HIMAX_DSRAM_ADDR_SORTING_MODE_EN,
-					      rdata, HIMAX_REG_SZ);
-		if (ret < 0) {
-			dev_err(ts->dev, "%s: read sorting mode fail\n", __func__);
-			return ret;
-		}
-
-		if (!memcmp(tmp_data_in, rdata, HIMAX_REG_SZ))
-			return 0;
-	}
-	dev_err(ts->dev, "%s: fail to write sorting mode\n", __func__);
-
-	return -EINVAL;
-}
-
 /* Match the Windows Chip::Init() resume path: every hardware reinit must
  * explicitly allow the controller to rebuild its runtime state from flash.
  * Keeping 0x5aa5 ("has flash, but not reload") across a reset can leave a
@@ -876,103 +845,40 @@ int himax_enable_fw_reload(struct himax_ts_data *ts)
 					data.byte, 4);
 }
 
+static int himax_raw_init_read(void *context, u32 address, u8 *data, size_t length)
+{
+	return himax_mcu_register_read(context, address, data, length);
+}
+
+static int himax_raw_init_sense_on(void *context)
+{
+	return himax_sense_on(context, false);
+}
+
+static void himax_raw_init_sleep(void *context, unsigned int milliseconds)
+{
+	usleep_range(milliseconds * 1000, milliseconds * 1100);
+}
+
 int himax_mcu_power_on_init(struct himax_ts_data *ts)
 {
+	const struct hx_raw_init_bus bus = {
+		.context = ts,
+		.write = himax_reg_write_cb,
+		.read = himax_raw_init_read,
+		.sense_on = himax_raw_init_sense_on,
+		.sleep_ms = himax_raw_init_sleep,
+	};
+	enum hx_raw_init_step step = HX_RAW_INIT_RAW_CLEAR;
 	int ret;
-	u32 retry_cnt;
-	const u32 retry_limit = 30;
-	union himax_dword_data data;
 
-	data.dword = cpu_to_le32(HIMAX_DATA_CLEAR);
-	/* Initial sorting mode password to normal mode */
-	ret = himax_mcu_assign_sorting_mode(ts, data.byte);
-	if (ret < 0) {
-		dev_err(ts->dev, "%s: assign sorting mode fail\n", __func__);
-		return ret;
-	}
-
-	/* Restore the firmware normal-mode N-frame value. */
-	data.dword = cpu_to_le32(1);
-	ret = himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_SET_NFRAME, data.byte, 4);
-	if (ret < 0) {
-		dev_err(ts->dev, "%s: set N frame fail\n", __func__);
-		return ret;
-	}
-
-	/* Clear firmware reload status before leaving safe mode. */
-	data.dword = cpu_to_le32(HIMAX_DATA_CLEAR);
-	ret = himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_2ND_FLASH_RELOAD, data.byte, 4);
-	if (ret < 0) {
-		dev_err(ts->dev, "%s: initial FW reload status fail\n", __func__);
-		return ret;
-	}
-
-	ret = himax_sense_on(ts, false);
-	if (ret < 0) {
-		dev_err(ts->dev, "%s: sense on fail\n", __func__);
-		return ret;
-	}
-
-	/* Windows waits for central-state A8 == 0x05 before trusting reload
-	 * state.  A responsive bus alone does not mean firmware boot completed.
-	 */
-	for (retry_cnt = 0; retry_cnt < retry_limit; retry_cnt++) {
-		ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_FW_STATUS,
-					      data.byte, 4);
-		if (ret < 0)
-			return ret;
-		if (data.byte[0] == HIMAX_REG_DATA_FW_STATE_RUNNING)
-			break;
-		usleep_range(10000, 11000);
-	}
-	if (retry_cnt == retry_limit) {
-		dev_err(ts->dev, "%s: FW did not enter running state\n", __func__);
-		return -ETIMEDOUT;
-	}
-
-	dev_info(ts->dev, "%s: waiting for FW reload data\n", __func__);
-	for (retry_cnt = 0; retry_cnt < retry_limit; retry_cnt++) {
-		ret = himax_mcu_register_read(ts, HIMAX_DSRAM_ADDR_2ND_FLASH_RELOAD, data.byte, 4);
-		if (ret < 0) {
-			dev_err(ts->dev, "%s: read FW reload status fail\n", __func__);
-			return ret;
-		}
-
-		if (le32_to_cpu(data.dword) == HIMAX_DSRAM_DATA_FW_RELOAD_DONE) {
-			dev_info(ts->dev, "%s: FW reload done\n", __func__);
-			break;
-		}
-		dev_info(ts->dev, "%s: wait FW reload %u times\n", __func__, retry_cnt + 1);
-
-		usleep_range(10000, 11000);
-	}
-
-	if (retry_cnt == retry_limit) {
-		dev_err(ts->dev, "%s: FW reload fail!\n", __func__);
-		return -EINVAL;
-	}
-
-	/* RawOut select for this panel configuration. */
-	data.dword = cpu_to_le32(0xf6);
-	ret = himax_mcu_register_write(ts, HIMAX_HX83121A_DSRAM_ADDR_RAW_OUT_SEL, data.byte, 4);
-	if (ret < 0) {
-		dev_err(ts->dev, "%s: set RawOut select fail\n", __func__);
-		return ret;
-	}
-
-	/* Windows re-arms the raw-data SRAM handshake after every reload.  The
-	 * SPI transport has one controller-facing endpoint, so only the master
-	 * password is applicable here.
-	 */
-	data.dword = cpu_to_le32(0x00005aa5);
-	ret = himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_RAWDATA_PASSWORD,
-				       data.byte, 4);
-	if (ret < 0) {
-		dev_err(ts->dev, "%s: set raw-data password fail\n", __func__);
-		return ret;
-	}
-
-	return 0;
+	ret = hx_raw_power_on(&bus, &step);
+	if (ret)
+		dev_err(ts->dev, "raw power-on %s failed: %d\n",
+			hx_raw_init_step_name(step), ret);
+	else
+		dev_info(ts->dev, "raw power-on ready\n");
+	return ret;
 }
 
 int himax_mcu_check_crc(struct himax_ts_data *ts, u32 start_addr,

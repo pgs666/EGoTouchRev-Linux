@@ -129,6 +129,12 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-raw-policy-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME raw-transport-policy COMMAND himax-raw-policy-test)
+    add_executable(himax-raw-init-test ../tests/hx-raw-init-test.c
+        ../touchscreen-hx83121a-dkms/hx-raw-init.c)
+    target_include_directories(himax-raw-init-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_options(himax-raw-init-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME raw-power-on COMMAND himax-raw-init-test)
     # Requires an idle real device and performs hardware resets. Invoke using
     # scripts/test-v4l2-transport.sh; never run as a normal host test.
     add_executable(himax-transport-test tests/transport-test.cpp v4l2-capture.cpp)

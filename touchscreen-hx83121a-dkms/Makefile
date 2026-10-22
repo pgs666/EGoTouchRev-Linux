@@ -24,7 +24,7 @@ endif
 HIMAX_EXPERIMENTAL_SAFE_BASELINE ?= 1
 
 obj-m += $(MODNAME).o
-$(MODNAME)-y := hx-otp.o hx-afe.o
+$(MODNAME)-y := hx-otp.o hx-afe.o hx-raw-init.o
 ifeq ($(HIMAX_V4L2),1)
 ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2=1
 $(MODNAME)-y += himax-v4l2.o himax-spi-hw.o
@@ -79,7 +79,7 @@ DKMS_SOURCES = Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
 	       hx-algo.h hx-algo-internal.h hx-frame-status.h hx-stylus.h \
 	       hx-panel-profile.c hx-panel-profile.h himax-v4l2.c \
 	       himax-v4l2.h hx-v4l2-uapi.h hx-raw-policy.h hx-otp.c hx-otp.h \
-	       hx-afe.c hx-afe.h
+	       hx-afe.c hx-afe.h hx-raw-init.c hx-raw-init.h
 
 .PHONY: all clean test deploy-local dkmsinstall dkmsremove print-dkms-sources
 

@@ -20,3 +20,4 @@ live-captures/
 *.mod.*
 Module.symvers
 modules.order
+/tests/hx-raw-init-test

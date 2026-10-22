@@ -32,6 +32,12 @@
 上游 Windows 重写实现；掌压亮屏问题不能仅凭“导入上游代码”宣称修好。
 上游未启用的 SafeBaseline/SideTouch 等功能，不应以“完整移植”为由自行打开。
 
+初始化审计补充：共享 `hx-raw-init.c` 已补上 sensing/reset 前 RawOut 清零，保留
+Linux 的 sorting 读回和 A8 ready 检查；生产路径与 host 事务故障测试使用同一实现。
+这只覆盖 power-on/ready/master raw 设置阶段，不代表 Windows 整个 `Chip::Init()`
+已经逐笔等价。前置 inspection/N-frame、后置 AP/USB runtime 重放的差异和验证边界
+见 [用户态运行说明](../userspace/README.md)。
+
 ---
 
 本文基于当前 Linux 驱动、Gaokun 原厂 Windows 二进制逆向成果，以及社区

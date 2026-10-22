@@ -12,6 +12,7 @@ DRIVER_STYLE_SOURCES := $(DRIVER_DIR)/himax-spi-core.c \
 	$(DRIVER_DIR)/hx-algo-internal.h $(DRIVER_DIR)/hx-frame-status.h \
 	$(DRIVER_DIR)/hx-otp.c $(DRIVER_DIR)/hx-otp.h \
 	$(DRIVER_DIR)/hx-afe.c $(DRIVER_DIR)/hx-afe.h \
+	$(DRIVER_DIR)/hx-raw-init.c $(DRIVER_DIR)/hx-raw-init.h \
 	$(DRIVER_DIR)/himax-v4l2.c $(DRIVER_DIR)/himax-v4l2.h \
 	$(DRIVER_DIR)/hx-v4l2-uapi.h $(DRIVER_DIR)/hx-raw-policy.h
 

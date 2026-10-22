@@ -30,6 +30,26 @@ submodule 文件保持不变，原始文件的完整 SHA-256 不匹配时停止�
 就拒绝配置；它仅链接到 `himax-afe-test`，不是第五处运行时算法适配。内核生产邮箱协议
 在 `hx-afe.c`，测试比较全部命令/参数组合，并检查三步寄存器事务的顺序、失败和重试。
 
+内核的 `himax_mcu_power_on_init()` 调用共享的
+[`hx-raw-init.c`](../touchscreen-hx83121a-dkms/hx-raw-init.c)，顺序为：
+RawOut 清零 → sorting 清零并读回 → N-frame=1 → reload 状态清零 →
+平台 sense-on/reset → A8 低字节为 5 → 完整 reload word 为 `0x72c0` →
+RawOut=`0xf6` → master SRAM password=`0x5aa5`。任何阶段的传输失败立即退出，
+上层只能从完整硬件 reset 重试；sorting 最多三次，两个 ready 阶段各最多三十次。
+reload 超时统一返回 `ETIMEDOUT`，错误日志给出失败阶段。
+
+RawOut 在 sense-on 之前清零来自固定版本 Windows
+`HimaxChipLifecycle.cpp::himax_mcu_power_on_init()`；此前 Linux 漏了这一步。
+新增 host 测试运行的就是内核共享实现，覆盖寄存器顺序、每笔传输失败、状态迟到、
+完整 reload word 检查和超时后禁止启用 raw producer。它使用人工核对的协议 fixture，
+并未像邮箱构包测试那样直接编译 Windows 函数；不能声称验证了整个启动流程逐笔等价。
+
+完整启动仍有差异：Linux 在前面做 IC 探测/进入 safe mode；保留额外的 A8 ready gate；
+后面 `himax_restore_raw_runtime()` 仍会重放 AP notify、sorting/N-frame、RawOut、USB profile
+及 SRAM password。Windows 的前置 inspection unlock、N-frame=`0x7f0c0001` 并未逐项
+移植，也不能忽略其后还有 N-frame=1 与物理 reset。当前不依据函数存在就盲加写入，
+或把这些差异直接归因于手动切频失败。slave/pen 通道按本项目范围保持关闭。
+
 ### 边缘滑入的首报修正
 
 上游 EdgeRecovery 按确认按下时的当前位置决定是否恢复边缘起点；快速滑动在
