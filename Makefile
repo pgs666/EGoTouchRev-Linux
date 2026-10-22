@@ -11,9 +11,14 @@ DRIVER_STYLE_SOURCES := $(DRIVER_DIR)/himax-spi-core.c \
 	$(DRIVER_DIR)/hx-algo.h \
 	$(DRIVER_DIR)/hx-algo-internal.h $(DRIVER_DIR)/hx-frame-status.h
 
-.PHONY: all clean driver test check checkpatch
+.PHONY: all clean driver test userspace check checkpatch
 
-all: test driver
+all: test driver userspace
+
+userspace:
+	cmake -S userspace -B userspace/build -DCMAKE_BUILD_TYPE=Release
+	cmake --build userspace/build -j4
+	ctest --test-dir userspace/build --output-on-failure
 
 driver:
 	$(MAKE) -C $(DRIVER_DIR) all
@@ -24,6 +29,7 @@ test:
 check: checkpatch
 	$(MAKE) -C $(TEST_DIR) clean test
 	$(MAKE) -C $(DRIVER_DIR) clean all
+	$(MAKE) userspace
 	git diff HEAD --check
 
 checkpatch:

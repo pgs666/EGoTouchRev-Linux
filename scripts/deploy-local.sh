@@ -4,6 +4,10 @@
 set -Eeuo pipefail
 
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+if [[ "${HIMAX_V4L2:-1}" == 1 ]]; then
+	exec bash "$repo_dir/scripts/deploy-v4l2-local.sh" "$@"
+fi
+[[ "${HIMAX_V4L2:-0}" == 0 ]] || { echo "HIMAX_V4L2 must be 0 or 1" >&2; exit 2; }
 src_dir="$repo_dir/touchscreen-hx83121a-dkms"
 module_name=himax_spi
 dkms_name=himax-spi
@@ -26,6 +30,10 @@ old_input_count=$(awk '/^N: Name="Himax Capacitive TouchScreen"$/{n++} END{print
 	/proc/bus/input/devices)
 rollback_needed=1
 himax_diagnostics="${HIMAX_DIAGNOSTICS:-0}"
+old_service_active=0
+old_service_enabled=0
+systemctl is-active --quiet himax-touchd.service && old_service_active=1
+systemctl is-enabled --quiet himax-touchd.service && old_service_enabled=1
 
 case "$himax_diagnostics" in
 	0|1) ;;
@@ -46,6 +54,12 @@ rollback() {
 			sudo depmod -a "$kernel_version"
 		fi
 		sudo modprobe "$module_name" || true
+		if (( old_service_enabled )); then
+			sudo systemctl enable himax-touchd.service || true
+		fi
+		if (( old_service_active )); then
+			sudo systemctl start himax-touchd.service || true
+		fi
 	fi
 	cleanup
 	exit "$status"
@@ -67,18 +81,18 @@ done < <(find "$algo_dir" -maxdepth 1 -type f 2>/dev/null | sort)
 
 echo "checkpoint=$stamp kernel=$kernel_version old_module=${old_module:-none}"
 make -C "$repo_dir/tests" clean test
-make -C "$src_dir" clean all HIMAX_DIAGNOSTICS="$himax_diagnostics"
+make -C "$src_dir" clean all HIMAX_V4L2=0 HIMAX_DIAGNOSTICS="$himax_diagnostics"
 repo_hash=$(sha256sum "$src_dir/himax-spi.ko" | awk '{print $1}')
 
 [[ "$dkms_src" == "/usr/src/himax-spi-0.1" ]]
 sudo install -d "$dkms_src"
 sudo find "$dkms_src" -mindepth 1 -delete
-for file in Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
-		himax-spi-sysfs.c himax-spi.h hx-algo.c hx-algo-preprocess.c \
-		hx-algo-detect.c hx-algo-resolve.c hx-algo-track.c hx-algo.h \
-		hx-algo-internal.h hx-frame-status.h; do
+while IFS= read -r file; do
 	sudo install -m644 "$src_dir/$file" "$dkms_src/$file"
-done
+done < <(make -s --no-print-directory -C "$src_dir" print-dkms-sources)
+# Persist the explicit legacy selection for future DKMS rebuilds.
+sudo sed -i 's/^HIMAX_V4L2 ?= 1$/HIMAX_V4L2 ?= 0/' "$dkms_src/Makefile"
+sudo systemctl disable --now himax-touchd.service 2>/dev/null || true
 sudo install -Dm644 "$src_dir/himax-spi-dkms.conf" /etc/modprobe.d/himax-spi-dkms.conf
 sudo dkms install --force -m "$dkms_name" -v "$dkms_version" -k "$kernel_version"
 installed_module=$(modinfo -n "$module_name")

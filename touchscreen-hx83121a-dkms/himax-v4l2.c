@@ -1,0 +1,677 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * HX83121A raw SPI transport. No baseline, finger detection or input reporting
+ * lives here. A userspace solver consumes timestamped HXST metadata buffers.
+ *
+ * Lock order: video_lock -> op_lock -> buffer_lock. The IRQ never takes
+ * video_lock, and no hardware transaction is performed under buffer_lock.
+ */
+#include <linux/delay.h>
+#include <linux/interrupt.h>
+#include <linux/ktime.h>
+#include <linux/module.h>
+#include <linux/power_supply.h>
+#include <linux/slab.h>
+#include <media/v4l2-event.h>
+#include <media/v4l2-fh.h>
+#include <media/v4l2-ioctl.h>
+#include <media/videobuf2-vmalloc.h>
+
+#include "himax-spi.h"
+
+struct himax_video_buffer {
+	struct vb2_v4l2_buffer vb;
+	struct list_head link;
+};
+
+static void himax_state_event(struct himax_ts_data *ts, bool running)
+{
+	struct v4l2_event event = { .type = V4L2_EVENT_HIMAX_STATE };
+	struct hx_raw_state state = {
+		.version = HX_RAW_ABI_VERSION,
+		.running = running,
+		.epoch = ts->epoch,
+	};
+
+	memcpy(event.u.data, &state, sizeof(state));
+	v4l2_event_queue(ts->video, &event);
+}
+
+static int himax_read_raw(struct himax_ts_data *ts)
+{
+	u32 chunk = ts->spi_xfer_max_sz - HIMAX_BUS_READ_HEADER_SIZE;
+	u32 offset;
+	int ret;
+
+	for (offset = 0; offset < ts->event_buf_sz; offset += chunk) {
+		ret = himax_spi_read(ts, HIMAX_EVENT_STACK_ADDRESS,
+				     ts->event_buf + offset,
+				     min(chunk, ts->event_buf_sz - offset));
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+/* IRQs must be disabled and op_lock held. No algorithm qualification here:
+ * the upstream solver owns validity, calibration state and baseline policy.
+ */
+static int himax_start_afe(struct himax_ts_data *ts)
+{
+	int attempt, i, ret = -EIO;
+
+	ts->controller_initialized = false;
+	ts->epoch++;
+	ts->sequence = 0;
+	memset(ts->last_command_ns, 0, sizeof(ts->last_command_ns));
+	himax_state_event(ts, false);
+	for (attempt = 0; attempt < 3; attempt++) {
+		ret = hx83121a_chip_detect(ts);
+		if (ret)
+			continue;
+		if (!ts->otp_tried) {
+			ts->otp_tried = true;
+			himax_get_project_id_otp(ts, ts->project_id,
+						 sizeof(ts->project_id));
+			/* OTP changes DD-register access state. */
+			ret = hx83121a_chip_detect(ts);
+			if (ret)
+				continue;
+		}
+		ret = himax_enable_fw_reload(ts);
+		if (ret)
+			continue;
+		ret = himax_mcu_power_on_init(ts);
+		if (ret)
+			continue;
+		ret = himax_restore_raw_runtime(ts);
+		if (ret)
+			continue;
+		/* Upstream thp_afe_start discards three buffered master frames
+		 * before StartCalibration, then requests 120 Hz. The slave/pen
+		 * channel is intentionally not enabled by this finger driver.
+		 */
+		for (i = 0; i < 3; i++) {
+			usleep_range(8000, 9000);
+			himax_read_raw(ts);
+		}
+		ts->afe_command_slot = 0;
+		ret = himax_afe_command(ts, HX_RAW_CALIBRATE, 0);
+		if (ret)
+			dev_warn(ts->dev, "initial calibration transport: %d\n", ret);
+		ret = himax_afe_command(ts, HX_RAW_FORCE_RATE, 0);
+		if (ret)
+			dev_warn(ts->dev, "initial scan-rate transport: %d\n", ret);
+		ts->controller_initialized = true;
+		ts->read_errors = 0;
+		himax_state_event(ts, true);
+		himax_int_enable(ts, true);
+		return 0;
+	}
+	dev_err(ts->dev, "raw AFE startup failed: %d\n", ret);
+	return ret;
+}
+
+static void himax_return_buffers(struct himax_ts_data *ts,
+				 enum vb2_buffer_state state)
+{
+	struct himax_video_buffer *buf, *next;
+	unsigned long flags;
+
+	spin_lock_irqsave(&ts->buffer_lock, flags);
+	list_for_each_entry_safe(buf, next, &ts->buffers, link) {
+		list_del(&buf->link);
+		vb2_buffer_done(&buf->vb.vb2_buf, state);
+	}
+	spin_unlock_irqrestore(&ts->buffer_lock, flags);
+}
+
+static irqreturn_t himax_raw_irq(int irq, void *data)
+{
+	struct himax_ts_data *ts = data;
+	struct himax_video_buffer *buf;
+	struct hx_raw_frame *frame;
+	unsigned long flags;
+	u64 now = ktime_get_ns();
+	int ret;
+
+	mutex_lock(&ts->op_lock);
+	if (!ts->streaming || !ts->controller_initialized ||
+	    !ts->panel_enabled || ts->shutting_down)
+		goto out;
+	ret = himax_read_raw(ts);
+	if (ret) {
+		if (++ts->read_errors >= 3) {
+			himax_int_enable(ts, false);
+			ts->controller_initialized = false;
+			ts->frame_flags = HX_RAW_FRAME_SOS;
+			himax_state_event(ts, false);
+			mod_delayed_work(system_wq, &ts->panel_reinit_work, 0);
+		}
+		goto out;
+	}
+	ts->read_errors = 0;
+	ts->sequence++;
+	spin_lock_irqsave(&ts->buffer_lock, flags);
+	if (list_empty(&ts->buffers)) {
+		spin_unlock_irqrestore(&ts->buffer_lock, flags);
+		goto out;  /* Producer drains SPI even when the reader falls behind. */
+	}
+	buf = list_first_entry(&ts->buffers, struct himax_video_buffer, link);
+	list_del(&buf->link);
+	spin_unlock_irqrestore(&ts->buffer_lock, flags);
+	frame = vb2_plane_vaddr(&buf->vb.vb2_buf, 0);
+	memset(frame, 0, sizeof(*frame));
+	frame->size = sizeof(*frame);
+	frame->version = HX_RAW_ABI_VERSION;
+	frame->epoch = ts->epoch;
+	frame->sequence = ts->sequence;
+	frame->timestamp_ns = now;
+	frame->flags = ts->frame_flags |
+		(ts->charger_connected ? HX_RAW_FRAME_CHARGER : 0);
+	frame->payload_size = HX_RAW_PAYLOAD_SIZE;
+	memcpy(frame->payload, ts->event_buf, sizeof(frame->payload));
+	buf->vb.sequence = ts->sequence;
+	buf->vb.field = V4L2_FIELD_NONE;
+	buf->vb.vb2_buf.timestamp = now;
+	vb2_set_plane_payload(&buf->vb.vb2_buf, 0, sizeof(*frame));
+	vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+out:
+	mutex_unlock(&ts->op_lock);
+	return IRQ_HANDLED;
+}
+
+static int himax_queue_setup(struct vb2_queue *q, unsigned int *count,
+			     unsigned int *planes, unsigned int sizes[],
+			     struct device *alloc_devs[])
+{
+	if (*planes)
+		return *planes == 1 && sizes[0] >= sizeof(struct hx_raw_frame) ?
+			0 : -EINVAL;
+	*count = clamp_t(unsigned int, *count, 2, 8);
+	*planes = 1;
+	sizes[0] = sizeof(struct hx_raw_frame);
+	return 0;
+}
+
+static int himax_buffer_prepare(struct vb2_buffer *vb)
+{
+	return vb2_plane_size(vb, 0) < sizeof(struct hx_raw_frame) ? -EINVAL : 0;
+}
+
+static void himax_buffer_queue(struct vb2_buffer *vb)
+{
+	struct himax_ts_data *ts = vb2_get_drv_priv(vb->vb2_queue);
+	struct himax_video_buffer *buf =
+		container_of(to_vb2_v4l2_buffer(vb), struct himax_video_buffer, vb);
+	unsigned long flags;
+
+	spin_lock_irqsave(&ts->buffer_lock, flags);
+	list_add_tail(&buf->link, &ts->buffers);
+	spin_unlock_irqrestore(&ts->buffer_lock, flags);
+}
+
+static int himax_stream_start(struct vb2_queue *q, unsigned int count)
+{
+	struct himax_ts_data *ts = vb2_get_drv_priv(q);
+	int ret = 0;
+
+	himax_lock(ts);
+	if (ts->shutting_down) {
+		ret = -ENODEV;
+	} else {
+		ts->streaming = true;
+		ts->frame_flags = 0;
+		if (ts->panel_prepared && ts->panel_enabled)
+			ret = himax_start_afe(ts);
+	}
+	if (ret) {
+		ts->streaming = false;
+		himax_return_buffers(ts, VB2_BUF_STATE_QUEUED);
+	}
+	himax_unlock(ts);
+	return ret;
+}
+
+static void himax_stream_stop(struct vb2_queue *q)
+{
+	struct himax_ts_data *ts = vb2_get_drv_priv(q);
+
+	/* After unbind, the SPI and GPIO resources are no longer available. */
+	if (!ts->shutting_down)
+		himax_lock(ts);
+	else
+		mutex_lock(&ts->op_lock);
+	ts->streaming = false;
+	ts->controller_initialized = false;
+	ts->epoch++;
+	himax_state_event(ts, false);
+	himax_return_buffers(ts, VB2_BUF_STATE_ERROR);
+	mutex_unlock(&ts->op_lock);
+}
+
+static const struct vb2_ops himax_queue_ops = {
+	.queue_setup = himax_queue_setup,
+	.buf_prepare = himax_buffer_prepare,
+	.buf_queue = himax_buffer_queue,
+	.start_streaming = himax_stream_start,
+	.stop_streaming = himax_stream_stop,
+};
+
+static int himax_querycap(struct file *file, void *priv,
+			  struct v4l2_capability *caps)
+{
+	struct himax_ts_data *ts = video_drvdata(file);
+
+	strscpy(caps->driver, "himax-spi", sizeof(caps->driver));
+	strscpy(caps->card, "Himax HX83121A raw", sizeof(caps->card));
+	snprintf(caps->bus_info, sizeof(caps->bus_info), "spi:%s",
+		 dev_name(ts->dev));
+	return 0;
+}
+
+static int himax_enum_fmt(struct file *file, void *priv,
+			  struct v4l2_fmtdesc *fmt)
+{
+	if (fmt->index)
+		return -EINVAL;
+	fmt->pixelformat = V4L2_META_FMT_HIMAX_SPI;
+	strscpy(fmt->description, "HX83121A raw SPI frame", sizeof(fmt->description));
+	return 0;
+}
+
+static int himax_meta_fmt(struct file *file, void *priv, struct v4l2_format *fmt)
+{
+	if (fmt->type != V4L2_BUF_TYPE_META_CAPTURE)
+		return -EINVAL;
+	memset(&fmt->fmt, 0, sizeof(fmt->fmt));
+	fmt->fmt.meta.dataformat = V4L2_META_FMT_HIMAX_SPI;
+	fmt->fmt.meta.buffersize = sizeof(struct hx_raw_frame);
+	return 0;
+}
+
+static int himax_subscribe(struct v4l2_fh *fh,
+			   const struct v4l2_event_subscription *sub)
+{
+	if (sub->type != V4L2_EVENT_HIMAX_STATE || sub->id)
+		return -EINVAL;
+	return v4l2_event_subscribe(fh, sub, 8, NULL);
+}
+
+static long himax_private_ioctl(struct file *file, void *priv,
+				bool valid_prio, unsigned int cmd, void *arg)
+{
+	struct himax_ts_data *ts = video_drvdata(file);
+	struct hx_raw_command *c = arg;
+	u64 now;
+	int ret = 0;
+
+	mutex_lock(&ts->op_lock);
+	if (ts->shutting_down) {
+		ret = -ENODEV;
+		goto out;
+	}
+	if (cmd == VIDIOC_HIMAX_INFO) {
+		struct hx_raw_info *info = arg;
+
+		memset(info, 0, sizeof(*info));
+		info->size = sizeof(*info);
+		info->version = HX_RAW_ABI_VERSION;
+		info->rows = HIMAX_MAX_TX;
+		info->cols = HIMAX_MAX_RX;
+		info->payload_size = HX_RAW_PAYLOAD_SIZE;
+		strscpy(info->project_id, ts->project_id, sizeof(info->project_id));
+		goto out;
+	}
+	if (cmd != VIDIOC_HIMAX_COMMAND) {
+		ret = -ENOTTY;
+		goto out;
+	}
+	if (c->size != sizeof(*c) || c->version != HX_RAW_ABI_VERSION ||
+	    c->reserved[0] || c->reserved[1] || c->action > HX_RAW_RESET ||
+	    (c->action == HX_RAW_RESET && c->parameter)) {
+		ret = -EINVAL;
+		goto out;
+	}
+	if (!vb2_is_busy(&ts->queue) ||
+	    ts->queue.owner != file->private_data) {
+		ret = -EBUSY;
+		goto out;
+	}
+	if (!ts->streaming || !ts->controller_initialized || !ts->panel_enabled ||
+	    c->epoch != ts->epoch || !c->sequence || c->sequence > ts->sequence ||
+	    ts->sequence - c->sequence > 8) {
+		ret = -ESTALE;
+		goto out;
+	}
+	now = ktime_get_ns();
+	if (now - ts->last_command_ns[c->action] <
+	    (c->action == HX_RAW_RESET ? NSEC_PER_SEC : 20 * NSEC_PER_MSEC)) {
+		ret = -EAGAIN;
+		goto out;
+	}
+	ts->last_command_ns[c->action] = now;
+	if (c->action == HX_RAW_RESET) {
+		himax_int_enable(ts, false);
+		ts->controller_initialized = false;
+		ts->frame_flags = HX_RAW_FRAME_SOS;
+		himax_state_event(ts, false);
+		mod_delayed_work(system_wq, &ts->panel_reinit_work, 0);
+	} else {
+		ret = himax_afe_command(ts, c->action, c->parameter);
+	}
+out:
+	mutex_unlock(&ts->op_lock);
+	return ret;
+}
+
+static const struct v4l2_ioctl_ops himax_ioctl_ops = {
+	.vidioc_querycap = himax_querycap,
+	.vidioc_enum_fmt_meta_cap = himax_enum_fmt,
+	.vidioc_g_fmt_meta_cap = himax_meta_fmt,
+	.vidioc_s_fmt_meta_cap = himax_meta_fmt,
+	.vidioc_try_fmt_meta_cap = himax_meta_fmt,
+	.vidioc_reqbufs = vb2_ioctl_reqbufs,
+	.vidioc_prepare_buf = vb2_ioctl_prepare_buf,
+	.vidioc_querybuf = vb2_ioctl_querybuf,
+	.vidioc_qbuf = vb2_ioctl_qbuf,
+	.vidioc_dqbuf = vb2_ioctl_dqbuf,
+	.vidioc_streamon = vb2_ioctl_streamon,
+	.vidioc_streamoff = vb2_ioctl_streamoff,
+	.vidioc_subscribe_event = himax_subscribe,
+	.vidioc_unsubscribe_event = v4l2_event_unsubscribe,
+	.vidioc_default = himax_private_ioctl,
+};
+
+static const struct v4l2_file_operations himax_video_fops = {
+	.owner = THIS_MODULE,
+	.open = v4l2_fh_open,
+	.release = vb2_fop_release,
+	.read = vb2_fop_read,
+	.poll = vb2_fop_poll,
+	.mmap = vb2_fop_mmap,
+	.unlocked_ioctl = video_ioctl2,
+};
+
+static void himax_panel_work(struct work_struct *work)
+{
+	struct himax_ts_data *ts = container_of(to_delayed_work(work),
+					       struct himax_ts_data, panel_reinit_work);
+
+	himax_lock(ts);
+	if (!ts->shutting_down && ts->streaming && !ts->controller_initialized &&
+	    ts->panel_prepared && ts->panel_enabled &&
+	    himax_start_afe(ts))
+		vb2_queue_error(&ts->queue);
+	himax_unlock(ts);
+}
+
+static void himax_charger_work(struct work_struct *work)
+{
+	struct himax_ts_data *ts = container_of(work, struct himax_ts_data,
+					       charger_work);
+	int supplied = power_supply_is_system_supplied();
+	int ret;
+
+	if (supplied < 0)
+		return;
+	mutex_lock(&ts->op_lock);
+	if (!ts->shutting_down && ts->controller_initialized &&
+	    ts->charger_connected != (supplied > 0)) {
+		ret = himax_set_charger(ts, supplied > 0);
+		if (ret)
+			dev_warn_ratelimited(ts->dev, "charger update: %d\n", ret);
+	}
+	mutex_unlock(&ts->op_lock);
+}
+
+static int himax_charger_notify(struct notifier_block *nb,
+				unsigned long event, void *data)
+{
+	struct himax_ts_data *ts = container_of(nb, struct himax_ts_data,
+					       charger_notifier);
+
+	if (event == PSY_EVENT_PROP_CHANGED)
+		schedule_work(&ts->charger_work);
+	return NOTIFY_OK;
+}
+
+static int himax_panel_prepared(struct drm_panel_follower *follower)
+{
+	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
+					       panel_follower);
+
+	mutex_lock(&ts->op_lock);
+	ts->panel_prepared = true;
+	mutex_unlock(&ts->op_lock);
+	return 0;
+}
+
+static int himax_panel_enabled(struct drm_panel_follower *follower)
+{
+	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
+					       panel_follower);
+
+	mutex_lock(&ts->op_lock);
+	ts->panel_enabled = true;
+	ts->frame_flags = 0;
+	mutex_unlock(&ts->op_lock);
+	mod_delayed_work(system_wq, &ts->panel_reinit_work, msecs_to_jiffies(300));
+	return 0;
+}
+
+static int himax_panel_disabling(struct drm_panel_follower *follower)
+{
+	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
+					       panel_follower);
+
+	cancel_delayed_work_sync(&ts->panel_reinit_work);
+	himax_lock(ts);
+	ts->panel_enabled = false;
+	ts->controller_initialized = false;
+	ts->epoch++;
+	himax_state_event(ts, false);
+	himax_unlock(ts);
+	return 0;
+}
+
+static int himax_panel_unpreparing(struct drm_panel_follower *follower)
+{
+	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
+					       panel_follower);
+
+	himax_panel_disabling(follower);
+	mutex_lock(&ts->op_lock);
+	ts->panel_prepared = false;
+	mutex_unlock(&ts->op_lock);
+	return 0;
+}
+
+static const struct drm_panel_follower_funcs himax_panel_ops = {
+	.panel_prepared = himax_panel_prepared,
+	.panel_enabled = himax_panel_enabled,
+	.panel_disabling = himax_panel_disabling,
+	.panel_unpreparing = himax_panel_unpreparing,
+};
+
+static void himax_v4l2_release(struct v4l2_device *v4l2)
+{
+	struct himax_ts_data *ts = container_of(v4l2, struct himax_ts_data, v4l2);
+
+	v4l2_device_unregister(v4l2);
+	kfree(ts->event_buf);
+	kfree(ts->xfer_buf);
+	kfree(ts);
+}
+
+static int himax_raw_probe(struct spi_device *spi)
+{
+	struct himax_ts_data *ts;
+	struct vb2_queue *q;
+	int ret;
+
+	ts = kzalloc(sizeof(*ts), GFP_KERNEL);
+	if (!ts)
+		return -ENOMEM;
+	ts->dev = &spi->dev;
+	ts->spi = spi;
+	ts->event_buf_sz = HIMAX_FULL_EVENT_STACK_SIZE;
+	ts->spi_xfer_max_sz = min_t(size_t, HIMAX_FULL_EVENT_STACK_SIZE,
+		min(spi_max_transfer_size(spi), spi_max_message_size(spi)));
+	if (ts->spi_xfer_max_sz < 22) {
+		ret = -EMSGSIZE; /* Largest AFE mailbox write includes AHB/header. */
+		goto free_ts;
+	}
+	ts->xfer_buf_sz = ts->spi_xfer_max_sz;
+	ts->xfer_buf = kmalloc(ts->xfer_buf_sz, GFP_KERNEL);
+	ts->event_buf = kmalloc(ts->event_buf_sz, GFP_KERNEL);
+	if (!ts->xfer_buf || !ts->event_buf) {
+		ret = -ENOMEM;
+		goto free_ts;
+	}
+	ts->gpiod_rst = devm_gpiod_get_optional(ts->dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(ts->gpiod_rst)) {
+		ret = PTR_ERR(ts->gpiod_rst);
+		goto free_ts;
+	}
+	spi->bits_per_word = 8;
+	spi->mode = SPI_MODE_3;
+	spi->cs_setup.value = HIMAX_SPI_CS_SETUP_TIME;
+	ret = spi_setup(spi);
+	if (ret)
+		goto free_ts;
+	spin_lock_init(&ts->irq_lock);
+	spin_lock_init(&ts->buffer_lock);
+	mutex_init(&ts->op_lock);
+	mutex_init(&ts->video_lock);
+	INIT_LIST_HEAD(&ts->buffers);
+	INIT_DELAYED_WORK(&ts->panel_reinit_work, himax_panel_work);
+	INIT_WORK(&ts->charger_work, himax_charger_work);
+	ts->charger_notifier.notifier_call = himax_charger_notify;
+	ret = v4l2_device_register(ts->dev, &ts->v4l2);
+	if (ret)
+		goto free_ts;
+	ts->v4l2.release = himax_v4l2_release;
+	spi_set_drvdata(spi, ts); /* v4l2_device_register sets parent drvdata. */
+	q = &ts->queue;
+	q->type = V4L2_BUF_TYPE_META_CAPTURE;
+	q->io_modes = VB2_MMAP | VB2_READ;
+	q->drv_priv = ts;
+	q->buf_struct_size = sizeof(struct himax_video_buffer);
+	q->ops = &himax_queue_ops;
+	q->mem_ops = &vb2_vmalloc_memops;
+	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+	q->min_queued_buffers = 1;
+	q->lock = &ts->video_lock;
+	q->dev = ts->dev;
+	ret = vb2_queue_init(q);
+	if (ret)
+		goto put_v4l2;
+	ts->video = video_device_alloc();
+	if (!ts->video) {
+		ret = -ENOMEM;
+		goto put_v4l2;
+	}
+	strscpy(ts->video->name, "Himax HX83121A raw", sizeof(ts->video->name));
+	ts->video->v4l2_dev = &ts->v4l2;
+	ts->video->fops = &himax_video_fops;
+	ts->video->ioctl_ops = &himax_ioctl_ops;
+	ts->video->release = video_device_release;
+	ts->video->lock = &ts->video_lock;
+	ts->video->queue = q;
+	ts->video->device_caps = V4L2_CAP_META_CAPTURE | V4L2_CAP_STREAMING |
+		V4L2_CAP_READWRITE;
+	video_set_drvdata(ts->video, ts);
+	ret = request_threaded_irq(spi->irq, NULL, himax_raw_irq,
+				  IRQF_ONESHOT | IRQF_NO_AUTOEN,
+				  "himax-raw", ts);
+	if (ret)
+		goto free_video;
+	ret = video_register_device(ts->video, VFL_TYPE_VIDEO, -1);
+	if (ret)
+		goto free_irq;
+	ret = power_supply_reg_notifier(&ts->charger_notifier);
+	if (ret)
+		goto unregister_video;
+	ts->panel_follower.funcs = &himax_panel_ops;
+	ret = drm_panel_add_follower(ts->dev, &ts->panel_follower);
+	if (ret) {
+		power_supply_unreg_notifier(&ts->charger_notifier);
+		cancel_work_sync(&ts->charger_work);
+		cancel_delayed_work_sync(&ts->panel_reinit_work);
+		himax_lock(ts);
+		ts->shutting_down = true;
+		himax_unlock(ts);
+		goto unregister_video;
+	}
+	dev_info(ts->dev, "raw SPI capture registered as %s\n",
+		 video_device_node_name(ts->video));
+	return 0;
+unregister_video:
+	free_irq(spi->irq, ts);
+	vb2_video_unregister_device(ts->video);
+	goto put_v4l2;
+free_irq:
+	free_irq(spi->irq, ts);
+free_video:
+	video_device_release(ts->video);
+put_v4l2:
+	v4l2_device_put(&ts->v4l2);
+	return ret;
+free_ts:
+	kfree(ts->event_buf);
+	kfree(ts->xfer_buf);
+	kfree(ts);
+	return ret;
+}
+
+static void himax_raw_remove(struct spi_device *spi)
+{
+	struct himax_ts_data *ts = spi_get_drvdata(spi);
+
+	drm_panel_remove_follower(&ts->panel_follower);
+	power_supply_unreg_notifier(&ts->charger_notifier);
+	cancel_work_sync(&ts->charger_work);
+	cancel_delayed_work_sync(&ts->panel_reinit_work);
+	mutex_lock(&ts->video_lock);
+	himax_lock(ts);
+	ts->shutting_down = true;
+	ts->controller_initialized = false;
+	himax_state_event(ts, false);
+	himax_return_buffers(ts, VB2_BUF_STATE_ERROR);
+	vb2_queue_error(&ts->queue);
+	himax_unlock(ts);
+	v4l2_device_disconnect(&ts->v4l2);
+	mutex_unlock(&ts->video_lock);
+	free_irq(spi->irq, ts);
+	vb2_video_unregister_device(ts->video);
+	v4l2_device_put(&ts->v4l2);
+}
+
+static const struct spi_device_id himax_raw_ids[] = {
+	{ "hx83121a-ts", 0 },
+	{ "hx83121a", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(spi, himax_raw_ids);
+
+static const struct of_device_id himax_raw_of_match[] = {
+	{ .compatible = "himax,hx83121a" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, himax_raw_of_match);
+
+static struct spi_driver himax_raw_driver = {
+	.driver = {
+		.name = "himax-spi",
+		.of_match_table = himax_raw_of_match,
+	},
+	.probe = himax_raw_probe,
+	.remove = himax_raw_remove,
+	.id_table = himax_raw_ids,
+};
+module_spi_driver(himax_raw_driver);
+
+MODULE_DESCRIPTION("HX83121A raw SPI to V4L2 metadata transport");
+MODULE_AUTHOR("EGoTouchRev Linux contributors");
+MODULE_LICENSE("GPL");

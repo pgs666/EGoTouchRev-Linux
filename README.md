@@ -4,30 +4,35 @@
 触控驱动。本仓库包含 SPI 内核模块、可在主机运行的算法回归测试、诊断 APK 和调参
 工具。
 
-驱动目前只上报手指 Type-B 多点触控，不支持原厂 Windows 栈中的主动笔协议。代码
+默认使用 V4L2 原始帧采集 + 用户态 TSACore + uinput 手指 Type-B 多点触控，
+不支持原厂 Windows 栈中的主动笔协议。代码
 仍处于实机验证阶段，不应视为通用 Himax 驱动或生产级硬件支持。
 
 ## 当前实现
 
 - HX83121A SPI/AHB 访问、固件 reload、raw event-stack 读取；
 - panel suspend/resume 与完整硬件恢复；
-- 唤醒 raw-quality qualification 和 safe baseline 保护；
-- 40×60 raw matrix 的 baseline、CMF、zone、palm、peak 和坐标求解；
-- persistent peak identity、Hungarian assignment、silent-gap 与 Type-B slot 上报；
-- 可编译关闭的完整事件栈/矩阵/轨迹诊断 ring；
-- 不依赖触控硬件的算法 fixture。
+- V4L2 metadata/HXST 有界采集队列、epoch/单调时间戳和受限 AFE 命令；
+- 用户态直接编译上游 v1.4.0 的完整已启用 TSACore、adapter、面板参数和输出映射；
+- uinput 唯一输入设备、systemd watchdog、HXST 录制与旧 trace 回放；
+- 独立 legacy 构建保留原内核算法和诊断 ring，供开发恢复；
+- 不依赖硬件的算法、输入生命周期及帧协议回归测试。
 
 实现边界与并发约束见 [驱动架构](docs/architecture.md)，已审计的热路径与待验证候选
 见 [性能审计](docs/performance.md)，后续选择性移植顺序见
-[逆向证据与移植路线图](docs/windows-porting-roadmap.md)。若未来把完整 raw matrix 求解
-迁移到 native daemon，接口边界、实时性和 fallback 要求见
+[逆向证据与移植路线图](docs/windows-porting-roadmap.md)。当前 V4L2/用户态链路的边界、
+实时性和恢复要求见
 [触控算法 Offload 架构参考](docs/touch-offload.md)。
+旧架构和性能审计文档描述 legacy 路径，新入口以
+[用户态运行说明](userspace/README.md) 为准。
 
 ## 仓库结构
 
 ```text
 touchscreen-hx83121a-dkms/  内核模块和 DKMS 配置
 tests/                       纯算法 host regression
+userspace/                   原版 TSACore、V4L2 daemon、uinput、录制/回放
+third_party/EGoTouchRev/      固定版本上游 submodule
 scripts/                     本机安全部署脚本
 himax-touch-diagnostic/      手动故障采集 Android 应用
 android-tuner/               Android root 调参和诊断应用
@@ -39,10 +44,11 @@ APK、内核模块、采集日志和本机部署记录是构建/运行产物，�
 
 ## 构建
 
-要求当前 Linux 内核的 headers/build tree，以及常规内核模块构建工具。顶层目标会先
-运行算法测试，再构建普通模块：
+要求当前内核 headers/build tree、C++23 编译器和 CMake。默认同时构建 V4L2 内核模块、
+用户态程序并执行回归测试：
 
 ```sh
+git submodule update --init third_party/EGoTouchRev
 make
 ```
 
@@ -54,24 +60,30 @@ make driver
 make check       # clean host tests + clean module build + diff whitespace
 ```
 
-模块位于 `touchscreen-hx83121a-dkms/himax-spi.ko`。直接在驱动目录构建诊断版：
+模块位于 `touchscreen-hx83121a-dkms/himax-spi.ko`，用户态程序位于 `userspace/build/`。
+默认模块不含触控算法，必须运行 `himax-touchd` 才产生触摸输入。它需要
+`CONFIG_INPUT_UINPUT` 和 V4L2/vb2-vmalloc 支持；依赖、安装和采集方法见
+[用户态说明](userspace/README.md)。
+
+旧内核算法需显式选择；其诊断版构建为：
 
 ```sh
-make -C touchscreen-hx83121a-dkms HIMAX_DIAGNOSTICS=1
+make -C touchscreen-hx83121a-dkms HIMAX_V4L2=0 HIMAX_DIAGNOSTICS=1
 ```
 
-普通构建默认不包含 `event_trace`、完整 event stack sysfs 和逐 IRQ 大块复制。只有在
-复现硬件/算法故障时才应部署诊断版。
+旧普通构建不包含诊断 ring。新 V4L2 构建每帧转交原始数据是正常输入所需，
+没有额外 legacy 诊断 ring。现有 APK/sysfs 调参工具尚未适配新接口。
 
-当前开发版默认启用实验性的多槽 SafeBaseline、held-in-hand reacquire、SHB 和
+legacy 开发版默认启用实验性的多槽 SafeBaseline、held-in-hand reacquire、SHB 和
 BLRecal 路径。它们可以作为一个整体关闭，同时保留基础 working baseline、BLIIR/BLSM
 和 BLReset 检测：
 
 ```sh
-make -C touchscreen-hx83121a-dkms HIMAX_EXPERIMENTAL_SAFE_BASELINE=0
+make -C touchscreen-hx83121a-dkms HIMAX_V4L2=0 HIMAX_EXPERIMENTAL_SAFE_BASELINE=0
 ```
 
-该开关当前默认值为 `1`。掌压亮屏仍是已知未解决场景，Windows Gaokun 原版驱动也能
+该开关仅适用于 legacy。新路径直接使用上游 profile 实际启用的 baseline 行为，
+不额外启用五槽扩展。掌压亮屏仍是已知未解决场景，Windows Gaokun 原版驱动也能
 复现；默认启用不代表这些扩展路径已经达到原厂等价或正式稳定状态。
 
 ### DKMS
@@ -81,17 +93,22 @@ sudo make -C touchscreen-hx83121a-dkms dkmsinstall
 sudo make -C touchscreen-hx83121a-dkms dkmsremove
 ```
 
+这只安装内核模块，不安装/启动用户态服务。完整部署使用下一节脚本。
+
 ### 本机部署
 
 ```sh
-make -C touchscreen-hx83121a-dkms deploy-local
+bash scripts/deploy-v4l2-local.sh --trial  # 短时验证后恢复原模块
+bash scripts/deploy-v4l2-local.sh          # 安装 V4L2 + 用户态服务
 ```
 
-部署脚本会构建并测试、保存当前模块与 sysfs 参数、安装 DKMS 模块、校验磁盘和运行
-模块的一致性，并在失败时恢复旧模块。日志写入被忽略的 `deploy-logs/`。该命令会
+部署脚本会构建并测试、保存当前模块、验证实际采集和 uinput，并在失败时恢复旧模块。
+日志和备份写入被忽略的 `deploy-logs/`。该命令会
 重载当前系统的触控模块；它不会构建 Android 内核、写入磁盘槽位或重启设备。
 
 ## 运行时接口
+
+以下参数和 sysfs 仅适用于 `HIMAX_V4L2=0`。新路径使用 V4L2 与用户态服务接口。
 
 算法参数位于 SPI 设备的 `algo/` sysfs group。实际设备路径由内核设备拓扑决定，
 不要在脚本中写死：

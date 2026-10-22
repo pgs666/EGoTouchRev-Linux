@@ -1,56 +1,149 @@
-# Linux TSACore 移植
+# Linux 用户态触控求解
 
-此目录构建上游 EGoTouchRev v1.4.0 的完整、实际启用的手指算法。
-上游以 Git submodule 固定在 `4d4f53d0bd8563d20850d5f380bcd6a8704c1e81`，
-保留其许可证、参数表、模块边界和提交来源。这里不编译 Windows 服务、VHF、GUI 或
-IPC，也不启用手写笔硬件采集；手指算法中的原版笔状态接口保留默认无笔状态。
+默认数据路径为：
 
-架构为内核 SPI/电源管理及唯一 input device，加用户态完整 TSACore。
-不把依赖浮点和进程级状态的 C++ 算法直接编入内核。
+```text
+HX83121A SPI → V4L2 META_CAPTURE / HXST → himax-touchd → uinput → libinput
+                  内核传输层              原版 TSACore
+```
 
-## 构建和离线验证
+内核只负责 SPI/AHB、复位、固件启动、屏幕电源生命周期、充电状态和有界采集队列。
+baseline、AFE 状态解析、噪声处理、检测、跟踪和滤波由用户态完成。内核不再注册
+触摸 input device；`himax-touchd` 是唯一手指输入生产者。
 
-需要支持 C++23 的 GCC/Clang、CMake 和 Ninja。
+算法直接编译上游 EGoTouchRev v1.4.0 的全部实际启用模块、`HimaxAfeAdapter`、
+`TsaCoreSolver` 和参数表，submodule 固定在
+`4d4f53d0bd8563d20850d5f380bcd6a8704c1e81`。不构建 Windows 服务、VHF 或 GUI。
+主动笔硬件采集未启用，算法的笔状态保持无笔默认值。
+
+## 构建
+
+需要支持 C++23 的 GCC/Clang、CMake、当前内核 build tree。
 
 ```sh
 git submodule update --init third_party/EGoTouchRev
-cmake -S userspace -B userspace/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake -S userspace -B userspace/build -DCMAKE_BUILD_TYPE=Release
 cmake --build userspace/build -j4
 ctest --test-dir userspace/build --output-on-failure
-userspace/build/himax-replay event-stack.bin
+make -C touchscreen-hx83121a-dkms HIMAX_V4L2=1
 ```
 
-`himax-replay` 输入是连续的原生事件栈，默认每帧 5132 字节；
-也支持显式指定 5060 字节 master 长度：
+内核需要 `VIDEO_DEV`、`VIDEOBUF2_V4L2`、`VIDEOBUF2_VMALLOC`、`INPUT_UINPUT` 和
+DRM panel follower 支持。若本机内核没有 uinput，但 build tree 含匹配的完整源码，
+可构建未修改的上游 uinput 模块：
 
 ```sh
-userspace/build/himax-replay frames.bin W273AS2700 5060
+bash scripts/build-uinput.sh
+sudo insmod artifacts/uinput.ko
 ```
 
-输出 CSV 坐标来自上游原版 `TsaOutputMapper`，单位为面板原始方向的显示像素；
-时间以 120 Hz 重建，仅用于无时间戳裸帧回放。截断、校验失败和未知面板返回非零。
-没有真实时间戳的回放不能用作实际输入延迟测量。
+后续内核应直接启用 `CONFIG_INPUT_UINPUT=m`；这个辅助模块不能跨内核版本复用。
 
-原生帧与 THP 帧之间只增加 3 字节运输头，不修改矩阵、suffix 或 checksum。
-原生 master 的 checksum 从 offset 2 开始计算，覆盖至 5060 字节末尾；
-与 THP 从 offset 5 开始计算等价。5132 字节运输记录末尾额外字节不参与该校验。
-`0xbb` 由上游解释为校准完成，不能额外作为所有帧必须满足的固定魔数。
+## 部署和运行
 
-## 移植验收范围
+先做短时采集、服务、watchdog 和打开 MMAP 时解绑测试，完成后自动恢复原模块：
 
-以下是完整任务的要求，不以“库能编译”代替完整驱动验收：
+```sh
+bash scripts/deploy-v4l2-local.sh --trial
+```
 
-1. 全部启用的 TSACore 模块、适配层、参数表及输出映射在 Linux 构建运行。
-2. 内核提供版本化实时帧、生命周期 epoch 和受校验的结果回交；
-   同一帧只有一个求解器上报，继续使用同一个 Type-B 输入设备。
-3. AFE 状态确认、校准、扫描率/频点/IDLE 请求形成受限命令闭环；
-   屏幕电源、复位和算法初始化的语义分别处理。
-4. 守护进程停止、阻塞、设备解绑和 suspend/resume 不留下卡住的触点、
-   越界结果、过期上报或悬空设备访问。
-5. 录制/回放验证输入输出，覆盖静态/快速滑动/多指/边缘及生命周期；
-   量化端到端时延。
-6. Linux 服务安装、恢复方式、已知问题和实机验证结果可复现。
+完整部署会安装模块、用户态程序、udev 规则、systemd unit 和 modules-load 配置：
 
-2026-10-22：第 1 项已有 Release 构建、合成状态转换及一份本机原生帧验证。
-实时接口和硬件闭环仍在实现，尚不能把此目录称为完成部署的驱动。
-旧内核算法在移植验收前保留，作为启动和故障恢复路径。
+```sh
+bash scripts/deploy-v4l2-local.sh
+systemctl status himax-touchd
+journalctl -u himax-touchd -b
+```
+
+脚本要求有现存、可恢复的未压缩模块；备份和日志保留在
+`deploy-logs/v4l2-时间戳/`。`--trial` 不替换启动时使用的模块或启用常驻服务，
+但会按需加载 uinput/videobuf2 依赖。
+
+手动运行时不要同时启动 systemd 服务：
+
+```sh
+sudo userspace/build/himax-touchd
+# 有多个控制器时显式指定：
+sudo userspace/build/himax-touchd --device /dev/video2
+```
+
+设备通过 QUERYCAP 自动识别，不依赖固定 video 编号；安装 udev 规则后另有
+`/dev/himax-raw` 别名。面板参数默认从 OTP project ID 选择，失败时明确提示使用上游
+`W273AS2700` fallback；实测为其他面板时可用 `--project` 显式指定。
+
+服务用三秒 watchdog 监控整个求解循环，进程退出或被终止时关闭 uinput，销毁虚拟设备。
+屏灭事件立即释放所有 slot；epoch、sequence 和时间检查禁止屏灭前队列帧重新生成触点。
+250 ms 没有有效新帧时释放已上报触点。该超时是故障保护，不加入正常逐帧防抖。
+
+## 原始帧采集和回放
+
+观察模式独占 V4L2 队列，不创建输入设备，也不执行算法请求的 AFE 命令。
+因此采集期间触屏不可操作，请使用键盘/鼠标；它不等价于正常服务下的 AFE 闭环。
+
+```sh
+sudo systemctl stop himax-touchd
+sudo timeout --signal=TERM 5 userspace/build/himax-touchd \
+    --observe --record /tmp/capture.hxst
+sudo systemctl start himax-touchd
+userspace/build/himax-replay --hxst /tmp/capture.hxst > /tmp/contacts.csv
+```
+
+正常服务不写逐帧文件；`--record` 仅允许观察模式，避免同步磁盘 I/O 进入输入路径。
+正常服务退出时输出 solver 平均/最大用时、IRQ 到 uinput 的 p95/p99 上界及最大用时。
+该时延不包括控制器扫描之前的硬件时间，也不包括 compositor/application 响应。
+
+也支持旧诊断 trace 和连续裸帧：
+
+```sh
+userspace/build/himax-replay --trace event-trace.bin > /tmp/trace.csv
+userspace/build/himax-replay event-stack.bin > /tmp/raw.csv
+userspace/build/himax-replay frames.bin W273AS2700 5060 > /tmp/master.csv
+```
+
+HXST/旧 trace 使用记录的单调时间戳；裸帧按 120 Hz 重建，不能用于真实时延测量。
+CSV 坐标单位为面板原始方向的显示像素；uinput 使用其十倍量程，保留亚像素信息。
+native master 只前补三个运输字节，不改变原始矩阵、suffix 和 checksum。
+5132 字节 SPI 记录中，仅前 5060 字节属于 master，checksum 覆盖 `[2, 5060)`。
+suffix 中的 `0xbb` 是校准完成状态，通过 ClearStatus(8) 确认，不能作为每帧固定 magic。
+
+## 恢复旧内核算法
+
+旧内核算法为单独构建选项，不与用户态求解同时运行：
+
+```sh
+HIMAX_V4L2=0 bash scripts/deploy-local.sh
+# 需要旧诊断 sysfs/ring 时：
+HIMAX_V4L2=0 HIMAX_DIAGNOSTICS=1 bash scripts/deploy-local.sh
+```
+
+该路径会停止/禁用用户态服务，并把 DKMS 源码的默认值保存为 legacy。
+新 V4L2 路径没有旧 `algo/` 和 `event_trace` ABI，现有诊断 APK/调参 UI 尚未迁移；
+Android init/SELinux、内核配置和设备映射也需要独立集成。
+
+## 验证边界
+
+离线测试覆盖 native checksum、完整 TSACore 初始化及状态转换、Type-B ID 生命周期、
+epoch/旧帧丢弃、HXST/HXTR 格式和截断文件处理。已有真实 512 帧历史 trace 可完整回放。
+这不证明掌压亮屏、快速滑动、多指和长期运行已经通过；不能据此宣称解决原有故障。
+
+实时内核 transport 不做 raw checksum/峰值/基线判定；SPI 读取失败不会投递半帧，
+连续三次失败触发受限重启。用户态校验失败或 SOS 请求通过版本化 V4L2 ioctl 申请恢复，
+不提供任意寄存器写接口。完整接口、拷贝和故障模型见
+[V4L2 架构说明](../docs/touch-offload.md)。
+
+2026-10-22 本机 `7.1.8-gaokun3+` 验证结果：
+
+- `make check`、legacy 诊断模块构建、四组用户态测试通过；
+- ASan/UBSan 四组测试、旧 512 帧 trace、新采 473 帧 HXST 回放通过；
+- 实际 MMAP 采集、正常服务创建/销毁唯一输入设备、SIGSTOP 后 watchdog 终止、
+  保持 fd/MMAP 时解绑与重新绑定通过；最终一轮无新内核 warning/oops；
+- 873 帧短时服务样本中，solver 平均 159 µs、最大 1083 µs；
+  IRQ→uinput p95 < 5650 µs、p99 < 6850 µs、最大 12352 µs。
+  此样本没有受控快速滑动/多指动作，不是触控手感或满负载基准；
+- OTP 读取的 `0x90008010` 握手失败，已明确记录为使用上游 2700 fallback，
+  尚不能宣称面板自动识别已通过；
+- 当前系统已恢复测试前模块，未持久安装新服务；Android 未部署。
+
+实际 suspend/resume、掌压亮屏、充电切换、方向/显示映射、快速滑动、多指和长期稳定性
+仍未验收。早期首次加载曾因错误设置 vb2 最大队列长度触发 warning 并拒绝 probe，
+随后已修正；该失败和自动回退不计为成功的实机验证。

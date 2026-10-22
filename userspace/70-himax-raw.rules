@@ -1,0 +1,2 @@
+# A stable name for this metadata producer; the solver can also autodetect it.
+SUBSYSTEM=="video4linux", ATTR{name}=="Himax HX83121A raw", SYMLINK+="himax-raw", GROUP="video", MODE="0660", TAG+="systemd", ENV{SYSTEMD_WANTS}+="himax-touchd.service"

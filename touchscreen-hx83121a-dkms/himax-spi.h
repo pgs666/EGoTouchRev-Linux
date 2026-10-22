@@ -2,6 +2,9 @@
 #ifndef HIMAX_SPI_H
 #define HIMAX_SPI_H
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+#include "himax-v4l2.h"
+#else
 #include <linux/gpio/consumer.h>
 #include <linux/input.h>
 #include <linux/input/touchscreen.h>
@@ -202,4 +205,5 @@ himax_trace_record_irq(struct himax_ts_data *ts, int read_error,
 }
 #endif
 
+#endif /* CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2 */
 #endif /* HIMAX_SPI_H */

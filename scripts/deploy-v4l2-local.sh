@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# --trial runs a five-second raw capture and a short solver service test, then
+# restores the previous module. Default installs the tested V4L2 stack.
+set -Eeuo pipefail
+repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+trial=0
+case "${1:-}" in
+	--trial) trial=1 ;;
+	"") ;;
+	*) echo "Usage: bash scripts/deploy-v4l2-local.sh [--trial]" >&2; exit 2 ;;
+esac
+kernel_version=$(uname -r)
+stamp=$(date +%Y%m%d-%H%M%S)
+state_dir="$repo_dir/deploy-logs/v4l2-$stamp"
+unit="himax-touchd-trial-$stamp"
+old_module=$(modinfo -n himax_spi 2>/dev/null || true)
+changed=0
+persistent=0
+old_service_active=0
+old_service_enabled=0
+systemctl is-active --quiet himax-touchd.service && old_service_active=1
+systemctl is-enabled --quiet himax-touchd.service && old_service_enabled=1
+installed_paths=(
+	/usr/local/bin/himax-touchd
+	/usr/local/bin/himax-replay
+	/usr/local/lib/systemd/system/himax-touchd.service
+	/usr/local/lib/udev/rules.d/70-himax-raw.rules
+	/usr/local/lib/modules-load.d/himax-touchd.conf
+	/etc/modprobe.d/himax-spi-dkms.conf
+)
+mkdir -p "$state_dir"
+exec > >(tee -a "$state_dir/deploy.log") 2>&1
+echo "checkpoint=$state_dir"
+[[ -f "$old_module" && "$old_module" == *.ko ]] || {
+	echo "Need an existing uncompressed known-good himax-spi.ko for rollback" >&2
+	exit 1
+}
+cp "$old_module" "$state_dir/previous-himax-spi.ko"
+printf '%s\n' "$old_module" > "$state_dir/previous-module-path"
+
+restore() {
+	sudo systemctl stop "$unit.service" 2>/dev/null || true
+	sudo systemctl stop "$unit-watchdog.service" "$unit-unbind.service" 2>/dev/null || true
+	sudo systemctl stop himax-touchd.service 2>/dev/null || true
+	sudo modprobe -r himax_spi || return
+	if (( persistent )); then
+		sudo install -m644 "$state_dir/previous-himax-spi.ko" "$old_module"
+		if [[ -d "$state_dir/dkms-source" ]]; then
+			sudo cp -a "$state_dir/dkms-source/." /usr/src/himax-spi-0.1/
+		else
+			sudo mv /usr/src/himax-spi-0.1 "$state_dir/failed-dkms-source"
+		fi
+		if (( ! old_service_enabled )); then
+			sudo systemctl disable himax-touchd.service 2>/dev/null || true
+		fi
+		for path in "${installed_paths[@]}"; do
+			if [[ -f "$state_dir/installed$path" ]]; then
+				sudo cp -p "$state_dir/installed$path" "$path"
+			else
+				sudo rm -f -- "$path"
+			fi
+		done
+		sudo udevadm control --reload-rules
+		sudo systemctl daemon-reload
+		sudo depmod -a "$kernel_version"
+	fi
+	sudo insmod "$state_dir/previous-himax-spi.ko"
+	if (( old_service_active )); then
+		sudo systemctl start himax-touchd.service
+	fi
+	echo "Restored previous touch module"
+}
+finish() {
+	local status=$?
+	trap - EXIT
+	if (( changed )); then
+		restore || { echo "ROLLBACK FAILED; backup=$state_dir" >&2; exit 1; }
+	fi
+	exit "$status"
+}
+trap finish EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+cmake -S "$repo_dir/userspace" -B "$repo_dir/userspace/build" \
+	-DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
+make -C "$repo_dir" userspace test
+make -C "$repo_dir/touchscreen-hx83121a-dkms" -j4 HIMAX_V4L2=1
+if [[ -e /dev/uinput ]]; then
+	:
+elif ! modinfo uinput >/dev/null 2>&1; then
+	bash "$repo_dir/scripts/build-uinput.sh"
+	sudo insmod "$repo_dir/artifacts/uinput.ko"
+else
+	sudo modprobe uinput
+fi
+sudo modprobe videobuf2_vmalloc
+sudo systemctl stop himax-touchd.service 2>/dev/null || true
+sudo modprobe -r himax_spi
+changed=1
+sudo insmod "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko"
+udevadm settle --timeout=10
+[[ "$(basename "$(readlink -f /sys/bus/spi/devices/spi0.0/driver)")" == himax-spi ]]
+echo "Capturing five seconds of HXST metadata"
+result=0
+sudo timeout --signal=TERM --kill-after=3 5 \
+	"$repo_dir/userspace/build/himax-touchd" --observe \
+	--record "$state_dir/smoke.hxst" || result=$?
+[[ "$result" == 0 || "$result" == 124 ]]
+[[ -s "$state_dir/smoke.hxst" ]]
+"$repo_dir/userspace/build/himax-replay" --hxst "$state_dir/smoke.hxst" \
+	> "$state_dir/smoke.csv"
+sudo systemd-run --quiet --unit="$unit" --property=Type=notify \
+	--property=WatchdogSec=3 --property=TimeoutStopSec=3 \
+	"$repo_dir/userspace/build/himax-touchd"
+for ((i=0; i<5; i++)); do
+	sleep 1
+	sudo systemctl is-active --quiet "$unit.service"
+done
+awk '/^N: Name="Himax Capacitive TouchScreen"$/{n++} END{exit n != 1}' /proc/bus/input/devices
+sudo systemctl stop "$unit.service"
+sudo journalctl -u "$unit.service" --no-pager > "$state_dir/solver.log"
+if (( trial )); then
+	echo "Checking hung solver watchdog"
+	sudo systemd-run --quiet --unit="$unit-watchdog" --property=Type=notify \
+		--property=WatchdogSec=3 --property=WatchdogSignal=SIGKILL \
+		--property=TimeoutStopSec=3 "$repo_dir/userspace/build/himax-touchd"
+	sudo systemctl kill --kill-whom=main --signal=STOP "$unit-watchdog.service"
+	for ((i=0; i<10; i++)); do
+		sleep 1
+		systemctl is-active --quiet "$unit-watchdog.service" || break
+	done
+	[[ "$(systemctl show -p Result --value "$unit-watchdog.service")" == watchdog ]]
+	awk '/^N: Name="Himax Capacitive TouchScreen"$/{n++} END{exit n != 0}' /proc/bus/input/devices
+	echo "Checking unbind with an open stream and MMAP buffers"
+	sudo systemd-run --quiet --unit="$unit-unbind" --property=Type=notify \
+		--property=WatchdogSec=3 --property=WatchdogSignal=SIGKILL \
+		--property=TimeoutStopSec=3 "$repo_dir/userspace/build/himax-touchd" --observe
+	printf '%s' spi0.0 | sudo timeout 10 tee /sys/bus/spi/drivers/himax-spi/unbind >/dev/null
+	for ((i=0; i<5; i++)); do
+		sleep 1
+		systemctl is-active --quiet "$unit-unbind.service" || break
+	done
+	[[ "$(systemctl show -p Result --value "$unit-unbind.service")" == exit-code ]]
+	printf '%s' spi0.0 | sudo timeout 10 tee /sys/bus/spi/drivers/himax-spi/bind >/dev/null
+	[[ -L /sys/bus/spi/devices/spi0.0/driver ]]
+	sudo journalctl -u "$unit-watchdog.service" -u "$unit-unbind.service" \
+		--no-pager > "$state_dir/lifecycle.log"
+fi
+if (( trial )); then
+	echo "Trial passed; restoring previous module"
+	exit 0
+fi
+
+# Persist only after live metadata, solver and uinput registration succeeded.
+if [[ -d /usr/src/himax-spi-0.1 ]]; then
+	sudo cp -a /usr/src/himax-spi-0.1 "$state_dir/dkms-source"
+fi
+for path in "${installed_paths[@]}"; do
+	if [[ -f "$path" ]]; then
+		sudo install -d "$(dirname "$state_dir/installed$path")"
+		sudo cp -p "$path" "$state_dir/installed$path"
+	fi
+done
+persistent=1
+sudo install -d /usr/src/himax-spi-0.1
+while IFS= read -r file; do
+	sudo install -m644 "$repo_dir/touchscreen-hx83121a-dkms/$file" "/usr/src/himax-spi-0.1/$file"
+done < <(make -s --no-print-directory -C "$repo_dir/touchscreen-hx83121a-dkms" print-dkms-sources)
+sudo dkms install --force -m himax-spi -v 0.1 -k "$kernel_version"
+sudo install -m644 "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko" "$old_module"
+if [[ -f "$repo_dir/artifacts/uinput.ko" ]] && ! modinfo uinput >/dev/null 2>&1; then
+	sudo install -Dm644 "$repo_dir/artifacts/uinput.ko" "/lib/modules/$kernel_version/extra/uinput.ko"
+fi
+sudo install -Dm644 "$repo_dir/touchscreen-hx83121a-dkms/himax-spi-dkms.conf" \
+	/etc/modprobe.d/himax-spi-dkms.conf
+sudo depmod -a "$kernel_version"
+sudo cmake --install "$repo_dir/userspace/build"
+sudo udevadm control --reload-rules
+sudo systemctl daemon-reload
+sudo systemctl enable --now himax-touchd.service
+sleep 2
+sudo systemctl is-active --quiet himax-touchd.service
+cmp "$old_module" "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko"
+changed=0
+echo "Installed V4L2 transport and himax-touchd; rollback backup=$state_dir"

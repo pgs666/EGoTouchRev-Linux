@@ -2,6 +2,7 @@ deploy-logs/
 artifacts/
 **/artifacts/
 **/build/
+userspace/build-*/
 __pycache__/
 *.py[cod]
 .venv/

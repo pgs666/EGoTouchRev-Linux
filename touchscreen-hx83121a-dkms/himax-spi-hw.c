@@ -8,7 +8,9 @@
 #include <linux/slab.h>
 
 #include "himax-spi.h"
+#ifndef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
 #include "hx-panel-profile.h"
+#endif
 
 #define HIMAX_BUS_RETRY					3
 /* SPI bus read header length */
@@ -111,15 +113,17 @@ int himax_spi_read(struct himax_ts_data *ts, u8 cmd, u8 *buf, u32 len)
 	int retry_cnt;
 	int ret;
 
-	memset(ts->xfer_buf, 0, HIMAX_BUS_R_HLEN + len);
-	ts->xfer_buf[0] = HIMAX_SPI_FUNCTION_READ;
-	ts->xfer_buf[1] = cmd;
-	ts->xfer_buf[2] = 0x00;
+	if (len > ts->xfer_buf_sz - HIMAX_BUS_R_HLEN)
+		return -EMSGSIZE;
 
 	spi_message_init(&msg);
 	spi_message_add_tail(&xfer, &msg);
 
 	for (retry_cnt = 0; retry_cnt < HIMAX_BUS_RETRY; retry_cnt++) {
+		/* RX aliases TX; a failed transfer may have overwritten the header. */
+		memset(ts->xfer_buf, 0, HIMAX_BUS_R_HLEN + len);
+		ts->xfer_buf[0] = HIMAX_SPI_FUNCTION_READ;
+		ts->xfer_buf[1] = cmd;
 		ret = spi_sync(ts->spi, &msg);
 		if (ret < 0)
 			dev_err_ratelimited(ts->dev,
@@ -168,6 +172,8 @@ static int himax_write(struct himax_ts_data *ts, u8 cmd, u8 *addr,
 {
 	u8 *ptr = ts->xfer_buf;
 
+	if (len > ts->xfer_buf_sz - HIMAX_BUS_W_HLEN || (addr && len < 4))
+		return -EMSGSIZE;
 	memset(ts->xfer_buf, 0, len + HIMAX_BUS_W_HLEN);
 	ts->xfer_buf[0] = HIMAX_SPI_FUNCTION_WRITE;
 	ts->xfer_buf[1] = cmd;
@@ -425,8 +431,10 @@ int himax_get_project_id_otp(struct himax_ts_data *ts, char *project_id,
 			continue;
 		memcpy(project_id, raw, sizeof(raw));
 		project_id[sizeof(raw)] = '\0';
-		if (hx_panel_profile_for_id(project_id)->kind !=
-		    HX_PANEL_PROFILE_GENERIC)
+		if (!strcmp(project_id, "W273AS2700") ||
+		    !strcmp(project_id, "W273AS2710") ||
+		    !strcmp(project_id, "W273AS1300") ||
+		    !strcmp(project_id, "W273AS1310"))
 			return 0;
 	}
 	project_id[0] = '\0';
@@ -518,6 +526,37 @@ static int himax_afe_send_command(struct himax_ts_data *ts, u8 *slot,
 	return 0;
 }
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+int himax_set_charger(struct himax_ts_data *ts, bool connected)
+{
+	int ret;
+
+	ret = himax_mcu_write_verify_u32(ts, HIMAX_DSRAM_ADDR_USB_DETECT,
+		connected ? HIMAX_DSRAM_DATA_USB_CONNECTED : 0, 3);
+	if (!ret)
+		ts->charger_connected = connected;
+	return ret;
+}
+
+int himax_afe_command(struct himax_ts_data *ts, u32 action, u32 parameter)
+{
+	static const u8 commands[] = { 0x06, 0x0c, 0x0e, 0x0a, 0x01 };
+
+	if (action >= ARRAY_SIZE(commands))
+		return -EINVAL;
+	if (action == HX_RAW_CLEAR_STATUS) {
+		if (parameter != 4 && parameter != 8)
+			return -EINVAL;
+	} else if (action == HX_RAW_FORCE_FREQ) {
+		if (parameter > 1)
+			return -EINVAL;
+	} else if (parameter) {
+		return -EINVAL;
+	}
+	return himax_afe_send_command(ts, &ts->afe_command_slot,
+				      commands[action], parameter);
+}
+#else
 int himax_restore_afe_runtime(struct himax_ts_data *ts)
 {
 	int ret;
@@ -570,6 +609,7 @@ int himax_process_blrecal_request(struct himax_ts_data *ts)
 #endif
 	return 0;
 }
+#endif /* CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2 */
 
 /*
  * Wakeup IC bus interface. The IC may enter sleep mode and need to wakeup
@@ -645,6 +685,13 @@ void himax_lock(struct himax_ts_data *ts)
 {
 	himax_quiesce_irq(ts);
 	mutex_lock(&ts->op_lock);
+	/*
+	 * Another lifecycle operation may have enabled IRQ while we waited for
+	 * op_lock. Disable it again; any newly queued IRQ thread also needs this
+	 * mutex, so it cannot enter a hardware transaction until we unlock.
+	 * Do not synchronize_irq() here: that thread could be waiting on us.
+	 */
+	himax_int_enable(ts, false);
 }
 
 void himax_unlock(struct himax_ts_data *ts)
@@ -875,10 +922,14 @@ int himax_restore_raw_runtime(struct himax_ts_data *ts)
 	 */
 	supplied = power_supply_is_system_supplied();
 	if (supplied >= 0) {
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+		ts->charger_connected = supplied > 0;
+#else
 		struct hx_baseline_platform_state state = ts->algo->platform;
 
 		state.charger_connected = supplied > 0;
 		hx_safe_baseline_set_platform_state(ts->algo, &state);
+#endif
 		ret = himax_mcu_write_verify_u32(ts,
 			HIMAX_DSRAM_ADDR_USB_DETECT,
 			supplied ? HIMAX_DSRAM_DATA_USB_CONNECTED : 0, 3);

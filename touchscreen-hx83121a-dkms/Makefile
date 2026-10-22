@@ -6,6 +6,7 @@ MODVER = 0.1
 # no pen parser in this tree yet, so production builds do not compile stylus
 # code.
 HIMAX_STYLUS ?= 0
+HIMAX_V4L2 ?= 1
 
 # The multi-slot SafeBaseline, held-in-hand reacquire, SHB extension and
 # automatic BLRecal paths are still experimental.  They remain enabled by
@@ -14,6 +15,10 @@ HIMAX_STYLUS ?= 0
 HIMAX_EXPERIMENTAL_SAFE_BASELINE ?= 1
 
 obj-m += $(MODNAME).o
+ifeq ($(HIMAX_V4L2),1)
+ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2=1
+$(MODNAME)-y := himax-v4l2.o himax-spi-hw.o
+else ifeq ($(HIMAX_V4L2),0)
 $(MODNAME)-y := himax-spi-core.o himax-spi-hw.o himax-spi-sysfs.o \
 	hx-algo.o hx-algo-preprocess.o hx-algo-detect.o hx-algo-resolve.o \
 	hx-algo-track.o hx-baseline-state.o hx-baseline-property.o \
@@ -44,6 +49,9 @@ DKMS_SOURCES += hx-stylus.c
 else
 ccflags-y += -DHIMAX_STYLUS_DISABLED=1
 endif
+else
+$(error HIMAX_V4L2 must be 0 or 1)
+endif
 
 KVER = $(shell uname -r)
 KDIR = /lib/modules/$(KVER)/build
@@ -59,9 +67,10 @@ DKMS_SOURCES = Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
 	       hx-safe-baseline-signal.c hx-safe-baseline-stats.c \
 	       hx-safe-baseline-judge.c hx-safe-baseline-queue.c hx-algo-track.c \
 	       hx-algo.h hx-algo-internal.h hx-frame-status.h hx-stylus.h \
-	       hx-panel-profile.c hx-panel-profile.h
+	       hx-panel-profile.c hx-panel-profile.h himax-v4l2.c \
+	       himax-v4l2.h hx-v4l2-uapi.h
 
-.PHONY: all clean test deploy-local dkmsinstall dkmsremove
+.PHONY: all clean test deploy-local dkmsinstall dkmsremove print-dkms-sources
 
 all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
@@ -73,7 +82,10 @@ test:
 	$(MAKE) -C ../tests test
 
 deploy-local:
-	../scripts/deploy-local.sh
+	HIMAX_V4L2=$(HIMAX_V4L2) ../scripts/deploy-local.sh
+
+print-dkms-sources:
+	@printf '%s\n' $(DKMS_SOURCES)
 
 dkmsinstall:
 	install -d $(MDIR)

@@ -1,0 +1,34 @@
+[Unit]
+Description=Himax HX83121A userspace touch solver
+After=systemd-udev-trigger.service
+StartLimitIntervalSec=60
+StartLimitBurst=10
+
+[Service]
+Type=notify
+NotifyAccess=main
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/himax-touchd
+Restart=on-failure
+RestartSec=1
+WatchdogSec=3
+WatchdogSignal=SIGKILL
+TimeoutStartSec=30
+TimeoutStopSec=3
+Nice=-5
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX
+RestrictRealtime=yes
+LockPersonality=yes
+DevicePolicy=closed
+DeviceAllow=char-video4linux rw
+DeviceAllow=/dev/uinput rw
+
+[Install]
+WantedBy=multi-user.target

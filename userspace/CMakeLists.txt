@@ -5,6 +5,7 @@ set(CMAKE_CXX_STANDARD 23)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 include(CTest)
+include(GNUInstallDirs)
 
 set(UPSTREAM "${CMAKE_CURRENT_SOURCE_DIR}/../third_party/EGoTouchRev")
 set(SOLVERS "${UPSTREAM}/EGoTouchService/Solvers")
@@ -25,10 +26,11 @@ endif()
 file(GLOB_RECURSE TSACORE_SOURCES CONFIGURE_DEPENDS "${TSACORE}/src/*.cpp")
 add_library(himax-tsacore STATIC ${TSACORE_SOURCES}
     "${TSACORE}/HimaxAfeAdapter.cpp" "${TSACORE}/TsaCoreSolver.cpp"
-    native-frame.cpp)
+    native-frame.cpp recording.cpp)
 target_include_directories(himax-tsacore
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${TSACORE}" "${SOLVERS}"
         "${UPSTREAM}/Common/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms"
     PRIVATE "${TSACORE}/src")
 target_compile_options(himax-tsacore PRIVATE
     -fno-strict-aliasing -fwrapv -ffp-contract=off -ftrivial-auto-var-init=zero)
@@ -41,9 +43,35 @@ add_executable(himax-replay replay.cpp)
 target_link_libraries(himax-replay PRIVATE himax-tsacore)
 target_compile_options(himax-replay PRIVATE -Wall -Wextra -Werror)
 
+add_executable(himax-touchd touchd.cpp v4l2-capture.cpp input.cpp)
+target_include_directories(himax-touchd PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+target_link_libraries(himax-touchd PRIVATE himax-tsacore)
+target_compile_options(himax-touchd PRIVATE -Wall -Wextra -Werror)
+install(TARGETS himax-touchd himax-replay RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+configure_file(himax-touchd.service.in himax-touchd.service @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/himax-touchd.service"
+    DESTINATION lib/systemd/system)
+install(FILES 70-himax-raw.rules DESTINATION lib/udev/rules.d)
+install(FILES himax-touchd.modules.conf DESTINATION lib/modules-load.d
+    RENAME himax-touchd.conf)
+
 if(BUILD_TESTING)
     add_executable(himax-native-test tests/native-test.cpp)
     target_link_libraries(himax-native-test PRIVATE himax-tsacore)
     target_compile_options(himax-native-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME native-frame COMMAND himax-native-test)
+    add_executable(himax-input-test tests/input-test.cpp input.cpp)
+    target_include_directories(himax-input-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_options(himax-input-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME type-b-input COMMAND himax-input-test)
+    add_executable(himax-stream-test tests/stream-test.cpp)
+    target_include_directories(himax-stream-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_options(himax-stream-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME stream-lifecycle COMMAND himax-stream-test)
+    add_executable(himax-recording-test tests/recording-test.cpp)
+    target_link_libraries(himax-recording-test PRIVATE himax-tsacore)
+    target_compile_options(himax-recording-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME recording-validation COMMAND himax-recording-test)
 endif()
