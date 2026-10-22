@@ -116,17 +116,31 @@ systemctl --user daemon-reload
 systemctl --user enable --now himax-screen-bridge.service
 ```
 
-桥接每秒在桌面会话中执行一次 `kscreen-doctor --json`，只选择已启用且已连接的
-`DSI-1`，通过 Unix datagram 发布方向。主服务每 250 ms 排空有界消息队列；
-只接受 root 或 logind `seat0` 当前活动用户的内核验证凭据。主服务没有连接桌面
-D-Bus，也不需要放宽 `ProtectHome` 或增加文件读取权限；每秒重发可覆盖服务重启。
+桥接的后台线程每秒在桌面会话中执行一次 `kscreen-doctor --json`，只选择已启用且
+已连接的 `DSI-1`，通过 Unix datagram 发布方向。桥接主线程另接收启动请求，只从
+最近三秒内成功查询的缓存应答，不会因请求启动 KDE 查询。查询失败或找不到面板时
+清缓存；仅因触控服务未运行而发送失败时保留缓存。
+
+主服务在打开采集设备、启动 AFE 前就建立方向接收器，向当前 `seat0` 用户的桥接发
+一次非阻塞初值请求；硬件初始化期间即可排队接收应答。之后每 250 ms 排空有界
+消息队列，只接受 root 或 logind `seat0` 当前活动用户的内核验证凭据。主服务没有
+连接桌面 D-Bus，也不需要放宽 `ProtectHome` 或增加文件读取权限；每秒重发仍可覆盖
+服务重启或启动时没有缓存的情况。触控 daemon 默认仍为单线程。
 KScreen 的 `1/2/4/8` 分别映射为 `0/1/2/3`，镜像模式拒绝猜测。
+
+桥接请求端点为抽象 Unix datagram 地址 `himax-screen-bridge-<UID>`，请求体严格为
+`HXSR 1\n`。请求方必须是 root 或桥接自身 UID，且源地址必须是固定触控接收端点
+`himax-touchd-screen-state`；回复只发往该端点。两端均拒绝截断报文和意外文件描述符，
+并关闭 `recvmsg` 已接收的文件描述符。桥接每批最多处理 16 条请求，批次间隔至少
+250 ms，防止请求流反复触发处理；方向缓存回复与周期发布串行，避免旧回复越过新方向。
 
 `--rotation N` 固定值优先；其次为 `--rotation-file FILE`/
 `HIMAX_SCREEN_ROTATION_FILE`，内容可为 `0..3`、`90/180/270`、`rotation=...`，
 或显式带标签的 `kscreen=1|2|4|8`。文件源不存在/错误时不改读 framebuffer；
 `fb0/rotate` 并不代表 Wayland 桌面方向。文件限长 63 字节，拒绝 FIFO/设备/软链接。
 未获得方向时保留上游默认值，日志显示 `screen_rotation=-1`；桥接暂失时保留最近方向。
+初值请求不等待应答、不暂停触控；桥接未运行、缓存过期或应答到达较迟时，首批帧
+仍可能使用上游默认值，不能把握手当作所有启动场景下首帧方向必定可用的保证。
 其他桌面或 Android 的显示桥接可原子更新显式文件，但尚未提供对应生产者。
 
 方向更新只影响 TSACore 握持/边缘区域，不改变上报坐标，也不人为抬起触点、不清
@@ -400,7 +414,33 @@ Android init/SELinux、内核配置和设备映射也需要独立集成。
   正常录制：`deploy-logs/session-P5wcQvar/`；DPMS 录制：
   `deploy-logs/session-ST5ydEDS/`。
 
-已安装 daemon SHA-256：
+该次部署的 daemon SHA-256：
 `4700aaa627d1fe666bd5880df485b67a922f82c996aa3a3d8249320d35b9a2b9`。
-真正的系统休眠、其他桌面方向来源、首条桥接消息的初值握手及有标注的实际触控验收
-仍待完成；Android 未部署。
+截至该次验证，真正的系统休眠、其他桌面方向来源、首条桥接消息的初值握手及有标注的
+实际触控验收仍待完成；Android 未部署。
+
+2026-10-23 启动方向缓存握手增量验证：
+
+- 接收器移到设备打开和 STREAMON 前；初值请求只发一次且非阻塞。桥接用三秒内
+  的缓存应答，KDE 查询移到独立后台线程，触控 daemon 默认仍为单线程；
+- Release 与 ASan/UBSan 各 18 组通过，sanitizer 使用 `detect_leaks=0`。
+  真 socket 测试覆盖请求字节、来源地址、真实凭据、缓存过期/清除、异常版本/截断、
+  意外 fd 清理，以及慢查询期间缓存应答不等待查询。另以 root 运行 C++ socket
+  测试和 Python 的 11 个测试，包含降权发送者的真实 UID 拒绝；
+- 本机更新了 `himax-touchd` 与 `himax-screen-bridge`，模块未重载。桥接可用时
+  的 873 帧录制从第一帧起均为 `rotation=3`，没有 `-1` 初值帧；bad/stale、
+  dropped/recording_error 均为零，严格回放 `live_output_verified=1`；
+- 停止桥接后的 552 帧录制均为 `rotation=-1`，仍能持续求解并严格回放一致，四项
+  错误计数也为零。之后恢复桥接，常驻触控进程不重启即收敛到方向 3；
+- 两个服务均 active、`NRestarts=0`，触控 daemon 为单线程。两次录制均无触点，
+  只证明启动、方向获取/回退及录制链路，不能证明实际手势、掌压或四方向手感；
+- 旧程序备份及安装哈希位于 `deploy-logs/direction-handshake-l2nIppN5/`；
+  桥接可用录制：`deploy-logs/session-ByZ67TXY/`；
+  桥接缺失录制：`deploy-logs/session-JVKyMpjV/`。
+
+已安装 daemon SHA-256：
+`ebb6afc6001cf9653c987b59c829b8e31913bd3076fa4b25ff43f68310272703`；
+桥接 SHA-256：
+`b0f281a606dc7fdc4ff5cab37106307ceb3c3a85a33a60a680ddedbd562ac17a`。
+本次没有执行真正系统休眠或修改 Android。桥接冷启动/无新鲜缓存时仍可能先使用
+上游默认方向；实际四方向触控、系统休眠与长期稳定性仍待单独验收。

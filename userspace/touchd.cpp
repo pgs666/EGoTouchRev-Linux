@@ -94,6 +94,11 @@ int main(int argc, char** argv) {
                   << "\ncoordinate_flags=" << info.coordinate_flags << '\n';
         return 0;
     }
+    // Receive desktop state before STREAMON's synchronous hardware startup,
+    // instead of creating the socket only after the first frame is available.
+    himax::ScreenRotationProvider rotationProvider(rotationFile);
+    rotationProvider.SetFixed(fixedRotation);
+    rotationProvider.RequestInitial();
     if (!capture.Open(device) || !capture.Start()) {
         std::cerr << capture.Error() << '\n';
         return 1;
@@ -128,8 +133,6 @@ int main(int argc, char** argv) {
         }
     };
     auto solver = std::make_unique<Solvers::Tsa::TsaCoreSolver>();
-    himax::ScreenRotationProvider rotationProvider(rotationFile);
-    rotationProvider.SetFixed(fixedRotation);
     himax::SolverScreenState solverScreen;
     auto frame = std::make_unique<Solvers::HeatmapFrame>();
     auto packet = std::make_unique<hx_raw_frame>();

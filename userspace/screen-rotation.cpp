@@ -88,8 +88,9 @@ std::optional<int> ParseKScreenRotation(int mask) noexcept {
     }
 }
 
-ScreenRotationProvider::ScreenRotationProvider(std::string rotationFile, std::string_view socketName)
-    : m_rotationFile(std::move(rotationFile)) {
+ScreenRotationProvider::ScreenRotationProvider(
+    std::string rotationFile, std::string_view socketName, std::string_view bridgeSocketPrefix)
+    : m_rotationFile(std::move(rotationFile)), m_bridgeSocketPrefix(bridgeSocketPrefix) {
     if (m_rotationFile.empty()) {
         if (const char* env = std::getenv("HIMAX_SCREEN_ROTATION_FILE"); env && *env)
             m_rotationFile = env;
@@ -118,6 +119,25 @@ void ScreenRotationProvider::SetFixed(std::optional<int> fixedRotation) noexcept
     m_fixed = fixedRotation;
 }
 
+bool ScreenRotationProvider::RequestInitial() const {
+    if (m_socket < 0 || m_fixed || !m_rotationFile.empty() || m_bridgeSocketPrefix.empty())
+        return false;
+    uid_t uid = getuid();
+    uid_t activeUid = 0;
+    // With no active desktop, only try the invoking UID's endpoint. Replies
+    // still undergo the same root/active-seat credential checks in Poll().
+    if (sd_seat_get_active("seat0", nullptr, &activeUid) >= 0) uid = activeUid;
+    const std::string name = m_bridgeSocketPrefix + std::to_string(uid);
+    if (name.size() >= sizeof(sockaddr_un::sun_path)) return false;
+    sockaddr_un address{};
+    address.sun_family = AF_UNIX;
+    std::memcpy(address.sun_path + 1, name.data(), name.size());
+    return sendto(m_socket, kScreenRotationRequest.data(), kScreenRotationRequest.size(),
+                  MSG_DONTWAIT | MSG_NOSIGNAL, reinterpret_cast<sockaddr*>(&address),
+                  offsetof(sockaddr_un, sun_path) + 1 + name.size()) ==
+           static_cast<ssize_t>(kScreenRotationRequest.size());
+}
+
 std::optional<ScreenRotationSample> ScreenRotationProvider::Poll() const {
     if (m_fixed) return ScreenRotationSample{*m_fixed, "fixed"};
     if (!m_rotationFile.empty()) return ReadFile(m_rotationFile);
@@ -128,24 +148,45 @@ std::optional<ScreenRotationSample> ScreenRotationProvider::Poll() const {
     // or external command is part of the per-frame algorithm path.
     for (unsigned int i = 0; m_socket >= 0 && i < 16; ++i) {
         std::array<char, 64> buffer{};
-        alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(ucred))> control{};
+        alignas(cmsghdr) std::array<char,
+            CMSG_SPACE(sizeof(ucred)) + CMSG_SPACE(4 * sizeof(int))> control{};
         iovec data{buffer.data(), buffer.size()};
         msghdr message{};
         message.msg_iov = &data;
         message.msg_iovlen = 1;
         message.msg_control = control.data();
         message.msg_controllen = control.size();
-        const auto length = recvmsg(m_socket, &message, MSG_DONTWAIT);
+        const auto length = recvmsg(m_socket, &message, MSG_DONTWAIT | MSG_CMSG_CLOEXEC);
         if (length < 0) break;
-        if (!length || (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC))) continue;
         bool authorized = false;
+        bool unexpected = false;
         for (auto* cmsg = CMSG_FIRSTHDR(&message); cmsg; cmsg = CMSG_NXTHDR(&message, cmsg)) {
+            if (cmsg->cmsg_len < CMSG_LEN(0)) {
+                unexpected = true;
+                break;
+            }
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS) {
+                // Never retain descriptors from an unsolicited local message,
+                // including ancillary-truncated messages.
+                const auto bytes = cmsg->cmsg_len - CMSG_LEN(0);
+                for (size_t offset = 0; offset + sizeof(int) <= bytes; offset += sizeof(int)) {
+                    int fd = -1;
+                    std::memcpy(&fd, CMSG_DATA(cmsg) + offset, sizeof(fd));
+                    close(fd);
+                }
+                unexpected = true;
+                continue;
+            }
             if (cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_CREDENTIALS ||
-                cmsg->cmsg_len != CMSG_LEN(sizeof(ucred))) continue;
+                cmsg->cmsg_len != CMSG_LEN(sizeof(ucred))) {
+                unexpected = true;
+                continue;
+            }
             ucred credentials{};
             std::memcpy(&credentials, CMSG_DATA(cmsg), sizeof(credentials));
             authorized = credentials.uid == 0 || (activeUser && credentials.uid == uid);
         }
+        if (!length || unexpected || (message.msg_flags & (MSG_TRUNC | MSG_CTRUNC))) continue;
         if (authorized) {
             if (const auto value = ParseSample(std::string_view(buffer.data(), length)))
                 latest = ScreenRotationSample{*value, "desktop-bridge"};

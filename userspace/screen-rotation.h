@@ -8,6 +8,8 @@
 namespace himax {
 
 inline constexpr std::string_view kScreenRotationSocket = "himax-touchd-screen-state";
+inline constexpr std::string_view kScreenBridgeSocketPrefix = "himax-screen-bridge-";
+inline constexpr std::string_view kScreenRotationRequest = "HXSR 1\n";
 
 // Explicit TSACore state, not a KScreen/XRandR bit mask.
 std::optional<int> ParseScreenRotation(std::string_view text) noexcept;
@@ -25,7 +27,8 @@ class ScreenRotationProvider {
 public:
     explicit ScreenRotationProvider(
         std::string rotationFile = {},
-        std::string_view socketName = kScreenRotationSocket);
+        std::string_view socketName = kScreenRotationSocket,
+        std::string_view bridgeSocketPrefix = kScreenBridgeSocketPrefix);
     ~ScreenRotationProvider();
     ScreenRotationProvider(const ScreenRotationProvider&) = delete;
     ScreenRotationProvider& operator=(const ScreenRotationProvider&) = delete;
@@ -33,11 +36,15 @@ public:
     // fixedRotation, when present, is useful for replay and deterministic
     // tests.  Otherwise the first readable source wins.
     void SetFixed(std::optional<int> fixedRotation) noexcept;
+    // One nonblocking request before STREAMON. A running desktop bridge can
+    // answer from its recent cache while the hardware initializes.
+    bool RequestInitial() const;
     [[nodiscard]] std::optional<ScreenRotationSample> Poll() const;
 
 private:
     std::string m_rotationFile;
     std::optional<int> m_fixed;
+    std::string m_bridgeSocketPrefix;
     int m_socket = -1;
 };
 

@@ -4,6 +4,8 @@
 #include <array>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fcntl.h>
 #include <iostream>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -21,8 +23,9 @@ static void Check(bool pass, const char* message) {
 int main() {
     // Independent of the production daemon and parallel test invocations.
     const std::string name = "himax-rotation-test-" + std::to_string(getpid());
+    const std::string bridgePrefix = "himax-rotation-request-test-" + std::to_string(getpid()) + "-";
     unsetenv("HIMAX_SCREEN_ROTATION_FILE");
-    himax::ScreenRotationProvider provider({}, name);
+    himax::ScreenRotationProvider provider({}, name, bridgePrefix);
     const int sender = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     Check(sender >= 0, "create datagram sender");
     sockaddr_un address{};
@@ -38,6 +41,56 @@ int main() {
     uid_t activeUid = 0;
     const bool activeSeat = sd_seat_get_active("seat0", nullptr, &activeUid) >= 0;
     const bool authorized = getuid() == 0 || (activeSeat && activeUid == getuid());
+    Check(!provider.RequestInitial(), "missing bridge fails without waiting");
+    const int bridge = socket(AF_UNIX, SOCK_DGRAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    Check(bridge >= 0, "create startup request server");
+    int passCredentials = 1;
+    Check(!setsockopt(bridge, SOL_SOCKET, SO_PASSCRED, &passCredentials, sizeof(passCredentials)),
+          "request server enables kernel credentials");
+    sockaddr_un bridgeAddress{};
+    bridgeAddress.sun_family = AF_UNIX;
+    const auto bridgeName = bridgePrefix + std::to_string(activeSeat ? activeUid : getuid());
+    std::memcpy(bridgeAddress.sun_path + 1, bridgeName.data(), bridgeName.size());
+    Check(!bind(bridge, reinterpret_cast<sockaddr*>(&bridgeAddress),
+                offsetof(sockaddr_un, sun_path) + 1 + bridgeName.size()),
+          "bind unique active-user request endpoint");
+    Check(provider.RequestInitial(), "initial direction requested");
+    std::array<char, 64> request{};
+    alignas(cmsghdr) std::array<char, CMSG_SPACE(sizeof(ucred))> requestControl{};
+    sockaddr_un peer{};
+    iovec requestData{request.data(), request.size()};
+    msghdr requestMessage{};
+    requestMessage.msg_name = &peer;
+    requestMessage.msg_namelen = sizeof(peer);
+    requestMessage.msg_iov = &requestData;
+    requestMessage.msg_iovlen = 1;
+    requestMessage.msg_control = requestControl.data();
+    requestMessage.msg_controllen = requestControl.size();
+    const auto received = recvmsg(bridge, &requestMessage, MSG_DONTWAIT);
+    Check(received == static_cast<ssize_t>(himax::kScreenRotationRequest.size()) &&
+          std::string_view(request.data(), received) == himax::kScreenRotationRequest,
+          "exact versioned startup request");
+    Check(!requestMessage.msg_flags && requestMessage.msg_namelen == length &&
+          !std::memcmp(&peer, &address, length), "request originates at provider endpoint");
+    auto* credentialsHeader = CMSG_FIRSTHDR(&requestMessage);
+    Check(credentialsHeader && credentialsHeader->cmsg_level == SOL_SOCKET &&
+          credentialsHeader->cmsg_type == SCM_CREDENTIALS &&
+          credentialsHeader->cmsg_len == CMSG_LEN(sizeof(ucred)),
+          "request has kernel credential message");
+    ucred credentials{};
+    std::memcpy(&credentials, CMSG_DATA(credentialsHeader), sizeof(credentials));
+    Check(credentials.uid == getuid() && credentials.pid == getpid(),
+          "request uses real process credentials");
+    Check(sendto(bridge, "kscreen=8\n", 10, 0, reinterpret_cast<sockaddr*>(&peer),
+                 requestMessage.msg_namelen) == 10, "mock bridge replies from cache");
+    auto initial = provider.Poll();
+    Check(authorized ? initial && initial->value == 3 : !initial,
+          "initial response uses normal credential validation");
+    provider.SetFixed(0);
+    Check(!provider.RequestInitial(), "fixed direction suppresses startup request");
+    provider.SetFixed(std::nullopt);
+    himax::ScreenRotationProvider fileProvider("/nonexistent/himax-rotation", {}, bridgePrefix);
+    Check(!fileProvider.RequestInitial(), "explicit file suppresses startup request");
     send("kscreen=8\n");
     auto sample = provider.Poll();
     if (authorized) {
@@ -60,6 +113,38 @@ int main() {
         Check(!sample, "inactive user rejected");
         std::cout << "No active seat for this UID; acceptance requires root/active-seat run\n";
     }
+    // Cover both fully delivered and truncated SCM_RIGHTS. Reject the packet
+    // and close all descriptors installed by recvmsg, regardless of UID.
+    const auto fdCount = [] {
+        size_t count = 0;
+        for ([[maybe_unused]] const auto& entry :
+             std::filesystem::directory_iterator("/proc/self/fd")) ++count;
+        return count;
+    };
+    const int descriptor = open("/dev/null", O_RDONLY | O_CLOEXEC);
+    Check(descriptor >= 0, "open descriptor for unsolicited rights test");
+    for (const size_t count : {1u, 16u}) {
+        alignas(cmsghdr) std::array<char, CMSG_SPACE(16 * sizeof(int))> control{};
+        iovec payload{const_cast<char*>("kscreen=2\n"), 10};
+        msghdr message{};
+        message.msg_name = &address;
+        message.msg_namelen = length;
+        message.msg_iov = &payload;
+        message.msg_iovlen = 1;
+        message.msg_control = control.data();
+        message.msg_controllen = CMSG_SPACE(count * sizeof(int));
+        auto* rights = CMSG_FIRSTHDR(&message);
+        rights->cmsg_level = SOL_SOCKET;
+        rights->cmsg_type = SCM_RIGHTS;
+        rights->cmsg_len = CMSG_LEN(count * sizeof(int));
+        for (size_t i = 0; i < count; ++i)
+            std::memcpy(CMSG_DATA(rights) + i * sizeof(int), &descriptor, sizeof(int));
+        const size_t before = fdCount();
+        Check(sendmsg(sender, &message, MSG_DONTWAIT) == 10, "send unsolicited descriptors");
+        Check(!provider.Poll(), "unsolicited descriptors rejected");
+        Check(fdCount() == before, "no received descriptor leak");
+    }
+    close(descriptor);
     // Running this test as root exercises genuine credential rejection;
     // sender cannot forge uid via the message payload.
     if (getuid() == 0) {
@@ -82,5 +167,6 @@ int main() {
     Check(sample && sample->value == 0 && sample->source == "fixed",
           "fixed override wins over queued messages");
     close(sender);
+    close(bridge);
     std::cout << "screen rotation socket regression passed\n";
 }
