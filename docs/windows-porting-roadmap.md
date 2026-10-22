@@ -42,11 +42,14 @@ Linux 充电状态仍由独立 work 应用。旧检查和 replay 只保留在 le
 安全模式、native sense-on、GPIO 时序、IRQ/清帧及 Linux 充电集成仍有差异，验证边界
 见 [用户态运行说明](../userspace/README.md)。
 
-`6a819ad` 已经完成本机普通模块试运行及正式安装，运行模块与磁盘/DKMS 缓存一致。
-新流程下显式校准、清状态、IDLE 可确认，但频点 1 仍未观察到完成；完整 AFE 测试保留
-失败结果，不能把初始化事务对齐当作切频恢复的证明。本次源码已经推进 power-on/
-raw 类型对齐，下一轮继续核对 reset 前 reload 清零、IC 探测额外 safe-mode 和 native
-sense-on/物理 reset，再做受控实机验证；不能仅凭帧流正常就宣布完整移植完成。
+`c496521` 已经完成本机普通模块试运行及正式安装，运行模块与磁盘/DKMS 缓存一致。
+30 项 Release 测试、相关四项 sanitizer 及 basic AFE 检查通过；显式校准、清状态、
+IDLE 可确认。频点 1 在上一轮仍未观察到完成，本轮未重测；完整 AFE 测试的失败结果
+保留，不能把初始化事务对齐当作切频恢复的证明。下一轮继续核对 native AHB burst
+（Windows 基值 `0x12`，Linux
+`0x10` 且事务后反向切换）、reset 前 reload 清零、IC 探测额外 safe-mode 和 native
+sense-on/物理 reset，再做受控实机验证。寄存器层 oracle 不覆盖总线层差异，
+不能仅凭帧流正常就宣布完整移植完成。
 
 ---
 

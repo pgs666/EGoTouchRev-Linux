@@ -90,6 +90,12 @@ Windows `SetReset` IOCTL 内部时序未知，不能用无延时脉冲替代。L
 清帧及 IRQ 接口也不同，slave/pen 按本项目范围保持关闭。不能据此声称完整
 `Chip::Init()`、物理 SPI 生命周期或手动切频已验收。
 
+下一层已确认的源码差异是 AHB burst：Windows 的 `0x0d` 基值为 `0x12`，Linux
+仍为 `0x10`；Linux 的寄存器事务结束还会切到相反的增址模式，Windows 则保持当前
+事务选择的模式。上述 oracle 在寄存器边界替换 HAL，因此无法覆盖这两项；
+应先对照真实总线原语和故障路径，再移植与实测，不能从 raw 帧有效推断两者等价，
+也不能直接认定它们导致手动切频未完成。
+
 ### 边缘滑入的首报修正
 
 上游 EdgeRecovery 按确认按下时的当前位置决定是否恢复边缘起点；快速滑动在
@@ -798,3 +804,34 @@ Linux 专属回归。当前不因此更改 `freqHopMode`、扩展未验证的固
 验收通过；也没有部署 Android。前置准备的事务对照已完成，完整硬件生命周期仍需
 继续核对，尤其是初次 reset 前的 reload 清零、Linux IC 检测的额外 safe-mode 动作、
 raw 类型选择的验证/重试，以及后置 AP/USB/sorting/N-frame 重放与 Windows 的差别。
+
+2026-10-23 power-on/raw 类型对齐（`c496521`）与本机部署：
+
+- 默认入口改用 `hx_raw_start_scan()`，执行准备、Windows power-on、完整 reload
+  字轮询、50 次 raw 类型验证和只写 producer handshake；移除 default 的 A8 门槛、
+  power-on sorting 读回及后置 legacy runtime replay。旧入口行为保持不变；
+- `raw-master-startup` 用上游八个未改函数体及实际 Init master 调用片段对照完整
+  寄存器事务、回调和延时。覆盖每笔正常事务的传输故障、所有 reload 次数边界、
+  四个辅助状态读取失败、raw 验证的 0～50 次比较/读/写故障和最后一次错误优先级；
+- `make check` 通过：checkpatch、全部 host 回归、普通模块及 30 项 Release CTest。
+  新启动、原准备、legacy power-on 和源码提取集成四项 ASan/UBSan 测试通过。
+  legacy、V4L2 邮箱诊断、普通 V4L2 三种构建通过；编译器/pahole 版本差异警告仍在，
+  没有构建错误。未重新运行完整 30 项 sanitizer；
+- 临时普通模块 `deploy-logs/v4l2-20261023-052211/`：513 个 smoke 帧，首个全零帧
+  由既有启动容错接纳，后续 512 帧有效。solver 共 874 帧、bad/stale=0；
+  watchdog 与 MMAP 解绑检查通过，并正常恢复旧模块；
+- 正式安装 `deploy-logs/v4l2-20261023-052321/`：515 个 smoke 帧，首个全零，
+  后续 514 帧有效，录制无丢帧/错误；DKMS/dracut 期间临时 solver 共 912 帧、
+  bad/stale=0，安装及服务交接正常。仓库、磁盘、DKMS 缓存 SHA-256 一致：
+  `bd2c9cbe28692c9b3eaaf843e420afecf2a47cc455a9c8d7e4cb8d3ce5ec1392`，
+  运行 build ID 与磁盘一致：`9653f551c0c1eab4b659e352da87ec03ec22c418`；
+- 安装后 basic AFE 检查 `deploy-logs/afe-TNy7g1zC/`：显式 calibration-done、
+  clear-status/ack、IDLE 后续 suffix 全部确认，38 帧有效、startup_invalid=0。
+  此次 IDLE 在约 3061 ms 后出现，不能将不同记录的时序差异当作性能改善。
+  扫描率只有传输证据；本次未重测手动切频，上一轮的未完成结论仍保留；
+- 检查后常驻服务与方向桥接 active、NRestarts=0；常驻 solver 877 帧、
+  bad/stale=0。普通模块邮箱诊断未编译，daemon 二进制沿用边缘修复版本。
+
+这些实机检查无真实触点，不能据此宣称手势、掌压亮屏、真实系统睡眠或长期触控性能
+已经验收；Android 未修改。接下来先对照 AHB 原语的 `0x12`/`0x10` 与增址模式差异，
+再移植 initial reset/IC detect/sense-on 的剩余行为。
