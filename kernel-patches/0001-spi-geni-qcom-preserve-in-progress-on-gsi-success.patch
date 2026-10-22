@@ -1,0 +1,37 @@
+From: EGoTouchRev Linux maintainers
+Subject: [PATCH] spi: geni-qcom: preserve in-progress message status on GSI success
+
+The GSI completion callback completes a transfer, not the whole message.
+Setting cur_msg->status to zero makes spi_transfer_one_message() skip its
+actual_length accounting and stop before subsequent transfers. Leave the
+message in progress on success and only set status on a DMA error/residue.
+Do not clear an error already recorded for the message.
+
+Observed on Gaokun with 7.1.8-gaokun3+: successful single transfers report
+actual_length=0. A strict SPI client consequently refuses to start. This
+patch is a host controller prerequisite, not a Himax wire protocol change.
+
+--- a/drivers/spi/spi-geni-qcom.c
++++ b/drivers/spi/spi-geni-qcom.c
+@@ -375,19 +375,19 @@ spi_gsi_callback_result(void *cb, const struct dmaengine_result *result)
+ {
+ 	struct spi_controller *spi = cb;
+ 
+-	spi->cur_msg->status = -EIO;
+ 	if (result->result != DMA_TRANS_NOERROR) {
++		spi->cur_msg->status = -EIO;
+ 		dev_err(&spi->dev, "DMA txn failed: %d\n", result->result);
+ 		spi_finalize_current_transfer(spi);
+ 		return;
+ 	}
+ 
+ 	if (!result->residue) {
+-		spi->cur_msg->status = 0;
+ 		dev_dbg(&spi->dev, "DMA txn completed\n");
+ 	} else {
++		spi->cur_msg->status = -EIO;
+ 		dev_err(&spi->dev, "DMA xfer has pending: %d\n", result->residue);
+ 	}
+ 
+ 	spi_finalize_current_transfer(spi);
+ }

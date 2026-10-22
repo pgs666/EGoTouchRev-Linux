@@ -35,6 +35,7 @@ touchscreen-hx83121a-dkms/  内核模块和 DKMS 配置
 tests/                       纯算法 host regression
 userspace/                   原版 TSACore、V4L2 daemon、uinput、录制/回放
 third_party/EGoTouchRev/      Windows 上游 EGoTouchRev 的固定版本 submodule
+kernel-patches/              严格 SPI 传输检查所需的宿主控制器修复
 scripts/                     本机安全部署脚本
 himax-touch-diagnostic/      手动故障采集 Android 应用
 android-tuner/               Android root 调参和诊断应用
@@ -47,7 +48,7 @@ APK、内核模块、采集日志和本机部署记录是构建/运行产物，�
 ## 构建
 
 要求当前内核 headers/build tree、C++23 编译器、CMake、pkg-config、libsystemd 开发文件
-和测试所需的 Python 3。默认同时构建 V4L2 内核模块、
+和测试所需的 Python 3、patch（控制器补丁回归）。默认同时构建 V4L2 内核模块、
 用户态程序并执行回归测试：
 
 ```sh
@@ -67,6 +68,10 @@ make check       # clean host tests + clean module build + diff whitespace
 默认模块不含触控算法，必须运行 `himax-touchd` 才产生触摸输入。它需要
 `CONFIG_INPUT_UINPUT` 和 V4L2/vb2-vmalloc 支持；依赖、安装和采集方法见
 [用户态说明](userspace/README.md)。
+
+部分 GENI GSI 控制器源码提前结束 SPI 消息，导致成功返回但 `actual_length=0`。
+严格长度检查会拒绝启动；需先提供 [SPI 控制器修复](kernel-patches/README.md)。
+DKMS 不会自动修改宿主控制器；不要通过放行短传输绕过这个前置条件。
 
 旧内核算法需显式选择；其诊断版构建为：
 

@@ -27,7 +27,11 @@ MODULE_PARM_DESC(afe_mailbox_debug,
 #define himax_afe_mailbox_debug false
 #endif
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
+#define HIMAX_BUS_RETRY					10
+#else
 #define HIMAX_BUS_RETRY					3
+#endif
 /* SPI bus read header length */
 #define HIMAX_BUS_R_HLEN				3U
 /* SPI bus write header length */
@@ -113,7 +117,6 @@ int himax_spi_read(struct himax_ts_data *ts, u8 cmd, u8 *buf, u32 len)
 {
 	struct spi_message msg;
 	struct spi_transfer xfer = {
-		.len = HIMAX_BUS_R_HLEN + len,
 		.tx_buf = ts->xfer_buf,
 		.rx_buf = ts->xfer_buf,
 		.cs_change = 0,
@@ -121,9 +124,11 @@ int himax_spi_read(struct himax_ts_data *ts, u8 cmd, u8 *buf, u32 len)
 	int retry_cnt;
 	int ret;
 
-	if (len > ts->xfer_buf_sz - HIMAX_BUS_R_HLEN)
+	if (ts->xfer_buf_sz < HIMAX_BUS_R_HLEN ||
+	    len > ts->xfer_buf_sz - HIMAX_BUS_R_HLEN)
 		return -EMSGSIZE;
 
+	xfer.len = HIMAX_BUS_R_HLEN + len;
 	spi_message_init(&msg);
 	spi_message_add_tail(&xfer, &msg);
 
@@ -133,11 +138,23 @@ int himax_spi_read(struct himax_ts_data *ts, u8 cmd, u8 *buf, u32 len)
 		ts->xfer_buf[0] = HIMAX_SPI_FUNCTION_READ;
 		ts->xfer_buf[1] = cmd;
 		ret = spi_sync(ts->spi, &msg);
+		/* A successful but short read is not a complete event/register.
+		 * Like Windows ReadBus, reject it without another bus transaction.
+		 */
+		if (!ret && msg.actual_length != xfer.len) {
+			dev_err_ratelimited(ts->dev, "Short SPI read: %u/%u\n",
+					    msg.actual_length, xfer.len);
+			return -EIO;
+		}
 		if (ret < 0)
 			dev_err_ratelimited(ts->dev,
 					    "SPI read failed: %d (attempt %d/%d)\n",
 					    ret, retry_cnt + 1, HIMAX_BUS_RETRY);
 		else
+			break;
+		/* Do not retry cancellation or a controller being removed/stopped. */
+		if (ret == -ECANCELED || ret == -EINTR || ret == -ERESTARTSYS ||
+		    ret == -ESHUTDOWN || ret == -ENODEV)
 			break;
 	}
 
@@ -171,6 +188,11 @@ static int himax_spi_write(struct himax_ts_data *ts, u8 *tx_buf, u32 len)
 		dev_err(ts->dev, "SPI write failed: %d\n", ret);
 		return ret;
 	}
+	if (msg.actual_length != len) {
+		dev_err_ratelimited(ts->dev, "Short SPI write: %u/%u\n",
+				    msg.actual_length, len);
+		return -EIO;
+	}
 
 	return 0;
 }
@@ -180,7 +202,8 @@ static int himax_write(struct himax_ts_data *ts, u8 cmd, const u8 *addr,
 {
 	u8 *ptr = ts->xfer_buf;
 
-	if (len > ts->xfer_buf_sz - HIMAX_BUS_W_HLEN || (addr && len < 4))
+	if (ts->xfer_buf_sz < HIMAX_BUS_W_HLEN ||
+	    len > ts->xfer_buf_sz - HIMAX_BUS_W_HLEN || (addr && len < 4))
 		return -EMSGSIZE;
 	memset(ts->xfer_buf, 0, len + HIMAX_BUS_W_HLEN);
 	ts->xfer_buf[0] = HIMAX_SPI_FUNCTION_WRITE;

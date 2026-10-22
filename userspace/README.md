@@ -135,6 +135,38 @@ reset/sense-on 对照逐笔验证 reload 清零、GPIO 两次切换、burst、IS
 控制器实际传输长度、GPIO、Windows THP IOCTL 内部时序仍需单独验证。
 不能由协议级对照或 raw 帧有效直接推断物理 SPI、完整生命周期、手动切频均已对齐。
 
+### 原生 SPI 封包与短传输
+
+默认 V4L2 路径的读取使用与 Windows `HalDevice::Ioctl()` 相同的最多十次尝试，
+legacy 保留三次；成功但长度不足的读取在 OS 事务返回之后直接失败，不额外重试。
+native 检查 `spi_message.actual_length` 必须等于整笔长度，完整读回后才复制给
+调用方；拒绝短帧和不可能的超长返回。读写容量检查先验证 header/地址空间，
+再做减法或加法，避免小容量下溢及最大 u32 长度绕过边界检查。
+
+测试直接编译当前 `himax_spi_read`、`himax_spi_write`、`himax_write` 和 AHB 写适配，
+与固定上游未经修改的 `IoctlOnce/Ioctl/ReadBus/WriteBus` 对照。比较所有 256 个命令、
+header/可选四字节地址/payload、多个长度直到 native 容量边界、每个重试停止位置、
+短读取和取消；源码生成器检查上游 cpp/h 哈希、原函数体完整性及 native 改动刷新。
+Windows 的 `PerformSyncIo` 和 kernel `spi_sync` 被同一个同步假控制器替换；
+这不验证 Windows overlapped 等待、THP IOCTL 或 Linux SPI 控制器的物理行为。
+
+以下是有测试的 native 保护，不宣称逐项等同 Windows：
+
+- 每次读取重试都重建 TX header 和 dummy 数据，防止共用 RX/TX 缓冲区在失败时
+  被改写；独立测试九次部分损坏后第十次成功及输出与 scratch 重叠的情况；
+- `ECANCELED` 对应 Windows 取消后停止重试；Linux 另对 `EINTR/ERESTARTSYS`、
+  `ESHUTDOWN/ENODEV` 立即返回，保留原始 errno；
+- Windows 当前 `WriteBus` 不验证返回长度；native 额外拒绝短写，但同样不重试写入，
+  避免自动重复有副作用的命令。
+
+重试次数增加只影响读取发生总线错误的路径，不增加正常触控的确认帧或等待。
+真实短传输/取消/控制器移除故障注入尚未由上述 host 对照证明。
+
+实机发现的前置条件：本机 GENI GSI 完成回调提前设置 message success，造成
+`spi_sync=0 / actual_length=0`。严格检查会拒绝第一笔写入并停止启动。
+对应宿主补丁及适用条件见 [SPI 控制器修复](../kernel-patches/README.md)；
+不能单独升级触摸模块而忽略此依赖，也不能据此放行任意零长度传输。
+
 ### 边缘滑入的首报修正
 
 上游 EdgeRecovery 按确认按下时的当前位置决定是否恢复边缘起点；快速滑动在
@@ -907,3 +939,52 @@ raw 类型选择的验证/重试，以及后置 AP/USB/sorting/N-frame 重放与
 下一阶段核对 initial reset 前的 reload 清零、IC detect 的额外安全模式和 native
 sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未启用的功能不能自行打开，
 手动切频仍需 Windows 同命令实机对照或新的固件状态证据。
+
+2026-10-23 reset/sense-on 移植（`f27e70e`）：
+
+- 初始与 OTP 后的 reset 现通过共享 `hx_ahb_hw_reset()` 清 reload、切 GPIO、
+  开 burst，调用方等 10 ms；IC ID 只读校验保留，不再为此进入旧 safe mode。
+  sense-on 调用共享实现，接口唤醒 → ISR 清零 → 11 ms → GPIO 低/高。
+  GPIO 仍保留 native 20/50 ms 时序；probe 改为先释放 RESET，避免首笔 SPI
+  写发生在 reset asserted 状态。OTP 自身的安全模式与 legacy 路径保持不变；
+- AHB 源码 oracle 增加未经修改的 Windows `hx_hw_reset_ahb_intf` 和 `hx_sense_on`，
+  对照普通/延迟 interface-on 下所有总线和 GPIO 故障的停止位置、11 ms 等待及
+  两种 sense-on 分支。`make check`（32 项 Release）通过；相关两项 sanitizer
+  通过；legacy、普通 V4L2、邮箱诊断 V4L2 均编译成功。未重跑完整 sanitizer；
+- full AFE 诊断试载 `deploy-logs/v4l2-20261023-054919/`：OTP 仍为 W273AS2700，
+  slot=0x0f18、revision=0x46、E2=0、valid=3。smoke 共 516 帧，首个全零、
+  后续 515 帧有效。校准和清状态成功；切频仍在 sequence 38 发送后、五秒期限
+  sequence 638 未完成，返回 1 并恢复旧模块；638 个 AFE raw 帧全部有效。
+  不再将重复同一失败测试当作进展；除非出现新协议/固件证据，不继续重复切频；
+- 普通模块试载 `deploy-logs/v4l2-20261023-055026/`：smoke 共 514 帧，首个全零，
+  后续 513 帧有效、stale/dropped/recording_error=0；solver、watchdog、MMAP
+  解绑检查通过，结束恢复旧模块。启动日志中不再出现旧 `himax_sense_off`，但不代表
+  OTP 的专用 safe-mode 序列被移除，也不代表真实系统睡眠已经验收。
+- 正式安装完成：`deploy-logs/v4l2-20261023-055132/`。仓库产物和已安装模块
+  SHA-256 均为 `8b48c3c983effa074d555155489e9270fa1094617a2497bacf56ce161dd1a00a`，
+  部署脚本核对运行 build ID 为 `d9175dce3a0b1ca67573640cd517ed61d6611ff1`。
+  临时 solver 至交接累计 911 帧、bad=1、stale=0，不能将其描述为全程零错误；
+  `touch_reports=0`，不构成实际手势验证。交接后常驻服务与方向桥接均 active，
+  `NRestarts=0`；已安装 daemon 与仓库 Release 产物一致，仍包含上述边缘首报修正。
+- 安装完成后重新运行四方向 `solver-edge`、完整 A/B `edge-onset-reference`
+  和 `edge-onset-evidence`，六项均通过；`git diff --check` 通过。
+  尚未验证真实快速入屏手势，Android 未部署该用户态路径。
+
+2026-10-23 native SPI 对照与 GENI 控制器前置修复：
+
+- 默认读取最多十次、取消/停止错误终止；完整长度通过后才复制读结果，短成功不
+  重试。写入保持单次并拒绝短成功；读写的极小容量和 u32 溢出边界先验证再计算。
+  直接源码测试比较 native SPI 与固定 Windows bus 方法，明确区分 native 保护；
+- `make check`（34 项 Release）通过；完整 34 项 ASan/UBSan 通过；随后新增的
+  `geni-completion-policy` 使用实际补丁并单独在 ASan/UBSan 下通过，35 项 Release
+  全部通过。legacy 诊断、邮箱诊断 V4L2、普通 V4L2 三种模块均编译成功；
+- 第一次普通试载 `deploy-logs/v4l2-20261023-060313/` 失败并回退：第一笔写入
+  `Short SPI write: 0/3`。核对本机 GENI GSI callback 与 SPI core 后确认提前设置
+  message success 会跳过长度累计。没有将这次试验改记为通过；
+- 控制器补丁在 `kernel-patches/`，未改其他内核/buildbot 仓库或已安装 headers。
+  用匹配 headers 独立编译修正的控制器模块，先核对本机只有一个 SPI 控制器和
+  一个 Himax 从设备，再进行临时替换；记录 `deploy-logs/geni-completion-U5LrqQG6/`；
+- 依赖补丁的普通试载 `deploy-logs/v4l2-20261023-060921/` 通过：515 个 smoke 帧，
+  首个全零由既有启动容错接纳，其后 514 帧有效，stale/dropped/recording_error=0。
+  solver/watchdog/MMAP 解绑检查通过；试验结束恢复原控制器和原触摸模块。
+  不包含真实手势、真实多 transfer SPI 消息或实际 DMA 故障注入验收；Android 未修改。

@@ -44,7 +44,13 @@ AHB oracle 直接编译上游总线协议函数，对照实际命令/地址/payl
 启动 reset 与 sense-on 也已接入共享 AHB 层及上游原函数对照。默认入口清 reload 后
 切 reset、开 burst、等 10 ms、只读 IC ID；首次 OTP 后再 reset。不再每次读 IC ID
 都进入旧 safe mode，OTP 自己的安全模式不变。probe 先释放 GPIO，避免 reset 中
-执行第一笔寄存器写入。native SPI 封包、重试与物理控制器仍在 oracle 边界之外。
+执行第一笔寄存器写入。native SPI 封包现有独立对照：直接编译原生读写函数与
+Windows `IoctlOnce/Ioctl/ReadBus/WriteBus`，比较 256 个命令、地址/payload、读取
+十次重试、短读取和取消；native 另校验实际读写长度、终止控制器停止/移除重试并
+重建被 RX 覆盖的重试 header。测试替换 OS I/O 边界，不覆盖物理 SPI/Windows
+overlapped/THP IOCTL，短写拒绝和 Linux 专属终止错误也不是上游逐项等价行为。
+实机另发现 GENI GSI 提前完成消息，导致成功返回但长度为零；严格 SPI 检查依赖
+[宿主控制器补丁](../kernel-patches/README.md)，不在 Himax 客户端中放行零长度。
 这不代表 Windows 整个 `Chip::Init()` 已经逐笔等价：只读 IC 检查、
 GPIO 时序、IRQ/清帧及 Linux 充电集成仍有差异，验证边界
 见 [用户态运行说明](../userspace/README.md)。
@@ -54,8 +60,8 @@ GPIO 时序、IRQ/清帧及 Linux 充电集成仍有差异，验证边界
 显式校准、清状态、IDLE 可确认。带诊断模块 full AFE 重测中频点 1 仍未观察到完成，
 五秒后 sequence 638 仍为 slot=0/done=0，测试返回 1 并恢复旧模块。保留失败结果，
 不能把 AHB/初始化事务对齐当作切频恢复的证明。
-当前代码进一步移植 reset/sense-on 和 IC 探测入口，后续核对 native SPI 封包、
-实际传输长度、重试、清帧与 IRQ，再做受控实机验证。
+reset/sense-on 和 IC 探测入口已完成本机正式安装（`f27e70e`），native SPI 封包、
+实际传输长度和重试已补充实现/host 对照，后续仍需受控实机验证以及清帧与 IRQ 审计。
 寄存器级与总线命令/GPIO回调级 oracle 都不覆盖物理 SPI/IOCTL 差异，
 不能仅凭帧流正常就宣布完整移植完成。
 

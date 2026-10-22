@@ -126,6 +126,30 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/ahb-reference-test.py" "${CMAKE_COMMAND}"
         "${UPSTREAM}/EGoTouchService/Device/himax"
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AhbReference.cmake")
+    include(cmake/SpiReference.cmake)
+    himax_prepare_spi_reference("${UPSTREAM}/EGoTouchService/Device/himax"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms/himax-spi-hw.c"
+        "${TSACORE_OVERLAY}")
+    add_executable(himax-spi-test tests/spi-test.cpp
+        "${TSACORE_OVERLAY}/spi-native.c" "${TSACORE_OVERLAY}/spi-reference.cpp")
+    # Upstream WriteBus's WriteFile lambda leaves pBytes unused. Keep its body
+    # exact without weakening warnings for native code or the test harness.
+    set_source_files_properties("${TSACORE_OVERLAY}/spi-reference.cpp"
+        PROPERTIES COMPILE_OPTIONS "-Wno-unused-parameter")
+    target_include_directories(himax-spi-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_compile_definitions(himax-spi-test PRIVATE CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2=1)
+    target_compile_options(himax-spi-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME native-spi-protocol COMMAND himax-spi-test)
+    add_test(NAME spi-reference-integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/spi-reference-test.py" "${CMAKE_COMMAND}"
+        "${UPSTREAM}/EGoTouchService/Device/himax"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms/himax-spi-hw.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/SpiReference.cmake")
+    add_test(NAME geni-completion-policy COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/geni-completion-test.py" "${CMAKE_C_COMPILER}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/geni-completion-test.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/geni-gsi-completion.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../kernel-patches/0001-spi-geni-qcom-preserve-in-progress-on-gsi-success.patch")
     include(cmake/AfeReference.cmake)
     himax_prepare_afe_reference(
         "${UPSTREAM}/EGoTouchService/Device/himax/HimaxProtocol.cpp"
