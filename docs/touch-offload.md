@@ -16,8 +16,8 @@ SPI IRQ
   → Linux input/libinput
 ```
 
-内核仅有 `himax-v4l2.c`、共享的 `himax-spi-hw.c` 和可单独 host 测试的 OTP 协议
-`hx-otp.c` 三个编译单元。不链接 baseline、
+内核仅有 `himax-v4l2.c`、共享的 `himax-spi-hw.c` 和可单独 host 测试的协议
+`hx-otp.c` / `hx-afe.c` 四个编译单元。不链接 baseline、
 peak detection、tracker、滤波、input 或旧诊断 ring。保留的硬件职责包括 GPIO reset、
 AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、系统 PM、充电状态和命令邮箱。
 这些必须由硬件拥有者串行执行，无法可靠地简化为毫无生命周期的 SPI 字节转发器。
@@ -56,6 +56,12 @@ Linux 有两处宿主方向适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys
 校验 action、参数和保留字段；普通 action 最短间隔 20 ms，reset 最短一秒，
 重建 AFE epoch 不清除 reset 的限频时间戳。
 这是邮箱传输确认，calibration-done 仍通过后续帧状态确认，不能把写入成功称为校准完成。
+
+邮箱协议的生产实现位于 `hx-afe.c`：写入 16 字节包体，再写四字节触发头，最后读回
+16 字节；只有三步均成功才轮转五个槽位，任意失败保留当前槽位供重试。host 测试会
+直接编译固定版本 Windows `HimaxProtocol.cpp` 中的原始构包函数，对全部 65,536 种
+命令/参数组合逐字节比较，并对五个槽位的三步事务分别注入失败。原始构包函数的提取
+仅用于测试，不加入运行时求解器或内核，也不会把读回解释成固件完成回执。
 
 ABI v2 将 INFO 的原保留字段定义为 `coordinate_flags`，结构仍为 40 字节。
 bit 0/1/2 分别是 invert X、invert Y 和 swap XY；其他位必须为零。内核从固件

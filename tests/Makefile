@@ -3,7 +3,7 @@ CFLAGS ?= -O2 -Wall -Wextra -Werror
 
 .PHONY: all clean test
 
-all: hx-algo-test hx-otp-test hx-raw-policy-test
+all: hx-algo-test hx-otp-test hx-raw-policy-test hx-afe-test
 
 ALGO_DIR := ../touchscreen-hx83121a-dkms
 ALGO_SOURCES := $(ALGO_DIR)/hx-algo.c $(ALGO_DIR)/hx-algo-preprocess.c \
@@ -40,10 +40,14 @@ hx-otp-test: hx-otp-test.c $(ALGO_DIR)/hx-otp.c $(ALGO_DIR)/hx-otp.h
 hx-raw-policy-test: hx-raw-policy-test.c $(ALGO_DIR)/hx-raw-policy.h
 	$(CC) $(CFLAGS) -I$(ALGO_DIR) hx-raw-policy-test.c -o $@
 
-test: hx-algo-test hx-otp-test hx-raw-policy-test
+hx-afe-test: hx-afe-test.c $(ALGO_DIR)/hx-afe.c $(ALGO_DIR)/hx-afe.h
+	$(CC) $(CFLAGS) -I$(ALGO_DIR) $(ALGO_DIR)/hx-afe.c hx-afe-test.c -o $@
+
+test: hx-algo-test hx-otp-test hx-raw-policy-test hx-afe-test
 	./hx-algo-test
 	./hx-otp-test
 	./hx-raw-policy-test
+	./hx-afe-test
 
 clean:
-	rm -f hx-algo-test hx-otp-test hx-raw-policy-test
+	rm -f hx-algo-test hx-otp-test hx-raw-policy-test hx-afe-test

@@ -75,6 +75,7 @@ install(FILES "${CMAKE_CURRENT_BINARY_DIR}/himax-screen-bridge.service"
     DESTINATION lib/systemd/user)
 
 if(BUILD_TESTING)
+    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_executable(himax-native-test tests/native-test.cpp)
     target_link_libraries(himax-native-test PRIVATE himax-tsacore)
     target_compile_options(himax-native-test PRIVATE -Wall -Wextra -Werror)
@@ -107,6 +108,21 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-otp-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME otp-protocol COMMAND himax-otp-test)
+    include(cmake/AfeReference.cmake)
+    himax_prepare_afe_reference(
+        "${UPSTREAM}/EGoTouchService/Device/himax/HimaxProtocol.cpp"
+        "${TSACORE_OVERLAY}/afe-reference.cpp")
+    add_executable(himax-afe-test ../tests/hx-afe-test.c
+        ../touchscreen-hx83121a-dkms/hx-afe.c "${TSACORE_OVERLAY}/afe-reference.cpp")
+    target_include_directories(himax-afe-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_definitions(himax-afe-test PRIVATE HX_AFE_UPSTREAM_REFERENCE=1)
+    target_compile_options(himax-afe-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME afe-protocol COMMAND himax-afe-test)
+    add_test(NAME afe-reference-integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/afe-reference-test.py" "${CMAKE_COMMAND}"
+        "${UPSTREAM}/EGoTouchService/Device/himax/HimaxProtocol.cpp"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AfeReference.cmake")
     add_executable(himax-raw-policy-test ../tests/hx-raw-policy-test.c)
     target_include_directories(himax-raw-policy-test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
@@ -128,7 +144,6 @@ if(BUILD_TESTING)
     target_compile_options(himax-rotation-socket-test PRIVATE -Wall -Wextra -Werror)
     target_link_libraries(himax-rotation-socket-test PRIVATE PkgConfig::SYSTEMD)
     add_test(NAME screen-rotation-socket COMMAND himax-rotation-socket-test)
-    find_package(Python3 REQUIRED COMPONENTS Interpreter)
     add_test(NAME desktop-screen-bridge COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/screen-bridge-test.py")
     add_test(NAME upstream-host-integration COMMAND "${Python3_EXECUTABLE}"

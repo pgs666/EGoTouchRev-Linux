@@ -8,6 +8,7 @@
 #include <linux/slab.h>
 
 #include "himax-spi.h"
+#include "hx-afe.h"
 #include "hx-otp.h"
 #ifndef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
 #include "hx-panel-profile.h"
@@ -56,11 +57,7 @@
 /* hx83121a-specific register/dsram flags/data */
 #define HIMAX_HX83121A_DSRAM_ADDR_RAW_OUT_SEL		0x100072ec
 
-/* Firmware AFE command queue used by the Windows v1.1.2 runtime. */
-#define HIMAX_HX83121A_AFE_CMD_SLOT_BASE		0x10007550
-#define HIMAX_HX83121A_AFE_CMD_SLOT_STRIDE		0x10
-#define HIMAX_HX83121A_AFE_CMD_SLOT_COUNT		5
-#define HIMAX_HX83121A_AFE_CMD_PACKET_SIZE		16
+/* Firmware AFE commands used by the Windows runtime. */
 #define HIMAX_HX83121A_AFE_CMD_START_CALIBRATION	0x01
 #define HIMAX_HX83121A_AFE_CMD_FORCE_SCAN_RATE		0x0e
 #define HIMAX_HX83121A_AFE_SCAN_RATE_120HZ		0x00
@@ -363,58 +360,27 @@ static int himax_mcu_write_verify_u32(struct himax_ts_data *ts, u32 addr,
 	return ret;
 }
 
-static void himax_afe_build_command(u8 command, u8 value, u8 *packet)
+static int himax_afe_reg_write(void *context, u32 address, const u8 *data,
+			       size_t length)
 {
-	u32 sum = 0;
-	u16 checksum;
-	int i;
+	return himax_mcu_register_write(context, address, data, length);
+}
 
-	memset(packet, 0, HIMAX_HX83121A_AFE_CMD_PACKET_SIZE);
-	packet[0] = 0xa8;
-	packet[1] = 0x8a;
-	packet[2] = command;
-	packet[4] = value;
-
-	for (i = 0; i < HIMAX_HX83121A_AFE_CMD_PACKET_SIZE; i += 2)
-		sum += packet[i] | ((u16)packet[i + 1] << 8);
-	checksum = (u16)(0U - sum);
-	packet[14] = checksum & 0xff;
-	packet[15] = checksum >> 8;
-
-	/*
-	 * The virtual header participates in the checksum, then the trigger write
-	 * supplies it after the full command body has reached the slot.
-	 */
-	packet[0] = 0;
-	packet[1] = 0;
+static int himax_afe_reg_read(void *context, u32 address, u8 *data, size_t length)
+{
+	return himax_mcu_register_read(context, address, data, length);
 }
 
 static int himax_afe_send_command(struct himax_ts_data *ts, u8 *slot,
 				  u8 command, u8 value)
 {
-	u8 packet[HIMAX_HX83121A_AFE_CMD_PACKET_SIZE];
-	u8 trigger[4] = { 0xa8, 0x8a, command, 0x00 };
-	u8 response[HIMAX_HX83121A_AFE_CMD_PACKET_SIZE];
-	u32 addr;
-	int ret;
+	const struct hx_afe_bus bus = {
+		.context = ts,
+		.write = himax_afe_reg_write,
+		.read = himax_afe_reg_read,
+	};
 
-	addr = HIMAX_HX83121A_AFE_CMD_SLOT_BASE +
-		(*slot % HIMAX_HX83121A_AFE_CMD_SLOT_COUNT) *
-		HIMAX_HX83121A_AFE_CMD_SLOT_STRIDE;
-	himax_afe_build_command(command, value, packet);
-
-	ret = himax_mcu_register_write(ts, addr, packet, sizeof(packet));
-	if (ret)
-		return ret;
-	ret = himax_mcu_register_write(ts, addr, trigger, sizeof(trigger));
-	if (ret)
-		return ret;
-	ret = himax_mcu_register_read(ts, addr, response, sizeof(response));
-	if (ret)
-		return ret;
-
-	*slot = (*slot + 1) % HIMAX_HX83121A_AFE_CMD_SLOT_COUNT;
-	return 0;
+	return hx_afe_send(&bus, slot, command, value);
 }
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2

@@ -4,6 +4,7 @@ artifacts/
 **/build/
 userspace/build-*/
 tests/hx-otp-test
+tests/hx-afe-test
 tests/hx-raw-policy-test
 __pycache__/
 *.py[cod]
