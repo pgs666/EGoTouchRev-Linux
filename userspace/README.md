@@ -62,6 +62,36 @@ userspace/build/himax-solver-edge-reference 3 3 3 0
 仍包含轮廓越界修复。输出坐标为原始面板 `2560×1600` 方向，尚未应用接线变换
 或桌面旋转。合成测试不能代替真实 Android 全面屏手势验收。
 
+还存在未覆盖的速度：方向 3、原始面板上边、每 9 ms 移动 3 格的合成输入，
+首个候选距逻辑边 634 Q8 单位，超过该边 563 的最大范围，首报仍距物理上边
+约 218 像素。该序列在 A/B 测试中刻意保持上游行为；测试通过不表示这个问题
+已解决。不能直接扩大吸边范围后就宣称修复，需与屏内快速拖动区分。
+
+可从现有同步采集离线导出尚未上报的候选轨迹：
+
+```sh
+userspace/build/himax-replay --session --touch-trace /tmp/himax-candidates.csv \
+    deploy-logs/session-XXXXXXXX/capture.hxst > /tmp/himax-contacts.csv
+```
+
+`--touch-trace` 仅用于离线 replay，没有常驻 daemon 日志或热路径开销。输出文件
+必须不存在，避免覆盖原始证据；进程必须返回 0，才能将整个输出视为严格同步
+验证通过，失败时留下的 CSV 仅是前缀。普通 `--hxst`/native 回放也支持它，但
+不会因此获得同步 session 的实时输出等价保证。
+
+每行是 `Process()` 完成并写回的历史触点，包含 epoch/sequence、候选起始时间、
+消抖帧数、是否曾上报、最初/当前/首报位置、区域范围、异常/噪声和边缘参数。
+`core_id` 是内部 ID，不能直接当成 mapper/uinput ID；同 ID 在释放或 epoch 切换
+后可能重用。坐标采用算法 dim1/dim2 的 Q8 传感器单位，逻辑边界同时输出，
+不是桌面像素。它不能展示创建候选前就被滤掉的 raw 峰，也不能证明触点来自屏外。
+没有候选的帧不写行，已经在当帧移除的历史触点也可能不出现。
+`core_time_ms` 是历史单元自身的时间；与输入 `time_ms` 不同的行不能当成该输入帧
+新测得的位置，例如算法在 IDLE/校准期间未执行一次完整触点求解时。
+
+先比较候选开始到 `reported_once` 首次为 1 的时间和位移，再对照 contacts 中
+的 DOWN。如果首个候选已经在范围外，仍需回看录制内更早的 raw 网格，判断是
+检测过滤还是首次采样就已进入屏内；不能只凭这张 CSV 下结论。
+
 ## 构建
 
 需要支持 C++23 的 GCC/Clang、CMake、pkg-config、libsystemd 开发文件和当前内核 build tree。

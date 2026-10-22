@@ -29,14 +29,15 @@ static int Wait(pid_t child) {
     return WEXITSTATUS(status);
 }
 
-static int Replay(const char* program, const std::string& path) {
+static int Replay(const char* program, const std::string& path, const char* trace = nullptr) {
     const pid_t child = fork();
     Check(child >= 0, "fork replay");
     if (!child) {
         int quiet = open("/dev/null", O_WRONLY);
         if (quiet < 0 || dup2(quiet, STDOUT_FILENO) < 0) _exit(127);
         close(quiet);
-        execl(program, program, "--session", path.c_str(), nullptr);
+        if (trace) execl(program, program, "--session", "--touch-trace", trace, path.c_str(), nullptr);
+        else execl(program, program, "--session", path.c_str(), nullptr);
         _exit(127);
     }
     return Wait(child);
@@ -197,6 +198,31 @@ int main(int argc, char** argv) {
     }
     Check(Replay(argv[1], path) == 0, "live-output/action/lifecycle replay matches");
     const auto original = Read(path + ".events");
+    {
+        const auto raw = Read(path);
+        const auto trace = std::string(directory) + "/touch-trace.csv";
+        Check(Replay(argv[1], path, trace.c_str()) == 0,
+              "offline tracing preserves strict live-output verification");
+        const auto csv = Read(trace);
+        std::istringstream rows(csv);
+        std::string row;
+        Check(!!std::getline(rows, row) && row.starts_with("frame,epoch,sequence,") &&
+              row.ends_with("edge_enabled,max_major_mm"), "touch trace identifies edge policy");
+        bool candidate = false, reported = false;
+        while (std::getline(rows, row)) {
+            std::istringstream fields(row);
+            std::vector<std::string> values;
+            for (std::string value; std::getline(fields, value, ',');) values.push_back(value);
+            Check(values.size() == 44, "fixed trace schema includes unreported candidates");
+            candidate |= values[34] == "0";
+            reported |= values[34] == "1";
+        }
+        Check(candidate && reported, "trace shows pre-admission and reported touch states");
+        Check(Replay(argv[1], path, trace.c_str()) != 0 && Read(trace) == csv,
+              "trace refuses to overwrite existing evidence");
+        Check(Replay(argv[1], path, path.c_str()) != 0 && Read(path) == raw &&
+              Read(path + ".events") == original, "trace cannot overwrite raw session or sidecar");
+    }
     Check(original.starts_with("HXSE 1\n") && original.ends_with("END 300 0 0\n"),
           "explicit complete footer");
     {

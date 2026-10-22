@@ -4,18 +4,21 @@
 #include "TsaCoreSolver.h"
 #include "solver-screen.h"
 #include "session-replay.h"
+#include "touch-trace.h"
 
 #include <array>
 #include <charconv>
 #include <fstream>
 #include <iostream>
 #include <memory>
+#include <string>
 #include <string_view>
 
 int main(int argc, char** argv) {
     himax::RecordingFormat format = himax::RecordingFormat::Native;
     bool startupGrace = false;
     bool session = false;
+    std::string touchTracePath;
     himax::SolverScreenState screen;
     while (argc > 1) {
         const std::string_view option(argv[1]);
@@ -23,7 +26,15 @@ int main(int argc, char** argv) {
         else if (option == "--session") session = true;
         else if (option == "--trace") format = himax::RecordingFormat::Trace;
         else if (option == "--hxst") format = himax::RecordingFormat::Hxst;
-        else if (option == "--rotation" && argc > 2) {
+        else if (option == "--touch-trace" && argc > 2) {
+            if (!touchTracePath.empty()) {
+                std::cerr << "Only one --touch-trace output is allowed\n";
+                return 2;
+            }
+            touchTracePath = argv[2];
+            --argc;
+            ++argv;
+        } else if (option == "--rotation" && argc > 2) {
             const std::string_view value(argv[2]);
             int rotation = -1;
             const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), rotation);
@@ -40,18 +51,39 @@ int main(int argc, char** argv) {
     }
     if (argc < 2 || argc > 4) {
         std::cerr << "Usage: himax-replay [--allow-startup-invalid] [--rotation 0..3] [--trace|--hxst]\n"
+                  << "                    [--touch-trace NEW.csv]\n"
                   << "                    FRAMES [PROJECT_ID] [RECORD_BYTES]\n"
-                  << "       himax-replay --session CAPTURE.hxst\n"
+                  << "       himax-replay --session [--touch-trace NEW.csv] CAPTURE.hxst\n"
                   << "Input: concatenated 5132-byte native frames (or 5060 with RECORD_BYTES).\n";
         return 2;
     }
+    std::ofstream touchTrace;
+    if (!touchTracePath.empty()) {
+        touchTrace.open(touchTracePath, std::ios::out | std::ios::noreplace);
+        if (!touchTrace) {
+            std::cerr << "Cannot exclusively create touch trace: " << touchTracePath << '\n';
+            return 1;
+        }
+        himax::WriteTouchTraceHeader(touchTrace);
+    }
+    const auto finishTrace = [&](int result) {
+        if (touchTrace.is_open()) {
+            touchTrace.close();
+            if (!touchTrace) {
+                std::cerr << "Touch trace write/close failed\n";
+                return 1;
+            }
+        }
+        return result;
+    };
     if (session) {
         if (argc != 2 || startupGrace || format != himax::RecordingFormat::Native ||
             screen.Rotation() >= 0) {
             std::cerr << "--session requires recorded identity, orientation and strict validation\n";
             return 2;
         }
-        return himax::ReplaySession(argv[1]);
+        return finishTrace(himax::ReplaySession(argv[1],
+            touchTrace.is_open() ? &touchTrace : nullptr));
     }
     size_t recordBytes = himax::kNativeTransportSize;
     if (argc == 4) {
@@ -129,6 +161,14 @@ int main(int argc, char** argv) {
             std::cerr << "TSACore initialization failed\n";
             return 1;
         }
+        if (touchTrace.is_open()) {
+            himax::WriteTouchTrace(touchTrace, sequence, record.epoch, record.sequence,
+                                  timeMs, screen.Rotation());
+            if (!touchTrace) {
+                std::cerr << "Touch trace write failed\n";
+                return 1;
+            }
+        }
         for (const auto& touch : frame->touch.output.contacts) {
             std::cout << sequence << ',' << timeMs << ',' << solver->LastAfeStatus() << ','
                       << solver->LastCtrlFlags() << ',' << report << ',' << touch.id << ','
@@ -143,5 +183,5 @@ int main(int argc, char** argv) {
     std::cerr << "frames=" << sequence << " rejected=" << rejected
               << " startup_allowed=" << allowed
               << " profile=" << solver->LoadedPrmtName() << '\n';
-    return valid && rejected == allowed ? 0 : 1;
+    return finishTrace(valid && rejected == allowed ? 0 : 1);
 }

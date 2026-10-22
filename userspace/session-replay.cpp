@@ -4,13 +4,14 @@
 #include "capture-session.h"
 #include "solver-screen.h"
 #include "stream-state.h"
+#include "touch-trace.h"
 
 #include <iostream>
 #include <memory>
 
 namespace himax {
 
-int ReplaySession(const char* path) {
+int ReplaySession(const char* path, std::ostream* touchTrace) {
     SessionReader reader(path);
     if (!reader.Error().empty()) {
         std::cerr << reader.Error() << '\n';
@@ -83,6 +84,14 @@ int ReplaySession(const char* path) {
                 solver->LastCtrlFlags() != e.ctrl || ContactDigest(*frame) != e.digest) {
                 std::cerr << "Session solver output mismatch at frame " << frames << '\n';
                 return 1;
+            }
+            if (touchTrace) {
+                WriteTouchTrace(*touchTrace, frames, packet.epoch, packet.sequence,
+                                packet.timestamp_ns / 1000000, e.rotation);
+                if (!*touchTrace) {
+                    std::cerr << "Touch trace write failed\n";
+                    return 1;
+                }
             }
             for (const auto& t : frame->touch.output.contacts)
                 std::cout << frames << ',' << packet.timestamp_ns / 1000000 << ','

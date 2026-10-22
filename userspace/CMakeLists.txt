@@ -52,7 +52,8 @@ if(HIMAX_PROFILE)
     target_compile_definitions(himax-tsacore PRIVATE TSACORE_PROFILE)
 endif()
 
-add_executable(himax-replay replay.cpp)
+add_executable(himax-replay replay.cpp touch-trace.cpp)
+target_include_directories(himax-replay PRIVATE "${TSACORE}/src")
 target_link_libraries(himax-replay PRIVATE himax-tsacore)
 target_compile_options(himax-replay PRIVATE -Wall -Wextra -Werror)
 
