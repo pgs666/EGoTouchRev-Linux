@@ -29,7 +29,7 @@ int ReplaySession(const char* path) {
     std::array<uint8_t, Frame::kMasterFrameSize> thp{};
     uint64_t epoch = 0, frames = 0, validFrames = 0, lastTime = 0;
     bool started = false, observe = false;
-    unsigned int bad = 0;
+    MasterFrameHealth frameHealth;
     std::cout << "frame,time_ms,afe_status,ctrl,report,id,event,x,y,pressure\n";
     while (reader.Next(*event)) {
         const auto& e = *event;
@@ -59,22 +59,21 @@ int ReplaySession(const char* path) {
             solver->OnAfeStarted();
             epoch = packet.epoch;
             started = true;
-            bad = 0;
+            frameHealth.Reset();
         }
         screen.SetRotation(e.rotation);
         solver->SetChargerPlugged(packet.flags & HX_RAW_FRAME_CHARGER);
-        const bool valid = ToThpMaster(packet.payload, thp) == FrameError::None;
-        bool reset = false;
+        const auto error = ToThpMaster(packet.payload, thp);
+        const bool valid = error == FrameError::None;
+        bool reset = frameHealth.Observe(error);
         bool report = false;
         if (!valid) {
             if (e.report || e.status || e.ctrl || e.digest) {
                 std::cerr << "Unexpected solver result on invalid frame " << frames << '\n';
                 return 1;
             }
-            reset = ++bad >= 5;
         } else {
             ++validFrames;
-            bad = 0;
             frame->rawPtr = thp.data();
             frame->rawLen = thp.size();
             report = screen.Process(*solver, *frame, packet.timestamp_ns / 1000000);

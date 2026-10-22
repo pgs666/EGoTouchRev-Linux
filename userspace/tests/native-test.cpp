@@ -30,9 +30,23 @@ int main(int argc, char** argv) {
     const std::string_view expected = argc == 3 ? argv[2] : "W273AS2700";
     std::array<uint8_t, himax::kNativeTransportSize> native{};
     std::array<uint8_t, Frame::kMasterFrameSize> thp{};
-    Check(himax::ToThpMaster(native, thp) == himax::FrameError::Sync, "all zero rejected");
+    Check(himax::ToThpMaster(native, thp) == himax::FrameError::AllZero, "all zero classified");
+    native.fill(0xec);
+    native.back() = 0; // Only the master body determines whether the bus is filler.
+    Check(himax::ToThpMaster(native, thp) == himax::FrameError::BusFiller,
+          "unresponsive bus classified even with invalid sync");
     native[0] = 0x5a;
     native[1] = 0xa5;
+    Check(himax::ToThpMaster(native, thp) == himax::FrameError::BusFiller,
+          "filler body with sync also classified");
+    native[himax::kNativeMasterSize - 1] ^= 1;
+    Check(himax::ToThpMaster(native, thp) == himax::FrameError::Checksum,
+          "partial filler remains an ordinary checksum error");
+    native.fill(0);
+    native[0] = 0x5a;
+    native[1] = 0xa5;
+    Check(himax::ToThpMaster(native, thp) == himax::FrameError::AllZero,
+          "zero body with sync is not a valid checksum");
     for (size_t i = 4; i < 4 + Frame::kMatrixBytes; i += 2) {
         native[i] = 0xfe;
         native[i + 1] = 0x7f;
@@ -47,8 +61,30 @@ int main(int argc, char** argv) {
     Check(himax::ToThpMaster(std::span(native.data(), 99), thp) == himax::FrameError::Size,
           "short input rejected");
     native[40] ^= 1;
+    const auto lastGood = thp;
     Check(himax::ToThpMaster(native, thp) == himax::FrameError::Checksum, "corruption rejected");
+    Check(thp == lastGood, "failed conversion preserves previous complete THP buffer");
     native[40] ^= 1;
+    native[0] ^= 1;
+    Check(himax::ToThpMaster(native, thp) == himax::FrameError::Sync,
+          "otherwise-valid body still requires SPI sync");
+    native[0] ^= 1;
+
+    himax::MasterFrameHealth health;
+    for (const auto error : {himax::FrameError::Sync, himax::FrameError::Checksum,
+                             himax::FrameError::AllZero, himax::FrameError::Size})
+        Check(!health.Observe(error), "first four mixed bad frames do not reset");
+    Check(health.Observe(himax::FrameError::Checksum), "fifth bad frame requests recovery");
+    for (unsigned int i = 0; i < 10000; ++i)
+        Check(health.Observe(himax::FrameError::AllZero), "bad run cannot overflow retry state");
+    Check(!health.Observe(himax::FrameError::None), "valid frame clears bad run");
+    Check(health.Observe(himax::FrameError::BusFiller), "one bus-filler frame requests immediate SOS");
+    Check(health.Observe(himax::FrameError::Sync), "failed immediate reset remains pending");
+    health.Reset();
+    Check(!health.ResetRequested() && !health.Observe(himax::FrameError::Checksum),
+          "new AFE epoch starts with fresh recovery state");
+    Check(!health.Observe(himax::FrameError::None) &&
+          !health.Observe(himax::FrameError::AllZero), "good frame breaks consecutive error run");
 
     // Full upstream initialization and 240 frames including IDLE entry/exit and
     // calibration completion with its latched marker subsequently cleared.

@@ -113,7 +113,8 @@ int main(int argc, char** argv) {
             // AFE calibration can leave a short startup transient. Keep
             // recording/logging every rejected frame, and never tolerate
             // corruption after the first valid frame or a five-frame run.
-            if (startupGrace && !epochStarted && ++initialRejected <= 4)
+            if (startupGrace && !epochStarted && error != himax::FrameError::BusFiller &&
+                ++initialRejected < himax::MasterFrameHealth::kBadFrameLimit)
                 ++allowed;
             std::cerr << "frame " << sequence << ": " << himax::FrameErrorName(error) << '\n';
             continue;

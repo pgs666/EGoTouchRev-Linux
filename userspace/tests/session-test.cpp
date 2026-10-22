@@ -113,30 +113,31 @@ int main(int argc, char** argv) {
         event.coordinateFlags = 5;
         Check(recorder.Submit(event), "identity queued");
         std::array<uint8_t, Frame::kMasterFrameSize> thp{};
-        unsigned int bad = 0, reports = 0, failedCommands = 0;
+        himax::MasterFrameHealth health;
+        unsigned int reports = 0, failedCommands = 0, resets = 0;
         for (unsigned int i = 0; i < 300; ++i) {
-            if (i == 0 || i == 125) {
+            if (i == 0 || i == 125 || i == 161) {
                 event = {};
                 event.kind = himax::SessionKind::State;
-                event.state = {HX_RAW_ABI_VERSION, 0, i == 0 ? 1ULL : 2ULL};
+                event.state = {HX_RAW_ABI_VERSION, 0, i == 0 ? 1ULL : i == 125 ? 2ULL : 3ULL};
                 Check(recorder.Submit(event), "lifecycle event queued");
                 event.state.running = 1;
                 Check(recorder.Submit(event), "AFE running before first epoch frame");
                 solver->OnAfeStopped();
-                if (i == 125) solver->OnAfeSos();
+                if (i) solver->OnAfeSos();
                 solver->OnAfeStarted();
-                bad = 0;
+                health.Reset();
             }
             event = {};
             auto& packet = event.packet;
             packet.size = sizeof(packet);
             packet.version = HX_RAW_ABI_VERSION;
             packet.payload_size = sizeof(packet.payload);
-            packet.epoch = i < 125 ? 1 : 2;
+            packet.epoch = i < 125 ? 1 : i < 161 ? 2 : 3;
             packet.sequence = i + 1;
             packet.timestamp_ns = 1000000000ULL + i * 9000000ULL;
             event.hostTimeNs = packet.timestamp_ns + 1000000;
-            packet.flags = (i == 125 ? HX_RAW_FRAME_SOS : 0) |
+            packet.flags = (i == 125 || i == 161 ? HX_RAW_FRAME_SOS : 0) |
                            (i >= 200 ? HX_RAW_FRAME_CHARGER : 0);
             packet.payload[0] = 0x5a;
             packet.payload[1] = 0xa5;
@@ -152,16 +153,22 @@ int main(int argc, char** argv) {
                     packet.payload[offset + 1] = value >> 8;
                 }
             }
-            packet.payload[4804 + 6] = i < 20 || (i >= 125 && i < 145) ? 0xbb : 0;
+            packet.payload[4804 + 6] =
+                i < 20 || (i >= 125 && i < 145) || (i >= 161 && i < 165) ? 0xbb : 0;
             Checksum(packet);
             if (i >= 120 && i < 125) packet.payload[0] = 0;
+            if (i == 160) std::fill(std::begin(packet.payload), std::end(packet.payload), 0xec);
             event.rotation = i / 80;
             screen.SetRotation(event.rotation);
             solver->SetChargerPlugged(packet.flags & HX_RAW_FRAME_CHARGER);
-            if (himax::ToThpMaster(packet.payload, thp) != himax::FrameError::None) {
-                if (++bad >= 5) event.actions[event.actionCount++] = {HX_RAW_RESET, 0, 0};
+            const auto error = himax::ToThpMaster(packet.payload, thp);
+            const bool reset = health.Observe(error);
+            if (error != himax::FrameError::None) {
+                if (reset) {
+                    ++resets;
+                    event.actions[event.actionCount++] = {HX_RAW_RESET, 0, 0};
+                }
             } else {
-                bad = 0;
                 frame->rawPtr = thp.data();
                 frame->rawLen = thp.size();
                 event.report = screen.Process(*solver, *frame, packet.timestamp_ns / 1000000);
@@ -184,13 +191,34 @@ int main(int argc, char** argv) {
                 Check(recorder.Submit(release), "input-only timeout recorded");
             }
         }
-        Check(reports > 50 && failedCommands, "fixture has contacts and failed hardware command");
+        Check(reports > 50 && failedCommands && resets == 2,
+              "fixture has contacts, failed command, five-bad recovery and immediate bus SOS");
         Check(recorder.Close(true) && recorder.Dropped() == 0, "complete recording drained");
     }
     Check(Replay(argv[1], path) == 0, "live-output/action/lifecycle replay matches");
     const auto original = Read(path + ".events");
     Check(original.starts_with("HXSE 1\n") && original.ends_with("END 300 0 0\n"),
           "explicit complete footer");
+    {
+        // Removing the first-frame bus-filler reset must not pass strict replay
+        // merely because ordinary checksum recovery would wait five frames.
+        const auto first = original.find("F 161 ");
+        const auto end = original.find('\n', first);
+        Check(first != original.npos && end != original.npos, "bus-filler record exists");
+        std::istringstream fields(original.substr(first, end - first));
+        std::vector<std::string> values;
+        for (std::string value; fields >> value;) values.push_back(value);
+        Check(values.size() == 12 && values[8] == "1" &&
+              values[9] == std::to_string(HX_RAW_RESET), "bus filler requests immediate reset");
+        values[8] = "0";
+        std::ostringstream withoutReset;
+        for (size_t i = 0; i < 9; ++i) withoutReset << values[i] << ' ';
+        auto altered = original;
+        altered.replace(first, end - first, withoutReset.str());
+        Write(path + ".events", altered);
+        Check(Replay(argv[1], path) != 0, "missing immediate bus recovery rejected");
+        Write(path + ".events", original);
+    }
     {
         himax::SessionReader reader(path.c_str());
         size_t frames = 0;

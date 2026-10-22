@@ -2,6 +2,7 @@
 #include "recording.h"
 #include "hx-v4l2-uapi.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cerrno>
@@ -147,6 +148,13 @@ int main(int argc, char** argv) {
     packets[5] = packet;
     file.Write(packets.data(), sizeof(packets));
     Check(Replay(argv[1], file.path, true) == 1, "five startup errors exceed recovery threshold");
+    packets.fill(packet);
+    std::fill(std::begin(packets[0].payload), std::end(packets[0].payload), 0xec);
+    file.Write(packets.data(), 2 * sizeof(packet));
+    std::string fillerDiagnostic;
+    Check(Replay(argv[1], file.path, true, &fillerDiagnostic) == 1 &&
+          fillerDiagnostic.find("bus-filler") != std::string::npos,
+          "even one bus-filler frame is never waived as startup calibration");
     file.Write(&packet, sizeof(packet) - 1);
     Check(Replay(argv[1], file.path, true) == 1, "grace never tolerates truncated metadata");
     // Captures carry the AFE-selected identity so BOE data cannot silently

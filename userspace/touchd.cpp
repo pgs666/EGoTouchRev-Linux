@@ -144,7 +144,8 @@ int main(int argc, char** argv) {
     bool afeStarted = false;
     bool profileSelected = false;
     bool recordingHeaderWritten = false;
-    unsigned int consecutiveBad = 0;
+    himax::MasterFrameHealth frameHealth;
+    std::array<uint64_t, static_cast<size_t>(himax::FrameError::Count)> frameErrors{};
     uint64_t solved = 0, solveTotal = 0, solveMax = 0, deliveryMax = 0;
     std::array<uint64_t, 201> deliveryUs{};
     std::array<uint64_t, 5> actionRequests{}, actionSuccess{};
@@ -155,6 +156,11 @@ int main(int argc, char** argv) {
     uint64_t heartbeat = NowNs();
     const auto printStats = [&] {
         std::cerr << "frames=" << frames << " bad=" << bad << " stale=" << stale << '\n';
+        for (size_t i = 1; i < frameErrors.size(); ++i)
+            if (frameErrors[i])
+                std::cerr << "frame_error "
+                          << himax::FrameErrorName(static_cast<himax::FrameError>(i))
+                          << '=' << frameErrors[i] << '\n';
         if (solved)
             std::cerr << "solver_us mean=" << solveTotal / solved / 1000
                       << " max=" << solveMax / 1000 << '\n';
@@ -312,7 +318,7 @@ int main(int argc, char** argv) {
             solver->OnAfeStarted();
             epoch = packet->epoch;
             afeStarted = true;
-            consecutiveBad = 0;
+            frameHealth.Reset();
             std::cerr << "AFE epoch=" << epoch << " project=" << project << '\n';
         }
         solver->SetChargerPlugged(packet->flags & HX_RAW_FRAME_CHARGER);
@@ -323,12 +329,15 @@ int main(int argc, char** argv) {
             recordedFrame->rotation = solverScreen.Rotation();
         }
         const auto error = himax::ToThpMaster(packet->payload, thp);
-        bool requestReset = false;
+        const bool wasResetRequested = frameHealth.ResetRequested();
+        bool requestReset = frameHealth.Observe(error);
         if (error != himax::FrameError::None) {
             ++bad;
-            requestReset = ++consecutiveBad >= 5;
+            ++frameErrors[static_cast<size_t>(error)];
+            if (requestReset && !wasResetRequested)
+                std::cerr << "Raw master recovery requested: "
+                          << himax::FrameErrorName(error) << '\n';
         } else {
-            consecutiveBad = 0;
             lastNs = now;
             frame->rawPtr = thp.data();
             frame->rawLen = thp.size();
