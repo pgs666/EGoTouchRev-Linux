@@ -55,6 +55,7 @@ struct himax_ts_data {
 	u64 sequence;
 	u64 last_command_ns[HX_RAW_RESET + 1];
 	u32 frame_flags;
+	u32 coordinate_flags;
 	char project_id[16];
 };
 

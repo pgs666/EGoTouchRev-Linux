@@ -5,11 +5,15 @@
 #include <linux/types.h>
 #include <linux/videodev2.h>
 
-#define HX_RAW_ABI_VERSION 1U
+#define HX_RAW_ABI_VERSION 2U
 #define HX_RAW_PAYLOAD_SIZE 5132U
 #define V4L2_META_FMT_HIMAX_SPI v4l2_fourcc('H', 'X', 'S', 'T')
 #define HX_RAW_FRAME_SOS (1U << 0)
 #define HX_RAW_FRAME_CHARGER (1U << 1)
+#define HX_RAW_INVERT_X (1U << 0)
+#define HX_RAW_INVERT_Y (1U << 1)
+#define HX_RAW_SWAP_XY (1U << 2)
+#define HX_RAW_COORDINATE_FLAGS (HX_RAW_INVERT_X | HX_RAW_INVERT_Y | HX_RAW_SWAP_XY)
 #define V4L2_EVENT_HIMAX_STATE (V4L2_EVENT_PRIVATE_START + 0)
 
 struct hx_raw_frame {
@@ -31,7 +35,7 @@ struct hx_raw_info {
 	__u32 rows;
 	__u32 cols;
 	__u32 payload_size;
-	__u32 reserved;
+	__u32 coordinate_flags;
 	char project_id[16];
 };
 

@@ -49,12 +49,15 @@ int main(int argc, char** argv) {
         return 1;
     }
     auto solver = std::make_unique<Solvers::Tsa::TsaCoreSolver>();
-    if (argc >= 3) {
-        const auto project = Solvers::Tsa::ResolvePanelProjectId(argv[2]);
-        if (project != argv[2] || !solver->SetPanelProjectId(project)) {
+    const std::string_view requested = argc >= 3 ? std::string_view(argv[2]) : input.ProjectId();
+    if (!requested.empty()) {
+        const auto project = Solvers::Tsa::ResolvePanelProjectId(requested);
+        if (project != requested || !solver->SetPanelProjectId(project)) {
             std::cerr << "Unknown project id\n";
             return 2;
         }
+        if (argc >= 3 && !input.ProjectId().empty() && project != input.ProjectId())
+            std::cerr << "Overriding recorded project " << input.ProjectId() << " with " << project << '\n';
     }
     auto frame = std::make_unique<Solvers::HeatmapFrame>();
     himax::RecordedFrame record;

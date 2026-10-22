@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <fcntl.h>
 #include <iostream>
+#include <sstream>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -30,18 +31,38 @@ public:
     char path[40] = "/tmp/himax-recording-test.XXXXXX";
 };
 
-static int Replay(const char* program, const char* path, bool grace) {
+static int Replay(const char* program, const char* path, bool grace,
+                  std::string* diagnostic = nullptr, const char* project = nullptr) {
+    int logs[2];
+    Check(pipe(logs) == 0, "replay diagnostic pipe");
     const pid_t child = fork();
     Check(child >= 0, "fork replay");
     if (!child) {
         const int quiet = open("/dev/null", O_WRONLY);
-        if (quiet < 0 || dup2(quiet, STDOUT_FILENO) < 0 || dup2(quiet, STDERR_FILENO) < 0)
+        if (quiet < 0 || dup2(quiet, STDOUT_FILENO) < 0 || dup2(logs[1], STDERR_FILENO) < 0)
             _exit(127);
         close(quiet);
+        close(logs[0]);
+        close(logs[1]);
         if (grace) execl(program, program, "--allow-startup-invalid", "--hxst", path, nullptr);
+        else if (project) execl(program, program, "--hxst", path, project, nullptr);
         else execl(program, program, "--hxst", path, nullptr);
         _exit(127);
     }
+    close(logs[1]);
+    std::string text;
+    char buffer[512];
+    ssize_t bytes;
+    while ((bytes = read(logs[0], buffer, sizeof(buffer))) != 0) {
+        if (bytes < 0) {
+            if (errno == EINTR) continue;
+            Check(false, "read replay diagnostics");
+        }
+        text.append(buffer, bytes);
+        Check(text.size() < 16384, "bounded replay diagnostics");
+    }
+    close(logs[0]);
+    if (diagnostic) *diagnostic = std::move(text);
     int status;
     pid_t result;
     do { result = waitpid(child, &status, 0); } while (result < 0 && errno == EINTR);
@@ -128,5 +149,64 @@ int main(int argc, char** argv) {
     Check(Replay(argv[1], file.path, true) == 1, "five startup errors exceed recovery threshold");
     file.Write(&packet, sizeof(packet) - 1);
     Check(Replay(argv[1], file.path, true) == 1, "grace never tolerates truncated metadata");
+    // Captures carry the AFE-selected identity so BOE data cannot silently
+    // run with the default CSOT gains during replay.
+    std::ostringstream encoded(std::ios::binary);
+    Check(himax::WriteHxstHeader(encoded, "W273AS1300", HX_RAW_INVERT_X | HX_RAW_SWAP_XY),
+          "HXRC panel header written");
+    encoded.write(reinterpret_cast<const char*>(&packet), sizeof(packet));
+    const auto container = encoded.str();
+    Check(container.size() == 32 + sizeof(packet), "fixed container header size");
+    file.Write(container.data(), container.size());
+    {
+        himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
+        Check(reader.Error().empty() && reader.ProjectId() == "W273AS1300" &&
+              reader.CoordinateFlags() == (HX_RAW_INVERT_X | HX_RAW_SWAP_XY),
+              "panel identity and firmware coordinate mapping survive recording");
+        Check(reader.Next(frame) && frame.timeNs == packet.timestamp_ns &&
+              frame.payload[0] == 0x5a && !reader.Next(frame) && reader.Error().empty(),
+              "header leaves frame payload and count unchanged");
+    }
+    std::string diagnostic;
+    Check(Replay(argv[1], file.path, false, &diagnostic) == 0 &&
+          diagnostic.find("profile=W273AS1300") != std::string::npos,
+          "replay automatically initializes BOE profile from header");
+    Check(Replay(argv[1], file.path, false, &diagnostic, "W273AS2700") == 0 &&
+          diagnostic.find("Overriding recorded project") != std::string::npos &&
+          diagnostic.find("profile=W273AS2700") != std::string::npos,
+          "explicit profile override is visible and honored");
+    auto corrupted = container;
+    corrupted[4] = 2;
+    file.Write(corrupted.data(), corrupted.size());
+    {
+        himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
+        Check(!reader.Error().empty(), "unknown container version rejected");
+    }
+    corrupted = container;
+    corrupted[28] = 8;
+    file.Write(corrupted.data(), corrupted.size());
+    {
+        himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
+        Check(!reader.Error().empty(), "unknown recorded coordinate flags rejected");
+    }
+    file.Write(container.data(), 12);
+    {
+        himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
+        Check(!reader.Error().empty(), "truncated container header rejected");
+    }
+    packet.version = 1;
+    file.Write(&packet, sizeof(packet));
+    {
+        himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
+        Check(reader.ProjectId().empty() && reader.Next(frame) && reader.Error().empty(),
+              "legacy headerless ABI-v1 recordings remain readable");
+    }
+    std::ostringstream refused;
+    Check(!himax::WriteHxstHeader(refused, "bad/id") && refused.str().empty(),
+          "invalid project is rejected before writing");
+    Check(!himax::WriteHxstHeader(refused, "W273AS2700", 8) && refused.str().empty(),
+          "unknown firmware flags rejected before writing");
+    refused.setstate(std::ios::badbit);
+    Check(!himax::WriteHxstHeader(refused, "W273AS2700"), "header I/O failure propagated");
     std::cout << "Recording validation passed\n";
 }

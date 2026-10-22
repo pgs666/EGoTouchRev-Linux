@@ -24,7 +24,10 @@ static void Checksum(std::array<uint8_t, himax::kNativeTransportSize>& frame) {
     frame[3] = checksum >> 8;
 }
 
-int main() {
+int main(int argc, char** argv) {
+    Check(argc == 1 || argc == 3, "profile and expected parameter name supplied together");
+    const std::string_view project = argc == 3 ? argv[1] : "W273AS2700";
+    const std::string_view expected = argc == 3 ? argv[2] : "W273AS2700";
     std::array<uint8_t, himax::kNativeTransportSize> native{};
     std::array<uint8_t, Frame::kMasterFrameSize> thp{};
     Check(himax::ToThpMaster(native, thp) == himax::FrameError::Sync, "all zero rejected");
@@ -50,6 +53,7 @@ int main() {
     // Full upstream initialization and 240 frames including IDLE entry/exit and
     // calibration completion with its latched marker subsequently cleared.
     auto solver = std::make_unique<Solvers::Tsa::TsaCoreSolver>();
+    Check(solver->SetPanelProjectId(project), "requested panel identity selected");
     auto frame = std::make_unique<Solvers::HeatmapFrame>();
     for (uint64_t i = 0; i < 240; ++i) {
         native[suffix] = i >= 80 && i < 100 ? 1 : 0;
@@ -62,6 +66,7 @@ int main() {
         Check(solver->IsAvailable(), "full TSACore initialized");
         Check(solver->GetCachedContactCount() == 0, "flat grid creates no contacts");
     }
-    Check(std::string_view(solver->LoadedPrmtName()) == "W273AS2700", "CSOT profile selected");
+    Check(solver->PanelProjectId() == project &&
+          std::string_view(solver->LoadedPrmtName()) == expected, "correct panel parameters loaded");
     std::cout << "native conversion and full TSACore smoke test passed\n";
 }

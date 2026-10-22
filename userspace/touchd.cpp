@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "native-frame.h"
+#include "recording.h"
 #include "TsaCoreSolver.h"
 #include "input.h"
 #include "v4l2-capture.h"
@@ -45,21 +46,28 @@ static hx_raw_action HardwareAction(Solvers::Tsa::AfeActionType action) {
 
 int main(int argc, char** argv) {
     std::string device, project, recording;
-    bool observe = false;
+    bool observe = false, infoOnly = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--observe") observe = true;
+        else if (arg == "--info") infoOnly = true;
         else if (arg == "--device" && i + 1 < argc) device = argv[++i];
         else if (arg == "--project" && i + 1 < argc) project = argv[++i];
         else if (arg == "--record" && i + 1 < argc) recording = argv[++i];
         else {
             std::cerr << "Usage: himax-touchd [--device /dev/videoN] [--project ID]\n"
-                      << "                    [--observe [--record FILE.hxst]]\n";
+                      << "                    [--observe [--record FILE.hxst]]\n"
+                      << "       himax-touchd [--device /dev/videoN] --info\n";
             return arg == "--help" ? 0 : 2;
         }
     }
     if (!project.empty() && Solvers::Tsa::ResolvePanelProjectId(project) != project) {
         std::cerr << "Unknown project ID\n";
+        return 2;
+    }
+    const bool autoProject = project.empty();
+    if (infoOnly && (observe || !recording.empty() || !autoProject)) {
+        std::cerr << "--info cannot be combined with solver/capture options\n";
         return 2;
     }
     if (!recording.empty() && !observe) {
@@ -76,16 +84,23 @@ int main(int argc, char** argv) {
 
     himax::Capture capture;
     himax::Input input;
+    if (infoOnly) {
+        if (!capture.Open(device, false)) {
+            std::cerr << capture.Error() << '\n';
+            return 1;
+        }
+        const auto& info = capture.Info();
+        std::cout << "device=" << capture.Path() << "\nabi=" << info.version
+                  << "\nrows=" << info.rows << "\ncols=" << info.cols
+                  << "\nproject_id=" << info.project_id
+                  << "\ncoordinate_flags=" << info.coordinate_flags << '\n';
+        return 0;
+    }
     if (!capture.Open(device) || !capture.Start()) {
         std::cerr << capture.Error() << '\n';
         return 1;
     }
-    if (project.empty()) {
-        project = Solvers::Tsa::ResolvePanelProjectId(capture.Info().project_id);
-        if (project != capture.Info().project_id)
-            std::cerr << "OTP unavailable; using upstream fallback " << project << '\n';
-    }
-    if (!observe && !input.Open()) {
+    if (!observe && !input.Open(capture.Info().coordinate_flags)) {
         std::cerr << input.Error() << '\n';
         return 1;
     }
@@ -98,7 +113,6 @@ int main(int argc, char** argv) {
         }
     }
     auto solver = std::make_unique<Solvers::Tsa::TsaCoreSolver>();
-    if (!solver->SetPanelProjectId(project)) return 1;
     auto frame = std::make_unique<Solvers::HeatmapFrame>();
     auto packet = std::make_unique<hx_raw_frame>();
     std::array<uint8_t, Frame::kMasterFrameSize> thp{};
@@ -107,6 +121,8 @@ int main(int argc, char** argv) {
     uint64_t frames = 0, stale = 0, bad = 0;
     himax::StreamState stream;
     bool afeStarted = false;
+    bool profileSelected = false;
+    bool recordingHeaderWritten = false;
     unsigned int consecutiveBad = 0;
     uint64_t solved = 0, solveTotal = 0, solveMax = 0, deliveryMax = 0;
     std::array<uint64_t, 201> deliveryUs{};
@@ -151,7 +167,8 @@ int main(int argc, char** argv) {
                       << " failed=" << resetRequests - resetSuccess << '\n';
     };
     himax::NotifyService("READY=1");
-    std::cerr << (observe ? "Observing " : "Solving ") << capture.Path() << " project=" << project << '\n';
+    std::cerr << (observe ? "Observing " : "Solving ") << capture.Path()
+              << " project=" << (autoProject ? "pending-OTP" : project) << '\n';
     while (!stopped) {
         if (dumpRequested) { dumpRequested = 0; printStats(); }
         if (stream.TimedOut(NowNs())) {
@@ -211,13 +228,31 @@ int main(int argc, char** argv) {
             continue;
         }
         if (packet->epoch != epoch || !afeStarted) {
+            // STREAMON while the panel is off does not read OTP. Only a
+            // running epoch proves that hardware initialization attempted it.
+            if (!capture.RefreshInfo()) {
+                std::cerr << capture.Error() << '\n';
+                return 1;
+            }
+            if (autoProject) {
+                project = Solvers::Tsa::ResolvePanelProjectId(capture.Info().project_id);
+                if (project != capture.Info().project_id)
+                    std::cerr << "OTP unavailable; using upstream fallback " << project << '\n';
+            }
+            if ((profileSelected && project != solver->PanelProjectId()) ||
+                !solver->SetPanelProjectId(project)) {
+                std::cerr << "Panel project changed within the capture session\n";
+                return 1;
+            }
+            profileSelected = true;
             if (!observe && !input.Release()) return 1;
             solver->OnAfeStopped();
             if (packet->flags & HX_RAW_FRAME_SOS) solver->OnAfeSos();
             solver->OnAfeStarted();
             epoch = packet->epoch;
             afeStarted = true;
-            std::cerr << "AFE epoch=" << epoch << '\n';
+            consecutiveBad = 0;
+            std::cerr << "AFE epoch=" << epoch << " project=" << project << '\n';
         }
         solver->SetChargerPlugged(packet->flags & HX_RAW_FRAME_CHARGER);
         const auto error = himax::ToThpMaster(packet->payload, thp);
@@ -298,6 +333,13 @@ int main(int argc, char** argv) {
             }
         }
         if (output.is_open()) {
+            if (!recordingHeaderWritten) {
+                if (!himax::WriteHxstHeader(output, project, capture.Info().coordinate_flags)) {
+                    std::cerr << "Recording header write failed\n";
+                    return 1;
+                }
+                recordingHeaderWritten = true;
+            }
             output.write(reinterpret_cast<const char*>(packet.get()), sizeof(*packet));
             if (!output) {
                 std::cerr << "Recording write failed\n";

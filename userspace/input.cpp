@@ -16,7 +16,7 @@ void SlotState::Event(uint16_t type, uint16_t code, int32_t value) {
 }
 
 bool SlotState::Frame(std::span<const Contact> contacts) {
-    if (contacts.size() > m_ids.size()) return false;
+    if ((m_flags & ~HX_RAW_COORDINATE_FLAGS) || contacts.size() > m_ids.size()) return false;
     uint32_t ids = 0;
     for (const auto& c : contacts) {
         if (c.id >= 32 || c.x > 25599 || c.y > 15999 || c.pressure > 4095 ||
@@ -30,7 +30,8 @@ bool SlotState::Frame(std::span<const Contact> contacts) {
         Event(EV_ABS, ABS_MT_TRACKING_ID, -1);
         m_ids[slot] = -1;
     }
-    for (const auto& c : contacts) {
+    for (const auto& raw : contacts) {
+        const auto c = Transform(raw);
         auto found = std::find(m_ids.begin(), m_ids.end(), c.id);
         const bool fresh = found == m_ids.end();
         if (fresh) found = std::find(m_ids.begin(), m_ids.end(), -1);
@@ -47,11 +48,21 @@ bool SlotState::Frame(std::span<const Contact> contacts) {
     Event(EV_KEY, BTN_TOUCH, contacts.empty() ? 0 : 1);
     Event(EV_KEY, BTN_TOOL_FINGER, contacts.empty() ? 0 : 1);
     if (!contacts.empty()) {
-        Event(EV_ABS, ABS_X, contacts[0].x);
-        Event(EV_ABS, ABS_Y, contacts[0].y);
+        const auto first = Transform(contacts[0]);
+        Event(EV_ABS, ABS_X, first.x);
+        Event(EV_ABS, ABS_Y, first.y);
     }
     Event(EV_SYN, SYN_REPORT, 0);
     return true;
+}
+
+Contact SlotState::Transform(Contact contact) const {
+    // Match touchscreen_apply_prop_to_x_y(): invert in the original sensor
+    // axes first, then swap. Desktop/compositor rotation is a separate step.
+    if (m_flags & HX_RAW_INVERT_X) contact.x = 25599 - contact.x;
+    if (m_flags & HX_RAW_INVERT_Y) contact.y = 15999 - contact.y;
+    if (m_flags & HX_RAW_SWAP_XY) std::swap(contact.x, contact.y);
+    return contact;
 }
 
 bool SlotState::Active() const {
@@ -71,7 +82,12 @@ Input::~Input() {
     }
 }
 
-bool Input::Open() {
+bool Input::Open(uint32_t flags) {
+    if (m_fd >= 0 || (flags & ~HX_RAW_COORDINATE_FLAGS)) {
+        m_error = "Invalid input initialization";
+        return false;
+    }
+    m_slots = SlotState(flags);
     m_fd = open("/dev/uinput", O_WRONLY | O_CLOEXEC);
     if (m_fd < 0) return Fail("uinput open");
     if (ioctl(m_fd, UI_SET_EVBIT, EV_ABS) || ioctl(m_fd, UI_SET_EVBIT, EV_KEY) ||
@@ -80,8 +96,8 @@ bool Input::Open() {
     struct Axis { uint16_t code; int max; int resolution; };
     const Axis axes[] = {
         {ABS_MT_SLOT, 9, 0}, {ABS_MT_TRACKING_ID, 65535, 0},
-        {ABS_MT_POSITION_X, 25599, 96}, {ABS_MT_POSITION_Y, 15999, 96},
-        {ABS_MT_PRESSURE, 4095, 0}, {ABS_X, 25599, 96}, {ABS_Y, 15999, 96},
+        {ABS_MT_POSITION_X, m_slots.XMax(), 96}, {ABS_MT_POSITION_Y, m_slots.YMax(), 96},
+        {ABS_MT_PRESSURE, 4095, 0}, {ABS_X, m_slots.XMax(), 96}, {ABS_Y, m_slots.YMax(), 96},
     };
     for (const auto& axis : axes) {
         if (ioctl(m_fd, UI_SET_ABSBIT, axis.code)) return Fail("uinput ABS bit");

@@ -26,7 +26,7 @@ bool Capture::Fail(const char* operation) {
     return false;
 }
 
-bool Capture::Open(const std::string& device) {
+bool Capture::Open(const std::string& device, bool buffers) {
     if (m_fd >= 0) {
         m_error = "Capture already open";
         return false;
@@ -37,7 +37,7 @@ bool Capture::Open(const std::string& device) {
         std::string found;
         unsigned int count = 0;
         for (size_t i = 0; i < paths.gl_pathc; ++i) {
-            const int fd = open(paths.gl_pathv[i], O_RDWR | O_NONBLOCK | O_CLOEXEC);
+            const int fd = open(paths.gl_pathv[i], O_RDONLY | O_NONBLOCK | O_CLOEXEC);
             if (fd < 0) continue;
             v4l2_capability caps{};
             if (ioctl(fd, VIDIOC_QUERYCAP, &caps) == 0 &&
@@ -53,9 +53,9 @@ bool Capture::Open(const std::string& device) {
             m_error = "Specify --device: expected exactly one Himax V4L2 metadata device";
             return false;
         }
-        return Open(found);
+        return Open(found, buffers);
     }
-    m_fd = open(device.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    m_fd = open(device.c_str(), (buffers ? O_RDWR : O_RDONLY) | O_NONBLOCK | O_CLOEXEC);
     if (m_fd < 0) return Fail("open");
     m_path = device;
     v4l2_capability caps{};
@@ -65,6 +65,8 @@ bool Capture::Open(const std::string& device) {
         m_error = "Not a Himax raw metadata device";
         return false;
     }
+    if (!RefreshInfo()) return false;
+    if (!buffers) return true;
     v4l2_format format{};
     format.type = V4L2_BUF_TYPE_META_CAPTURE;
     format.fmt.meta.dataformat = V4L2_META_FMT_HIMAX_SPI;
@@ -108,10 +110,14 @@ bool Capture::Start() {
     int type = V4L2_BUF_TYPE_META_CAPTURE;
     if (ioctl(m_fd, VIDIOC_STREAMON, &type)) return Fail("STREAMON");
     m_streaming = true;
+    return RefreshInfo();
+}
+
+bool Capture::RefreshInfo() {
     if (ioctl(m_fd, VIDIOC_HIMAX_INFO, &m_info)) return Fail("HIMAX_INFO");
     if (m_info.size != sizeof(m_info) || m_info.version != HX_RAW_ABI_VERSION ||
         m_info.rows != 40 || m_info.cols != 60 || m_info.payload_size != HX_RAW_PAYLOAD_SIZE ||
-        m_info.reserved || m_info.project_id[15]) {
+        (m_info.coordinate_flags & ~HX_RAW_COORDINATE_FLAGS) || m_info.project_id[15]) {
         m_error = "Incompatible Himax info";
         return false;
     }

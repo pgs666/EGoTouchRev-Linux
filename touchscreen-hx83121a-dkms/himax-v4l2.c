@@ -11,6 +11,7 @@
 #include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/power_supply.h>
+#include <linux/property.h>
 #include <linux/slab.h>
 #include <media/v4l2-event.h>
 #include <media/v4l2-fh.h>
@@ -320,6 +321,7 @@ static long himax_private_ioctl(struct file *file, void *priv,
 		info->rows = HIMAX_MAX_TX;
 		info->cols = HIMAX_MAX_RX;
 		info->payload_size = HX_RAW_PAYLOAD_SIZE;
+		info->coordinate_flags = ts->coordinate_flags;
 		strscpy(info->project_id, ts->project_id, sizeof(info->project_id));
 		goto out;
 	}
@@ -515,6 +517,12 @@ static int himax_raw_probe(struct spi_device *spi)
 		return -ENOMEM;
 	ts->dev = &spi->dev;
 	ts->spi = spi;
+	if (device_property_read_bool(ts->dev, "touchscreen-inverted-x"))
+		ts->coordinate_flags |= HX_RAW_INVERT_X;
+	if (device_property_read_bool(ts->dev, "touchscreen-inverted-y"))
+		ts->coordinate_flags |= HX_RAW_INVERT_Y;
+	if (device_property_read_bool(ts->dev, "touchscreen-swapped-x-y"))
+		ts->coordinate_flags |= HX_RAW_SWAP_XY;
 	ts->event_buf_sz = HIMAX_FULL_EVENT_STACK_SIZE;
 	ts->spi_xfer_max_sz = min_t(size_t, HIMAX_FULL_EVENT_STACK_SIZE,
 		min(spi_max_transfer_size(spi), spi_max_message_size(spi)));

@@ -36,5 +36,35 @@ int main() {
     for (auto& point : full) point.id += 10;
     Check(slots.Frame(full), "all ten IDs replaced in one frame");
     Check(Events(slots, ABS_MT_TRACKING_ID, -1) == 10, "ten old IDs released");
+    // All eight firmware wiring combinations, independently specified for
+    // the original top-left corner; the opposite corner must complement it.
+    constexpr int corners[8][2] = {
+        {0, 0}, {25599, 0}, {0, 15999}, {25599, 15999},
+        {0, 0}, {0, 25599}, {15999, 0}, {15999, 25599},
+    };
+    for (uint32_t flags = 0; flags < 8; ++flags) {
+        himax::SlotState oriented(flags);
+        himax::Contact corner{1, 0, 0, 123};
+        Check(oriented.Frame(std::span(&corner, 1)), "oriented corner accepted");
+        Check(Events(oriented, ABS_MT_POSITION_X, corners[flags][0]) == 1 &&
+              Events(oriented, ABS_MT_POSITION_Y, corners[flags][1]) == 1 &&
+              Events(oriented, ABS_X, corners[flags][0]) == 1 &&
+              Events(oriented, ABS_Y, corners[flags][1]) == 1,
+              "firmware inversion precedes swap on MT and legacy axes");
+        corner.x = 25599;
+        corner.y = 15999;
+        Check(oriented.Frame(std::span(&corner, 1)) &&
+              Events(oriented, ABS_MT_POSITION_X, oriented.XMax() - corners[flags][0]) == 1 &&
+              Events(oriented, ABS_MT_POSITION_Y, oriented.YMax() - corners[flags][1]) == 1,
+              "opposite corner and declared axis ranges agree");
+    }
+    himax::SlotState gaokun(HX_RAW_INVERT_X | HX_RAW_SWAP_XY);
+    const himax::Contact moving{1, 100, 200, 123};
+    Check(gaokun.Frame(std::span(&moving, 1)) &&
+          Events(gaokun, ABS_MT_POSITION_X, 200) == 1 &&
+          Events(gaokun, ABS_MT_POSITION_Y, 25499) == 1,
+          "Gaokun interior point matches firmware wiring");
+    himax::SlotState unsupported(8);
+    Check(!unsupported.Frame({}), "unknown firmware transform rejected");
     std::cout << "Type-B slot lifecycle passed\n";
 }

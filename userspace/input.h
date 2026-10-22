@@ -7,6 +7,7 @@
 #include <linux/input.h>
 #include <span>
 #include <string>
+#include "hx-v4l2-uapi.h"
 
 namespace himax {
 
@@ -20,13 +21,17 @@ struct Contact {
 // Pure slot bookkeeping, tested without creating a real input device.
 class SlotState {
 public:
-    SlotState() { m_ids.fill(-1); }
+    explicit SlotState(uint32_t flags = 0) : m_flags(flags) { m_ids.fill(-1); }
     bool Frame(std::span<const Contact> contacts);
     std::span<const input_event> Events() const { return {m_events.data(), m_count}; }
     bool Active() const;
+    int XMax() const { return m_flags & HX_RAW_SWAP_XY ? 15999 : 25599; }
+    int YMax() const { return m_flags & HX_RAW_SWAP_XY ? 25599 : 15999; }
 
 private:
     void Event(uint16_t type, uint16_t code, int32_t value);
+    Contact Transform(Contact contact) const;
+    uint32_t m_flags;
     std::array<int8_t, 10> m_ids{};
     std::array<input_event, 96> m_events{};
     size_t m_count = 0;
@@ -35,7 +40,7 @@ private:
 class Input {
 public:
     ~Input();
-    bool Open();
+    bool Open(uint32_t flags);
     bool Report(std::span<const Contact> contacts);
     bool Release() { return Report({}); }
     bool Active() const { return m_slots.Active(); }
