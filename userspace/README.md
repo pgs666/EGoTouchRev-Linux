@@ -15,6 +15,8 @@ baseline、AFE 状态解析、噪声处理、检测、跟踪和滤波由用户�
 `TsaCoreSolver` 和参数表，submodule 固定在
 `4d4f53d0bd8563d20850d5f380bcd6a8704c1e81`。不构建 Windows 服务、VHF 或 GUI。
 主动笔硬件采集未启用，算法的笔状态保持无笔默认值。
+文中“原版”指这个固定版本的上游 C++ 重写实现，不是直接加载华为 Windows DLL，
+也不是 Himax 发布的算法源码；移植成功不等于已证明与零售版驱动逐帧等价。
 
 ## 构建
 
@@ -45,6 +47,8 @@ sudo insmod artifacts/uinput.ko
 
 ```sh
 bash scripts/deploy-v4l2-local.sh --trial
+# 延长正常求解测试；原始帧观察采集仍为五秒：
+HIMAX_TRIAL_SECONDS=20 bash scripts/deploy-v4l2-local.sh --trial
 ```
 
 完整部署会安装模块、用户态程序、udev 规则、systemd unit 和 modules-load 配置：
@@ -58,6 +62,11 @@ journalctl -u himax-touchd -b
 脚本要求有现存、可恢复的未压缩模块；备份和日志保留在
 `deploy-logs/v4l2-时间戳/`。`--trial` 不替换启动时使用的模块或启用常驻服务，
 但会按需加载 uinput/videobuf2 依赖。
+常驻安装会强制重建 DKMS 缓存，并核对仓库产物、缓存、磁盘模块和运行中 build ID；
+失败时恢复原模块、DKMS 源码/注册状态和原服务状态。
+启动校准后可能有短暂无效原始帧；安装检查明确记录并最多容忍每个 epoch 的前四个
+无效帧。一旦出现首个有效帧，后续任何坏帧仍使安装检查失败；全坏、连续五个启动
+坏帧和截断文件也失败。运行服务的连续五坏帧规则独立负责请求 AFE reset。
 
 手动运行时不要同时启动 systemd 服务：
 
@@ -70,10 +79,14 @@ sudo userspace/build/himax-touchd --device /dev/video2
 设备通过 QUERYCAP 自动识别，不依赖固定 video 编号；安装 udev 规则后另有
 `/dev/himax-raw` 别名。面板参数默认从 OTP project ID 选择，失败时明确提示使用上游
 `W273AS2700` fallback；实测为其他面板时可用 `--project` 显式指定。
+OTP 读取遵循原版 safe-mode、LPWU、DD access 解锁和 BB 恢复流程；
+本机已实际读出 `W273AS2700`，并非仅按 fallback 选择参数。
 
 服务用三秒 watchdog 监控整个求解循环，进程退出或被终止时关闭 uinput，销毁虚拟设备。
 屏灭事件立即释放所有 slot；epoch、sequence 和时间检查禁止屏灭前队列帧重新生成触点。
 250 ms 没有有效新帧时释放已上报触点。该超时是故障保护，不加入正常逐帧防抖。
+运行状态下四秒没有新帧时服务以失败退出，由 systemd 重启并重新初始化 AFE；
+该期限容纳原版 master IDLE 约三秒的间隔。屏灭期间不触发产帧超时。
 
 ## 原始帧采集和回放
 
@@ -89,7 +102,18 @@ userspace/build/himax-replay --hxst /tmp/capture.hxst > /tmp/contacts.csv
 ```
 
 正常服务不写逐帧文件；`--record` 仅允许观察模式，避免同步磁盘 I/O 进入输入路径。
-正常服务退出时输出 solver 平均/最大用时、IRQ 到 uinput 的 p95/p99 上界及最大用时。
+只有原版 solver 请求上报时才写入 uinput；无触点的正常帧不会产生逐帧空快照。
+正常服务退出时输出 solver 平均/最大用时、IRQ 到 uinput 的 p95/p99 上界及最大用时，
+以及 IDLE/校准完成/切频完成状态帧数和各类 AFE 命令的请求、成功、失败次数。
+需要查看当前累计统计而不中断触控时：
+
+```sh
+sudo systemctl kill --kill-whom=main --signal=USR1 himax-touchd.service
+journalctl -u himax-touchd.service -b -n 30
+```
+
+命令成功计数仅表示 ioctl/邮箱传输成功，固件完成状态仍须结合后续帧判断。
+`touch_reports=0` 时不会输出 IRQ→uinput 时延，因为没有实际触点报告样本。
 该时延不包括控制器扫描之前的硬件时间，也不包括 compositor/application 响应。
 
 也支持旧诊断 trace 和连续裸帧：
@@ -98,6 +122,8 @@ userspace/build/himax-replay --hxst /tmp/capture.hxst > /tmp/contacts.csv
 userspace/build/himax-replay --trace event-trace.bin > /tmp/trace.csv
 userspace/build/himax-replay event-stack.bin > /tmp/raw.csv
 userspace/build/himax-replay frames.bin W273AS2700 5060 > /tmp/master.csv
+# 安装检查使用的有界启动瞬态容忍；保留记录及拒绝计数：
+userspace/build/himax-replay --allow-startup-invalid --hxst /tmp/capture.hxst
 ```
 
 HXST/旧 trace 使用记录的单调时间戳；裸帧按 120 Hz 重建，不能用于真实时延测量。
@@ -123,7 +149,8 @@ Android init/SELinux、内核配置和设备映射也需要独立集成。
 ## 验证边界
 
 离线测试覆盖 native checksum、完整 TSACore 初始化及状态转换、Type-B ID 生命周期、
-epoch/旧帧丢弃、HXST/HXTR 格式和截断文件处理。已有真实 512 帧历史 trace 可完整回放。
+epoch/旧帧丢弃、产帧超时、HXST/HXTR 格式和截断文件处理，以及 OTP 完整协议和
+逐次总线操作故障注入。已有真实 512 帧历史 trace 可完整回放。
 这不证明掌压亮屏、快速滑动、多指和长期运行已经通过；不能据此宣称解决原有故障。
 
 实时内核 transport 不做 raw checksum/峰值/基线判定；SPI 读取失败不会投递半帧，
@@ -133,16 +160,23 @@ epoch/旧帧丢弃、HXST/HXTR 格式和截断文件处理。已有真实 512 �
 
 2026-10-22 本机 `7.1.8-gaokun3+` 验证结果：
 
-- `make check`、legacy 诊断模块构建、四组用户态测试通过；
-- ASan/UBSan 四组测试、旧 512 帧 trace、新采 473 帧 HXST 回放通过；
+- Release 与 ASan/UBSan 五组测试通过，旧算法 host regression 和 OTP host tests 通过；
+- 旧 512 帧 trace、新采 509 帧 HXST 回放通过；新采帧 native 校验失败数为零；
 - 实际 MMAP 采集、正常服务创建/销毁唯一输入设备、SIGSTOP 后 watchdog 终止、
   保持 fd/MMAP 时解绑与重新绑定通过；最终一轮无新内核 warning/oops；
-- 873 帧短时服务样本中，solver 平均 159 µs、最大 1083 µs；
-  IRQ→uinput p95 < 5650 µs、p99 < 6850 µs、最大 12352 µs。
-  此样本没有受控快速滑动/多指动作，不是触控手感或满负载基准；
-- OTP 读取的 `0x90008010` 握手失败，已明确记录为使用上游 2700 fallback，
-  尚不能宣称面板自动识别已通过；
-- 当前系统已恢复测试前模块，未持久安装新服务；Android 未部署。
+- 20 秒服务测试最终处理 878 帧，solver 平均 144 µs、最大 1327 µs；
+  此样本没有受控快速滑动/多指动作，不是触控手感、接触延迟或满负载基准；
+- OTP 实际读出 `W273AS2700`、slot `0x0f18`、revision `0x46`、E2 `0x00`；
+- 正常求解闭环观察到校准完成状态经 ClearStatus(8) 后消失，以及进入 IDLE；
+  清状态、IDLE 命令各一次且传输成功，没有误触发四秒产帧超时；
+- 常驻安装已通过，`himax-touchd.service` 已启用；唯一 uinput 设备被 libinput 识别为
+  `267×167 mm` 的 touchscreen，运行中 build ID、磁盘模块和 DKMS 缓存一致；
+- 已安装的受限 systemd unit 验证通过，SIGSTOP 后三秒 watchdog 杀死进程，
+  服务自动重新初始化 AFE，并恢复唯一输入设备；
+- 安装前曾因校准后首帧同步头无效触发严格检查失败，两次均自动恢复旧模块。
+  现安装检查采用上述有界启动容忍，新样本 518 帧中首帧被明确拒绝，后 517 帧正常；
+- 安装记录及旧模块/DKMS/配置备份：
+  `deploy-logs/v4l2-20261022-225339/`。Android 未部署。
 
 实际 suspend/resume、掌压亮屏、充电切换、方向/显示映射、快速滑动、多指和长期稳定性
 仍未验收。早期首次加载曾因错误设置 vb2 最大队列长度触发 warning 并拒绝 probe，

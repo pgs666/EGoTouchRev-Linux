@@ -15,11 +15,12 @@ HIMAX_V4L2 ?= 1
 HIMAX_EXPERIMENTAL_SAFE_BASELINE ?= 1
 
 obj-m += $(MODNAME).o
+$(MODNAME)-y := hx-otp.o
 ifeq ($(HIMAX_V4L2),1)
 ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2=1
-$(MODNAME)-y := himax-v4l2.o himax-spi-hw.o
+$(MODNAME)-y += himax-v4l2.o himax-spi-hw.o
 else ifeq ($(HIMAX_V4L2),0)
-$(MODNAME)-y := himax-spi-core.o himax-spi-hw.o himax-spi-sysfs.o \
+$(MODNAME)-y += himax-spi-core.o himax-spi-hw.o himax-spi-sysfs.o \
 	hx-algo.o hx-algo-preprocess.o hx-algo-detect.o hx-algo-resolve.o \
 	hx-algo-track.o hx-baseline-state.o hx-baseline-property.o \
 	hx-baseline-observe.o hx-baseline-update.o hx-blreset.o \
@@ -53,8 +54,8 @@ else
 $(error HIMAX_V4L2 must be 0 or 1)
 endif
 
-KVER = $(shell uname -r)
-KDIR = /lib/modules/$(KVER)/build
+KVER ?= $(if $(KERNELRELEASE),$(KERNELRELEASE),$(shell uname -r))
+KDIR ?= /lib/modules/$(KVER)/build
 MDIR = /usr/src/$(MODNAME)-$(MODVER)
 MODPROBE_CONF = /etc/modprobe.d/$(MODNAME)-dkms.conf
 DKMS_SOURCES = Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
@@ -68,7 +69,7 @@ DKMS_SOURCES = Makefile dkms.conf himax-spi-core.c himax-spi-hw.c \
 	       hx-safe-baseline-judge.c hx-safe-baseline-queue.c hx-algo-track.c \
 	       hx-algo.h hx-algo-internal.h hx-frame-status.h hx-stylus.h \
 	       hx-panel-profile.c hx-panel-profile.h himax-v4l2.c \
-	       himax-v4l2.h hx-v4l2-uapi.h
+	       himax-v4l2.h hx-v4l2-uapi.h hx-otp.c hx-otp.h
 
 .PHONY: all clean test deploy-local dkmsinstall dkmsremove print-dkms-sources
 

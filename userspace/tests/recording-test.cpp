@@ -4,7 +4,10 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
+#include <fcntl.h>
 #include <iostream>
+#include <sys/wait.h>
 #include <unistd.h>
 
 static void Check(bool value, const char* name) {
@@ -27,7 +30,26 @@ public:
     char path[40] = "/tmp/himax-recording-test.XXXXXX";
 };
 
-int main() {
+static int Replay(const char* program, const char* path, bool grace) {
+    const pid_t child = fork();
+    Check(child >= 0, "fork replay");
+    if (!child) {
+        const int quiet = open("/dev/null", O_WRONLY);
+        if (quiet < 0 || dup2(quiet, STDOUT_FILENO) < 0 || dup2(quiet, STDERR_FILENO) < 0)
+            _exit(127);
+        close(quiet);
+        if (grace) execl(program, program, "--allow-startup-invalid", "--hxst", path, nullptr);
+        else execl(program, program, "--hxst", path, nullptr);
+        _exit(127);
+    }
+    int status;
+    pid_t result;
+    do { result = waitpid(child, &status, 0); } while (result < 0 && errno == EINTR);
+    Check(result == child && WIFEXITED(status), "replay exited normally");
+    return WEXITSTATUS(status);
+}
+
+int main(int argc, char** argv) {
     Recording file;
     hx_raw_frame packet{};
     packet.size = sizeof(packet);
@@ -74,5 +96,37 @@ int main() {
         Check(reader.Next(frame) && frame.length == 5132, "native frame readable");
         Check(!reader.Next(frame) && reader.Error().empty(), "native EOF");
     }
+    Check(argc == 2, "replay executable supplied");
+    packet.reserved[0] = 0;
+    packet.flags = 0;
+    packet.payload[0] = 0x5a;
+    packet.payload[1] = 0xa5;
+    uint32_t sum = 0;
+    for (size_t i = 4; i < 4804; i += 2) {
+        packet.payload[i] = 0xfe;
+        packet.payload[i + 1] = 0x7f;
+    }
+    for (size_t i = 4; i < himax::kNativeMasterSize; i += 2)
+        sum += packet.payload[i] | packet.payload[i + 1] << 8;
+    const uint16_t checksum = static_cast<uint16_t>(0u - sum);
+    packet.payload[2] = checksum & 0xff;
+    packet.payload[3] = checksum >> 8;
+    std::array<hx_raw_frame, 6> packets;
+    packets.fill(packet);
+    for (auto& bad : packets) bad.payload[0] = 0;
+    file.Write(packets.data(), 4 * sizeof(packet));
+    Check(Replay(argv[1], file.path, true) == 1, "all-invalid capture fails even with grace");
+    packets[4] = packet;
+    file.Write(packets.data(), 5 * sizeof(packet));
+    Check(Replay(argv[1], file.path, false) == 1, "strict replay rejects startup corruption");
+    Check(Replay(argv[1], file.path, true) == 0, "four startup transients followed by good frame allowed");
+    file.Write(packets.data(), sizeof(packets));
+    Check(Replay(argv[1], file.path, true) == 1, "post-start corruption is never waived");
+    packets[4].payload[0] = 0;
+    packets[5] = packet;
+    file.Write(packets.data(), sizeof(packets));
+    Check(Replay(argv[1], file.path, true) == 1, "five startup errors exceed recovery threshold");
+    file.Write(&packet, sizeof(packet) - 1);
+    Check(Replay(argv[1], file.path, true) == 1, "grace never tolerates truncated metadata");
     std::cout << "Recording validation passed\n";
 }

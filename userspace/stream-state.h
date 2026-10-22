@@ -10,8 +10,10 @@ namespace himax {
 // must invalidate already completed frames, even when they are read later.
 class StreamState {
 public:
-    bool State(const hx_raw_state& state) {
+    bool State(const hx_raw_state& state, uint64_t now) {
         if (state.epoch < m_epoch) return false;
+        if (state.running && (!m_running || state.epoch != m_epoch))
+            m_lastProgress = now;
         m_epoch = state.epoch;
         m_running = state.running;
         return true;
@@ -29,7 +31,15 @@ public:
         m_running = true;
         m_sequence = frame.sequence;
         m_timestamp = frame.timestamp_ns;
+        m_lastProgress = now;
         return true;
+    }
+
+    // The original master channel can be silent for about three seconds in
+    // IDLE. A four-second deadline also covers a producer that never emits
+    // its first frame; panel-off does not count as a stalled controller.
+    bool TimedOut(uint64_t now) const {
+        return m_running && now > m_lastProgress && now - m_lastProgress > 4000000000ULL;
     }
 
 private:
@@ -37,6 +47,7 @@ private:
     uint64_t m_frameEpoch = 0;
     uint64_t m_sequence = 0;
     uint64_t m_timestamp = 0;
+    uint64_t m_lastProgress = 0;
     bool m_running = false;
 };
 

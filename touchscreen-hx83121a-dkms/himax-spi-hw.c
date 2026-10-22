@@ -8,6 +8,7 @@
 #include <linux/slab.h>
 
 #include "himax-spi.h"
+#include "hx-otp.h"
 #ifndef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2
 #include "hx-panel-profile.h"
 #endif
@@ -86,9 +87,6 @@
 /* HIMAX SPI function select, 1st byte of any SPI command sequence */
 #define HIMAX_SPI_FUNCTION_READ				0xf3
 #define HIMAX_SPI_FUNCTION_WRITE			0xf2
-#define HIMAX_DDREG_CONTROL_REGISTER			0x0d
-#define HIMAX_DDREG_ENABLE				0x12
-#define HIMAX_DDREG_DISABLE				0x13
 
 union himax_dword_data {
 	u32 dword;
@@ -268,7 +266,7 @@ static int himax_mcu_register_read(struct himax_ts_data *ts, u32 addr, u8 *buf, 
 /* Write the internal (SRAM)address and data to AHB register */
 static int himax_mcu_register_write(struct himax_ts_data *ts, u32 addr, const u8 *buf, u32 len)
 {
-	int ret;
+	int ret, restore;
 
 	union himax_dword_data target_addr;
 
@@ -282,163 +280,56 @@ static int himax_mcu_register_write(struct himax_ts_data *ts, u32 addr, const u8
 	if (ret < 0)
 		dev_err(ts->dev, "%s: write ahb_addr_byte_0 failed\n", __func__);
 
-	return himax_mcu_set_burst_mode(ts, !(len > HIMAX_REG_SZ));
+	restore = himax_mcu_set_burst_mode(ts, !(len > HIMAX_REG_SZ));
+	return ret ? ret : restore;
 }
 
-int himax_ddreg_read_byte(struct himax_ts_data *ts, u8 reg, u32 bank,
-				  u8 offset, u8 *value)
+static int himax_otp_bus_read(void *context, u8 command, u8 *data, size_t length)
 {
-	u32 ddreg_addr;
-	u8 control;
-	u8 data[4] = { 0 };
-	int ret;
-
-	if (!value || bank > 3)
-		return -EINVAL;
-
-	/* Address transform recovered from hx_ddreg_read_byte. */
-	ddreg_addr = ((((u32)reg | 0x30000U) << 2) |
-			     (bank & 3U)) << 10;
-	ddreg_addr |= offset;
-	control = HIMAX_DDREG_ENABLE;
-	ret = himax_write(ts, HIMAX_DDREG_CONTROL_REGISTER, NULL,
-				  &control, sizeof(control));
-	if (ret)
-		return ret;
-	ret = himax_mcu_register_read(ts, ddreg_addr, data, sizeof(data));
-	control = HIMAX_DDREG_DISABLE;
-	if (himax_write(ts, HIMAX_DDREG_CONTROL_REGISTER, NULL,
-				&control, sizeof(control)) && !ret)
-		ret = -EIO;
-	if (!ret)
-		*value = data[0];
-	return ret;
+	return himax_spi_read(context, command, data, length);
 }
 
-int himax_ddreg_write(struct himax_ts_data *ts, u8 reg, const u8 *data,
-			      u32 len)
+static int himax_otp_bus_write(void *context, u8 command, const u8 *data,
+			       size_t length)
 {
-	u32 ddreg_addr;
-
-	if (!data || !len || len > ts->xfer_buf_sz - HIMAX_REG_SZ)
-		return -EINVAL;
-	/* writeRegisterRaw_intf uses the same DDReg register prefix but a 12-bit
-	 * address shift.  Keep this separate from the byte-read bank transform.
-	 */
-	ddreg_addr = ((u32)reg | 0x30000U) << 12;
-	return himax_mcu_register_write(ts, ddreg_addr, data, len);
+	return himax_write(context, command, NULL, data, length);
 }
 
-int himax_otp_read_block(struct himax_ts_data *ts, u16 otp_addr,
-				 u8 *data, size_t len)
+static void himax_otp_sleep(void *context, unsigned int milliseconds)
 {
-	static const u32 lpwu_int_addr = 0x9000800c;
-	static const u32 lpwu_ctrl_addr = 0x90008010;
-	u8 command[4];
-	u8 control;
-	u8 value;
-	size_t i;
-	int ret;
-
-	if (!data || len != 10)
-		return -EINVAL;
-
-	/* The vendor reads OTP only while the MCU is stopped in safe mode. */
-	ret = himax_sense_off(ts, false);
-	if (ret)
-		return ret;
-	ret = himax_mcu_write_verify_u32(ts, lpwu_int_addr, 0xac53, 20);
-	if (ret)
-		goto out_resume;
-	ret = himax_mcu_write_verify_u32(ts, lpwu_ctrl_addr, 0x35ca, 20);
-	if (ret)
-		goto out_resume;
-
-	control = HIMAX_DDREG_ENABLE;
-	ret = himax_write(ts, HIMAX_DDREG_CONTROL_REGISTER, NULL,
-				  &control, sizeof(control));
-	if (ret)
-		goto out_resume;
-
-	/* hx_OTP_read command sequence: EB 55 66 CC, B9 83 12 1A,
-	 * then BB 02 <address-high> <address-low>.
-	 */
-	command[0] = 0x55;
-	command[1] = 0x66;
-	command[2] = 0xcc;
-	command[3] = 0x00;
-	ret = himax_ddreg_write(ts, 0xeb, command, sizeof(command));
-	if (ret)
-		goto out_disable;
-	usleep_range(10000, 11000);
-	command[0] = 0x83;
-	command[1] = 0x12;
-	command[2] = 0x1a;
-	command[3] = 0x00;
-	ret = himax_ddreg_write(ts, 0xb9, command, sizeof(command));
-	if (ret)
-		goto out_disable;
-	usleep_range(10000, 11000);
-	command[0] = 0x02;
-	command[1] = (u8)(otp_addr >> 8);
-	command[2] = (u8)otp_addr;
-	command[3] = 0x00;
-	ret = himax_ddreg_write(ts, 0xbb, command, sizeof(command));
-	if (ret)
-		goto out_disable;
-	usleep_range(10000, 11000);
-	command[0] = 0xbb;
-	command[1] = 10;
-	ret = himax_ddreg_write(ts, 0xbb, command, 2);
-	if (ret)
-		goto out_disable;
-	msleep(50);
-
-	for (i = 0; i < len; i++) {
-		ret = himax_ddreg_read_byte(ts, 0xb1, 3, (u8)(i + 1), &value);
-		if (ret)
-			goto out_disable;
-		data[i] = value;
-	}
-	ret = himax_ddreg_write(ts, 0xbb, data, len);
-
-out_disable:
-	control = HIMAX_DDREG_DISABLE;
-	if (himax_write(ts, HIMAX_DDREG_CONTROL_REGISTER, NULL,
-				&control, sizeof(control)) && !ret)
-		ret = -EIO;
-out_resume:
-	/* Always attempt to return the controller to the running state. */
-	if (himax_sense_on(ts, true) && !ret)
-		ret = -EIO;
-	return ret;
+	if (milliseconds >= 20)
+		msleep(milliseconds);
+	else
+		usleep_range(milliseconds * 1000, milliseconds * 1000 + 100);
 }
 
 int himax_get_project_id_otp(struct himax_ts_data *ts, char *project_id,
 				     size_t project_id_len)
 {
-	static const u16 otp_addresses[] = { 0x0f18, 0x0f3a, 0x0f5c };
-	u8 raw[10];
-	size_t i;
+	const struct hx_otp_bus bus = {
+		.context = ts,
+		.read = himax_otp_bus_read,
+		.write = himax_otp_bus_write,
+		.sleep_ms = himax_otp_sleep,
+	};
+	struct hx_otp_identity identity;
 	int ret;
 
 	if (!project_id || project_id_len < 11)
 		return -EINVAL;
 	project_id[0] = '\0';
-	for (i = 0; i < ARRAY_SIZE(otp_addresses); i++) {
-		ret = himax_otp_read_block(ts, otp_addresses[i], raw, sizeof(raw));
-		if (ret)
-			continue;
-		memcpy(project_id, raw, sizeof(raw));
-		project_id[sizeof(raw)] = '\0';
-		if (!strcmp(project_id, "W273AS2700") ||
-		    !strcmp(project_id, "W273AS2710") ||
-		    !strcmp(project_id, "W273AS1300") ||
-		    !strcmp(project_id, "W273AS1310"))
-			return 0;
+	ret = hx_otp_read_project(&bus, &identity);
+	if (ret) {
+		dev_warn(ts->dev, "panel OTP failed: %d slot=0x%04x id=%*phN\n",
+			 ret, identity.slot, 10, identity.project_id);
+		return ret;
 	}
-	project_id[0] = '\0';
-	return -ENODATA;
+	strscpy(project_id, identity.project_id, project_id_len);
+	dev_info(ts->dev,
+		 "panel OTP: %s slot=0x%04x revision=0x%02x E2=0x%02x valid=0x%x\n",
+		 project_id, identity.slot, identity.revision, identity.e2,
+		 identity.extra_valid);
+	return 0;
 }
 
 /* Xiaomi replays firmware-owned state with write/read retry loops.  Keep the

@@ -73,5 +73,11 @@ if(BUILD_TESTING)
     add_executable(himax-recording-test tests/recording-test.cpp)
     target_link_libraries(himax-recording-test PRIVATE himax-tsacore)
     target_compile_options(himax-recording-test PRIVATE -Wall -Wextra -Werror)
-    add_test(NAME recording-validation COMMAND himax-recording-test)
+    add_test(NAME recording-validation COMMAND himax-recording-test $<TARGET_FILE:himax-replay>)
+    add_executable(himax-otp-test ../tests/hx-otp-test.c
+        ../touchscreen-hx83121a-dkms/hx-otp.c)
+    target_include_directories(himax-otp-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_options(himax-otp-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME otp-protocol COMMAND himax-otp-test)
 endif()

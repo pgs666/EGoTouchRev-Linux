@@ -9,7 +9,10 @@ DRIVER_STYLE_SOURCES := $(DRIVER_DIR)/himax-spi-core.c \
 	$(DRIVER_DIR)/hx-algo-preprocess.c $(DRIVER_DIR)/hx-algo-detect.c \
 	$(DRIVER_DIR)/hx-algo-resolve.c $(DRIVER_DIR)/hx-algo-track.c \
 	$(DRIVER_DIR)/hx-algo.h \
-	$(DRIVER_DIR)/hx-algo-internal.h $(DRIVER_DIR)/hx-frame-status.h
+	$(DRIVER_DIR)/hx-algo-internal.h $(DRIVER_DIR)/hx-frame-status.h \
+	$(DRIVER_DIR)/hx-otp.c $(DRIVER_DIR)/hx-otp.h \
+	$(DRIVER_DIR)/himax-v4l2.c $(DRIVER_DIR)/himax-v4l2.h \
+	$(DRIVER_DIR)/hx-v4l2-uapi.h
 
 .PHONY: all clean driver test userspace check checkpatch
 

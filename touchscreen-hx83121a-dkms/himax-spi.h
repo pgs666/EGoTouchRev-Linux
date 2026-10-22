@@ -163,12 +163,6 @@ void himax_int_enable(struct himax_ts_data *ts, bool enable);
 void himax_lock(struct himax_ts_data *ts);
 void himax_unlock(struct himax_ts_data *ts);
 int himax_spi_read(struct himax_ts_data *ts, u8 command, u8 *buf, u32 len);
-int himax_ddreg_read_byte(struct himax_ts_data *ts, u8 reg, u32 bank,
-				  u8 offset, u8 *value);
-int himax_ddreg_write(struct himax_ts_data *ts, u8 reg, const u8 *data,
-			      u32 len);
-int himax_otp_read_block(struct himax_ts_data *ts, u16 otp_addr,
-				 u8 *data, size_t len);
 int himax_get_project_id_otp(struct himax_ts_data *ts, char *project_id,
 				     size_t project_id_len);
 int himax_restore_afe_runtime(struct himax_ts_data *ts);

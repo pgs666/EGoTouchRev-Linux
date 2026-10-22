@@ -16,13 +16,16 @@ SPI IRQ
   → Linux input/libinput
 ```
 
-内核仅有 `himax-v4l2.c` 和共享的 `himax-spi-hw.c` 两个编译单元。不链接 baseline、
+内核仅有 `himax-v4l2.c`、共享的 `himax-spi-hw.c` 和可单独 host 测试的 OTP 协议
+`hx-otp.c` 三个编译单元。不链接 baseline、
 peak detection、tracker、滤波、input 或旧诊断 ring。保留的硬件职责包括 GPIO reset、
 AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、充电状态和命令邮箱。
 这些必须由硬件拥有者串行执行，无法可靠地简化为毫无生命周期的 SPI 字节转发器。
 
 用户态通过 submodule 编译原版全部启用算法，保留上游模块边界与面板参数表。
 不把 C++ 浮点和进程级全局状态搬进内核。手写笔采集未启用。
+这里的“原版”是上游 EGoTouchRev v1.4.0 的 C++ 重写实现，不能据此声称直接运行
+华为原厂 DLL，或已经通过零售驱动的逐帧等价验证。
 
 ## V4L2 ABI v1
 
@@ -54,6 +57,8 @@ SPI bounce buffer → event buffer → vb2 buffer → 用户态私有帧的拷�
 daemon 使用 poll，逐帧求解；超过 50 ms 的旧帧、重复/乱序 sequence 和过期 epoch
 不能上报。生命周期事件和 vb2 帧来自两个独立队列，必须先处理事件，再校验帧 epoch。
 屏灭后的旧完成帧不能重新激活 input slot；此行为由纯状态回归测试覆盖。
+只有原版 solver 请求上报时才提交 Type-B snapshot；无触点时不持续写空输入帧，
+跳过上报的帧也不能被误解为一次全抬起。
 
 正常链路不增加固定轮询等待和额外触控防抖，但增加了进程调度和 uinput 开销。
 输出的 IRQ→uinput 分位数涵盖 SPI 读取、调度、算法和上报；不代表物理点击到应用
@@ -73,6 +78,11 @@ STREAMON、亮屏恢复和受限 reset 执行：
 → StartCalibration / 120 Hz
 → running 事件 / 开 IRQ
 ```
+
+OTP 使用原版独立的 AHB burst、DD access 解锁和只读槽位选择流程，
+并在成功和失败路径恢复 DD/safe-mode 状态；控制触发寄存器不强求等值读回。
+本机已从槽位 `0x0f18` 读出 `W273AS2700`，算法据此选择参数。
+寄存器协议测试还覆盖部分读取失败、清理失败和逐次总线操作故障注入。
 
 收到新的 epoch 时，用户态释放旧 slot、通知 OnAfeStopped/OnAfeStarted；SOS 重启
 额外通知 OnAfeSos。TSACore 对 calibration-done 上升沿、baseline reset、保留状态和
@@ -94,6 +104,8 @@ STREAMON、亮屏恢复和受限 reset 执行：
 - 停屏事件立即释放，不等待这个超时。
 - 进程正常退出或被杀时关闭 uinput，虚拟输入设备销毁。
 - systemd 三秒 watchdog 覆盖算法挂住的情况，停止/休眠期间也持续喂狗。
+- 运行中四秒没有新帧则退出，由 supervisor 重建 stream/AFE；允许原版 IDLE
+  约三秒的 master 间隔，屏灭不计入超时；重复 running 事件不能掩盖停帧。
 - 多个消费者不能同时拥有采集队列；不允许内核和用户态同时上报同一块触屏。
 
 服务退出后桌面触控暂时消失，由 systemd 重建服务；没有运行时内核求解 fallback。

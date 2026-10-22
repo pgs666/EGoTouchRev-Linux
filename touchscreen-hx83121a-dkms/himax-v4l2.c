@@ -510,7 +510,7 @@ static int himax_raw_probe(struct spi_device *spi)
 	struct vb2_queue *q;
 	int ret;
 
-	ts = kzalloc(sizeof(*ts), GFP_KERNEL);
+	ts = kzalloc_obj(*ts, GFP_KERNEL);
 	if (!ts)
 		return -ENOMEM;
 	ts->dev = &spi->dev;

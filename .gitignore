@@ -3,6 +3,7 @@ artifacts/
 **/artifacts/
 **/build/
 userspace/build-*/
+tests/hx-otp-test
 __pycache__/
 *.py[cod]
 .venv/
