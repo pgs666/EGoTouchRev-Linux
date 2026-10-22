@@ -1,0 +1,3 @@
+[submodule "third_party/EGoTouchRev"]
+	path = third_party/EGoTouchRev
+	url = https://github.com/awarson2233/EGoTouchRev.git
