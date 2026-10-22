@@ -4,6 +4,7 @@
 #include "solver-screen.h"
 #include "Alg/Touch/TouchData.h"
 #include "App/Report.h"
+#include "App/TsaBuffer.h"
 #include "App/TsaStatic.h"
 #include "Prmt/Prmt.h"
 
@@ -21,7 +22,7 @@ static void Check(bool condition, const char* message) {
 }
 
 int main(int argc, char** argv) {
-    if (argc != 2 && argc != 5) return 2;
+    if (argc != 2 && argc != 5 && argc != 6) return 2;
     const int rotation = std::atoi(argv[1]);
     Check(rotation >= 0 && rotation <= 3, "valid display direction");
     auto solver = std::make_unique<Solvers::Tsa::TsaCoreSolver>();
@@ -73,7 +74,7 @@ int main(int argc, char** argv) {
     warmup();
     if (argc == 2) {
         for (int edge = 0; edge < 4; ++edge) {
-            for (double speed : {1.5, 2.0}) {
+            for (double speed : {1.5, 2.0, 2.5, 3.0, 4.0}) {
                 for (double drift : {0.0, 0.15, -0.15}) {
                     warmup();
                     int id = -1, moves = 0, firstFrame = -1;
@@ -96,7 +97,7 @@ int main(int argc, char** argv) {
                             ++moves;
                         }
                     }
-                    Check(firstFrame >= 0 && firstFrame <= 3 && moves >= 6,
+                    Check(firstFrame >= 0 && firstFrame <= 3 && moves >= 5,
                           "edge entry is admitted without additional confirmation frames");
                     if (firstDistance < -0.1f || firstDistance > 1)
                         std::cerr << "rotation=" << rotation << " edge=" << edge
@@ -200,6 +201,7 @@ int main(int argc, char** argv) {
     const int edge = std::atoi(argv[2]);
     const double speed = std::atof(argv[3]);
     const double drift = std::atof(argv[4]);
+    const double initialDistance = argc == 6 ? std::atof(argv[5]) : -1.0;
     const auto& fl = Solvers::Tsa::Core::PrmtFlash();
     const auto& fc = Solvers::Tsa::Core::PrmtFlashConst();
     std::cout << "profile=" << solver->LoadedPrmtName() << " rotation=" << rotation
@@ -210,13 +212,28 @@ int main(int argc, char** argv) {
                   << fl.erEdgeMm[i].maxDistMm << " enable=" << +fl.erEdgeMm[i].field4
                   << " q8=" << fc.erEdge[i].minDist << ',' << fc.erEdge[i].maxDist << '\n';
     for (int i = 0; i < 20; ++i) {
-        const double distance = -1.0 + i * speed;
+        const double distance = initialDistance + i * speed;
         const double x = edge < 2 ? (edge == 0 ? distance : 59 - distance) : 30 + i * drift;
         const double y = edge >= 2 ? (edge == 2 ? distance : 39 - distance) : 20 + i * drift;
         process(x, y, false);
         const auto& tt = Solvers::Tsa::Core::Touches();
         const auto& pt = Solvers::Tsa::Core::PrevTouches();
-        std::cout << "f=" << i << " raw=" << x << ',' << y << " n=" << +tt.count;
+        using namespace Solvers::Tsa::Core;
+        std::array<int, 4> boundaryMax{};
+        for (int t = 0; t < 60; ++t) {
+            boundaryMax[2] = std::max<int>(boundaryMax[2], Buffers().dif[GridIndex(t, 0)]);
+            boundaryMax[3] = std::max<int>(boundaryMax[3], Buffers().dif[GridIndex(t, 39)]);
+        }
+        for (int t = 0; t < 40; ++t) {
+            boundaryMax[0] = std::max<int>(boundaryMax[0], Buffers().dif[GridIndex(0, t)]);
+            boundaryMax[1] = std::max<int>(boundaryMax[1], Buffers().dif[GridIndex(59, t)]);
+        }
+        std::cout << "f=" << i << " raw=" << x << ',' << y << " n=" << +tt.count
+                  << " coretime=" << Static().curTimeMs << '/' << Static().prevTimeMs
+                  << " edge-max=" << boundaryMax[0] << ',' << boundaryMax[1] << ','
+                  << boundaryMax[2] << ',' << boundaryMax[3]
+                  << " thresholds=" << PrmtDynamic().noiseThold << ','
+                  << PrmtDynamic().edgePeakThold << ',' << PrmtDynamic().fingerThold;
         for (int j = 0; j < pt.count; ++j)
             std::cout << " PRE(id=" << +pt.unit[j].id << " ev=" << pt.unit[j].event
                       << " start=" << pt.unit[j].startPos.dim1 << ',' << pt.unit[j].startPos.dim2

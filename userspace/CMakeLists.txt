@@ -31,11 +31,13 @@ include(cmake/PrepareUpstream.cmake)
 set(TSACORE_OVERLAY "${CMAKE_CURRENT_BINARY_DIR}/upstream-overlay")
 himax_prepare_upstream("${TSACORE}" "${TSACORE_OVERLAY}")
 list(REMOVE_ITEM TSACORE_SOURCES "${TSACORE}/src/App/Sys.cpp"
+    "${TSACORE}/src/App/Tsa.cpp"
     "${TSACORE}/src/Rejection/TouchReport/TouchReport.cpp"
     "${TSACORE}/src/Alg/TouchZone/Contour.cpp")
 add_library(himax-tsacore STATIC ${TSACORE_SOURCES}
     "${TSACORE}/HimaxAfeAdapter.cpp" "${TSACORE_OVERLAY}/TsaCoreSolver.cpp"
     "${TSACORE_OVERLAY}/src/App/Sys.cpp" host-screen.cpp edge-onset.cpp
+    "${TSACORE_OVERLAY}/src/App/Tsa.cpp"
     "${TSACORE_OVERLAY}/src/Rejection/TouchReport/TouchReport.cpp"
     "${TSACORE_OVERLAY}/src/Alg/TouchZone/Contour.cpp"
     native-frame.cpp recording.cpp capture-session.cpp session-replay.cpp)
@@ -185,4 +187,9 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/edge-onset-compare.py"
         $<TARGET_FILE:himax-solver-edge-test> $<TARGET_FILE:himax-solver-edge-reference>)
     set_tests_properties(edge-onset-reference PROPERTIES TIMEOUT 120)
+    add_executable(himax-edge-evidence-test tests/edge-onset-evidence-test.cpp)
+    target_include_directories(himax-edge-evidence-test PRIVATE "${TSACORE}/src")
+    target_link_libraries(himax-edge-evidence-test PRIVATE himax-tsacore)
+    target_compile_options(himax-edge-evidence-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME edge-onset-evidence COMMAND himax-edge-evidence-test)
 endif()

@@ -10,7 +10,8 @@ import time
 
 cmake, upstream, module = sys.argv[1:]
 sources = ("TsaCoreSolver.cpp", "src/App/Sys.cpp",
-           "src/Rejection/TouchReport/TouchReport.cpp", "src/Alg/TouchZone/Contour.cpp")
+           "src/Rejection/TouchReport/TouchReport.cpp", "src/Alg/TouchZone/Contour.cpp",
+           "src/App/Tsa.cpp")
 
 
 def sha(path):
@@ -50,10 +51,16 @@ with tempfile.TemporaryDirectory(prefix="himax-overlay-") as directory:
             continue
         hook, header = (
             ("::himax::RecoverEdgeOnset(curIdx, prevIdx, report);", "edge-onset.h")
-            if name == sources[2] else ("::himax::ApplyHostScreenRotation();", "host-screen.h")
+            if name == sources[2] else
+            ("::himax::ObserveEdgeOnset();", "edge-onset.h") if name == sources[4] else
+            ("::himax::ApplyHostScreenRotation();", "host-screen.h")
         )
         assert text.count(hook) == 1
-        assert text.startswith(f'#include "{header}"\n#line 1 "')
+        prefix = f'#include "{header}"\n'
+        if name == sources[1]:
+            prefix += '#include "edge-onset.h"\n'
+            assert text.count("::himax::ResetEdgeOnset();") == 1
+        assert text.startswith(prefix + '#line 1 "')
     assert "ApplyPenSession();\n    ::himax::ApplyHostScreenRotation();" in (
         output / sources[0]
     ).read_text()

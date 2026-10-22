@@ -24,7 +24,11 @@ function(himax_overlay_source source output expected_hash anchor header insertio
         "${anchor}\n${insertion}" contents "${contents}")
     set(generated "#line 1 \"${source}\"\n${contents}")
     if(NOT header STREQUAL "")
-        set(generated "#include \"${header}\"\n${generated}")
+        set(includes "")
+        foreach(include_header IN LISTS header)
+            string(APPEND includes "#include \"${include_header}\"\n")
+        endforeach()
+        set(generated "${includes}${generated}")
     endif()
     set(previous "")
     if(EXISTS "${output}")
@@ -49,7 +53,16 @@ function(himax_prepare_upstream source_dir output_dir)
     himax_overlay_source("${source_dir}/src/App/Sys.cpp"
         "${output_dir}/src/App/Sys.cpp"
         0db1913ca6b77a31c8aa0a114734685a5badd095cf6e362ce0ea6ca0608c56f0
-        "    s.screenRotation = 0;" "host-screen.h" "    ::himax::ApplyHostScreenRotation();")
+        "    s.screenRotation = 0;" "host-screen.h;edge-onset.h"
+        "    ::himax::ApplyHostScreenRotation();\n    ::himax::ResetEdgeOnset();")
+    # Boundary activity before peak admission can otherwise be lost entirely.
+    # Observe only the already-conditioned Dif grid; leave peak detection and
+    # its thresholds, touch admission and debounce unchanged.
+    himax_overlay_source("${source_dir}/src/App/Tsa.cpp"
+        "${output_dir}/src/App/Tsa.cpp"
+        ac7b24910917277fa8e3e9b12a4e6a69f62acf7babf052b9c4cb6c7fe025496a
+        "    TSA_STEP(Prmt::Process());" "edge-onset.h"
+        "    ::himax::ObserveEdgeOnset();")
     # Admission/grip tests and history/filtering have already run. Do not set
     # the history-replay flag: upstream lets it bypass ToBeReported and changes
     # lift-off debounce as a side effect. Correct only the first admitted point.

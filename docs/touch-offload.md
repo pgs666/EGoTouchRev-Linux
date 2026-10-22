@@ -30,7 +30,9 @@ Linux 有两处宿主方向适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys
 分别在 `ApplyPenSession()` 后和 `screenRotation = 0` 后应用宿主方向。
 另生成 `TouchReport.cpp` 与 `Contour.cpp` 的副本：前者调用本地的首次获准上报
 边缘起点修正，后者修复插值最后一行/列的越界取样。
-[`PrepareUpstream.cmake`](../userspace/cmake/PrepareUpstream.cmake) 校验四份原始源文件
+`Tsa.cpp` 副本在峰检测前观察有界的边缘信号历史，补偿首个候选已经越过窄 ER 带的
+快速滑入；`Sys.cpp` 在算法复位时清除此历史。
+[`PrepareUpstream.cmake`](../userspace/cmake/PrepareUpstream.cmake) 校验五份原始源文件
 的完整 SHA-256；源文件变化就停止配置并要求审查。submodule 本身不被修改，
 其余算法源文件、接口布局和参数表不变，不能把本地修正称为上游等价行为。
 边缘修正的条件、限制和对照工具见
