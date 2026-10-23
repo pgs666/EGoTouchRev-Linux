@@ -1,5 +1,10 @@
 # Linux 用户态触控求解
 
+当前本机部署（2026-10-23）：测试内核 `7.1.8-gaokun3-himax1`，触摸模块来自
+`44e6917`，用户态 daemon/replay 来自 `c00844e`。可选运行中窗口录制已完成首轮
+实机验证，当前恢复为默认关闭配置。下文末尾的增量记录按时间排列，其中早先的
+“尚未安装”是当时状态；最新部署记录见末节，不能据早先记录判断当前版本。
+
 默认数据路径为：
 
 ```text
@@ -550,7 +555,7 @@ suffix 中的 `0xbb` 是校准完成状态，通过 ClearStatus(8) 确认，不�
 配置后不主动录制，收到 SIGUSR2 才开始，再发一次提前停止；每次结束由后台线程
 排空/关闭，上一窗口尚未关闭时拒绝新请求。主触摸线程不创建文件、不等待落盘。
 
-此能力目前仅构建和 host 验证，**尚未安装到当前正在运行的服务**。旧 daemon 的
+`c00844e` 已安装并完成两次实机窗口验证，**当前默认仍关闭录制**。旧 daemon 的
 SIGUSR2 可能是终止信号，不能直接对旧版本发送。辅助脚本读取运行进程参数，未配置
 该选项、服务停止或 PID 改变时不发信号，也不会自动停止/重启服务。
 
@@ -1236,3 +1241,35 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
   live/CLI 与既有 fresh 会话测试同时通过；另在设置测试超时后重跑相关测试通过。
   `bash -n`、`git diff --check` 通过。内核代码和 UAPI 未改，没有新的模块构建
   或 initramfs 更新；当前安装/运行版本保持 `44e6917`。
+
+2026-10-23 `c00844e` 用户态部署与运行窗口首轮实机验证：
+
+- 仅替换 daemon/replay，模块仍为 `44e6917`，没有卸载 Himax、GPI 或 SPI，也未改
+  kernel Image/initramfs、默认启动项或 Android。替换程序时停止/启动服务会重建
+  AFE/solver；这里的“不重置”只描述同一常驻服务中的两次采集，不包括部署本身；
+- 采用 `/run/systemd/system/himax-touchd.service.d/90-live-capture-trial.conf`
+  临时启用 10 秒窗口，实际服务的 StateDirectory、ProtectSystem/ProtectHome
+  等沙箱限制保持。两个窗口中服务 PID 均为 447169、NRestarts=0，AFE epoch=7
+  不变；没有因请求采集而重启服务、重新校准或重新打开 V4L2；
+- 自动截止窗口：`/var/lib/himax-touchd-captures/live-XXebGzN9/capture.hxst`，
+  560 帧、2903072 B；提前结束窗口：`live-XX5TsqFj/capture.hxst`，2 帧、10400 B，
+  后者处于低频 IDLE。每个文件大小均为 `32 + frames*5184`，侧车 F 条数一致、
+  `END frames 0 0`，两个 raw 首尾 epoch 均为 7，普通 raw 回放无拒绝帧。
+  两份 `--session` 均按预期返回 1，明确提示没有 solver checkpoint；
+- 该服务交接前累计 882 帧，bad/stale=0、touch_reports=0。这是无实际手势样本的
+  首轮管线/IDLE 验证，不是触控质量、持续 120 Hz、峰值压力或延迟基准；
+- 成功后将唯一临时配置移到证据目录保存，恢复原来无 live 选项的 ExecStart，再
+  启动新 daemon。最终 PID=451070、epoch=9、588 帧时 bad/stale=0、NRestarts=0。
+  **新用户态已安装，录制没有默认启用**；可选配置示例安装在
+  `/usr/local/share/doc/himax-touchd/himax-touchd-live-capture.conf`，未来启用方法见
+  运行中窗口录制章节；
+- GPI/SPI/Himax 的运行 build ID 在部署前后逐字节一致，内核健康门控通过。
+  daemon SHA-256：`72ce2c8d8ef5e515769622172d35263f24ffd060b9e23e7334fbbac3e1a1847d`，
+  replay SHA-256：`50928ddf507a858e829eb98a296e9859c92fe31589eb4146cafd7f6e953ca15b`。
+  也包含此前 `672988e` 的 checksum 分类对齐，不只是新增录制能力；
+- 安装前重跑相关四项 host 测试通过，原提交完整 44 项 Release/ASan/UBSan 结果
+  保留。没有增加固件命令或重测切频。真实有触点录制、物理充电/睡眠、异常现场、
+  慢盘压力和录制开启时的触点时延仍待验收；
+- 日志、部署脚本、两份 raw 回放结果与旧程序副本保存在
+  `deploy-logs/live-capture-install-c00844e/`。临时配置保留为
+  `completed-runtime-override.conf`，不是生效中的服务配置。
