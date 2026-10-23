@@ -217,3 +217,19 @@ BLS entry、其他内核和默认启动选择不变。新触摸模块 build ID �
 该镜像尚未重启验证；旧镜像和模块/程序保存在
 `deploy-logs/master-read-install-44e6917/previous-*`，不占用 ESP 额外备份空间。
 仍是手动部署测试内核，DKMS mask 保留，没有伪造 DKMS 安装状态。
+
+## 2026-10-23：普通触摸模块更新为异步初始化恢复
+
+测试内核 release/Image/GPI/SPI 不变，仅将触摸模块更新为 `c1a8757` 的普通构建，
+与后续 `fba5d7a` 排除诊断注入后的构建逐字节一致。新的运行/磁盘 build ID 为
+`89b9985b76556d2179e11e83e6e1b426f2864efe`，模块 SHA-256：
+`1de7e614b3af24ab9eb5839f304022317975828cb2b8871ffd410be2dbb67da5`。
+诊断模块仅临时试载主动 pre-SPI 失败与取消/恢复，不进入磁盘模块目录或 initramfs；
+GPI/SPI 从未卸载。正常启动与严格会话回放通过，细节和限制见用户态运行说明。
+
+已将普通模块写入 `/boot` 和 ESP 的同一测试启动项 initramfs，解包后的
+Himax/GPI/SPI/uinput 与磁盘逐字节一致。两份新 initramfs SHA-256 均为
+`bd97963c0ca912d37c62346da69fd07a21329d71fa3938e25d657ca1abb51f62`。
+Image、DTB、BLS entry 的 SHA-256 复核通过，默认启动项和 DKMS mask 不变。
+没有自动重启，新镜像尚未冷启动验收。旧模块与旧 initramfs 保存在
+`deploy-logs/afe-retry-install-fba5d7a/previous-*`，没有删除旧版本文件。
