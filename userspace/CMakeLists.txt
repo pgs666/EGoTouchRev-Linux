@@ -336,6 +336,10 @@ if(BUILD_TESTING)
     add_executable(himax-afe-hardware-test tests/afe-hardware-test.cpp v4l2-capture.cpp)
     target_link_libraries(himax-afe-hardware-test PRIVATE himax-tsacore)
     target_compile_options(himax-afe-hardware-test PRIVATE -Wall -Wextra -Werror)
+    # Opt-in real startup/reset trial; never registered with CTest.
+    add_executable(himax-startup-hardware-test tests/startup-hardware-test.cpp v4l2-capture.cpp)
+    target_link_libraries(himax-startup-hardware-test PRIVATE himax-tsacore)
+    target_compile_options(himax-startup-hardware-test PRIVATE -Wall -Wextra -Werror)
     # Opt-in hands-off IDLE trial; real SPI and one rearm, never part of CTest.
     add_executable(himax-rearm-hardware-test tests/rearm-hardware-test.cpp v4l2-capture.cpp)
     target_link_libraries(himax-rearm-hardware-test PRIVATE himax-tsacore)
