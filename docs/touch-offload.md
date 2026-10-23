@@ -378,7 +378,10 @@ raw `--hxst` 单独列出 `empty_rearms`，不把它们称为有效帧；没有�
 最多连续三次受理；连续三十秒好数据且无过长间隔后才恢复预算。它们是本地边界，
 不是 Windows 原样参数。等待期间不嵌套发 frame-bound reset，不因更多坏帧无限
 重置等待时间；既有 250 ms input-only release 保留。该路径尚未实机故障验收，
-默认 unit 不加选项；当前安装状态见 SPB 审计，不将离线测试当作部署成功。
+当前默认 unit 显式添加 `--experimental-restart`，仍不添加 `--experimental-rearm`；
+带 live-capture 的可选 drop-in 和 fresh 采集脚本也保留相同恢复行为。
+本机已配套安装模块/daemon，并同步测试内核的 initramfs；真实故障恢复和 PM/
+手势验收仍未完成，受控 IDLE 重建不能代替它们。当前安装状态见 SPB 审计。
 
 ## Linux 与 Android
 

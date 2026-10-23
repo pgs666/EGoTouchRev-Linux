@@ -760,3 +760,20 @@ NRestarts=0，磁盘哈希与上一部署一致。
 完成边界是本机、固定上游 v1.4.0 的已启用手指路径；用户要求关闭的笔继续关闭，
 Android 新架构单列。跳频/扫描率固件完成未证实的项目仍需查清，不能被更多 host
 测试替代。完整移植尚未完成，但后续工作不再以不断添加参考模型作为主要进度。
+
+### 2026-10-24：受控重建实测及常驻部署
+
+`deploy-logs/restart-trial-w6I3dojw/`：新 daemon 同时打开两个实验选项正常运行，
+878 帧全部有效、零 stale/丢记录，无补读或重建，严格回放一致。之后用确认的
+IDLE 静默窗口申请三次 +4，epoch 3→4→5→6，每次首个有效 sequence=1，24 帧
+窗口均看到 calibration-done；受理到首份有效数据约 436.8/425.3/425.5 ms。
+105 个 raw 包全有效。这验证受控重建，不制造 IRQ/SPI 故障，也不冒充真实 stall
+恢复。试载后已恢复旧客户端；临时工具源码差异与二进制仅保存在证据目录。
+
+随后已正式安装配套 module/daemon/replay，service 显式启用同进程重建，自动 kick
+保持关闭；运行模块 build ID 为 `a74a57ee…`，磁盘模块/程序与候选一致。服务
+PID=2604701、NRestarts=0，876→925 帧 bad/stale=0，无额外重建。旧文件、部署
+记录及旧镜像在 `deploy-logs/restart-install-UV120Lpk/`。两份测试 initramfs 为
+`8ef6d45bbcc963d89becfe01e752572c7cf41fbd34c5def73bfc1dff1f9c7411`，
+解包四份模块与磁盘逐字节一致；SPI/GPI 运行 notes、Image/DTB/entry/default 不变。
+未重启、未部署 Android，冷启动及真实故障/触点/PM 验收仍保留。

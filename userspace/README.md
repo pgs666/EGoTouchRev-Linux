@@ -1,18 +1,19 @@
 # Linux 用户态触控求解
 
-当前本机部署（2026-10-23）：测试内核 `7.1.8-gaokun3-himax1`，触摸模块已更新为
-`1674f8e` 的 bus-ready/tagged-origin 普通构建，daemon 和 replay 也配套更新。
-**自动补读默认关闭，正常服务继续四秒等待**。早先自动空补读曾触发 reset，因此
-默认关闭保持不变；来源标记和 no-data 处理已修正，但尚不能排除过渡期误判。
-初始化前主动失败/取消/恢复及普通启动已完成首轮实机验证；
-可选运行中窗口录制默认关闭。下文末尾的增量记录按时间排列，其中早先的
-“尚未安装”是当时状态；最新部署记录见末节，不能据早先记录判断当前版本。
+当前本机部署（2026-10-24）：测试内核 `7.1.8-gaokun3-himax1`，已安装支持
+精确 token 异步重建的普通模块和 `b1fc40b` daemon/replay，保留异步启动清帧、
+两帧队列及边缘首点修正。**常驻服务已开启同进程 AFE 重建；主动补读仍关闭。**
+正常 IDLE 仍允许四秒等待，持续停帧后优先重建 AFE，失败/超预算再退出给
+supervisor。裸运行 daemon 不加选项仍保持原回退行为；service 显式添加
+`--experimental-restart`，没有添加 `--experimental-rearm`。
+可选运行中窗口录制仍默认关闭，不改变 baseline/追踪算法。下文增量记录按时间
+排列，早先“尚未安装/默认关闭重建”是当时状态；当前部署以本节及末节为准。
 
 开发中：新增 `VIDIOC_HIMAX_REARM_TAGGED` 和用户态无复位停帧恢复预算。
 当前 HEAD 已将自动补读改为 `--experimental-rearm` 显式启用，**默认关闭**，
 默认保留四秒停帧等待；systemd unit 不带该参数。`--observe`/`--info` 拒绝与实验
 选项组合。该开关不代表自动恢复已验收，只是防止从 HEAD 默认构建时重新启用已知
-有现场疑点的策略；当前已安装配套新程序，但普通服务不传实验参数。
+有现场疑点的策略；当前已安装配套新程序，但普通服务不传主动补读参数。
 最新开发进一步增加 `VIDIOC_HIMAX_REARM_TAGGED` 与 HXST 来源标志，
 区分明确的空轮询和 IRQ 异常包；只豁免“已标记主动读 + 全零”，不豁免 checksum、
 bus filler 或未知大小。来源会保留到 raw/strict session replay；旧模块返回 ENOTTY
@@ -1627,3 +1628,19 @@ EAGAIN 后受理、重建后的前五帧坏包、旧模块 ENOTTY、永不 ready
 
 此候选未安装到本机，未修改 unit/initramfs、SPI/GPI 或 Android；普通常驻版本仍为
 前面的两帧队列部署。下一步是配套模块的受控试载、真实恢复证据和手势/PM 回归。
+
+### 2026-10-24：已安装并开启同进程重建
+
+上述候选随后在本机试载并安装。正常实验会话 878 帧有效，无额外重建；受控 IDLE
+下的三次 +4 请求均进入新 epoch，每次恢复有效 raw 和 calibration-done，首份
+有效数据约在受理后 425～437 ms。这是主动重建验证，不是 lost-IRQ 恢复证据。
+临时工具未纳入源码，原始证据保存在 `deploy-logs/restart-trial-w6I3dojw/`。
+
+常驻 unit 现显式开启 `--experimental-restart`；主动 rearm 和窗口录制仍关闭。
+fresh 采集脚本与可选 live-capture drop-in 使用相同重建设置。普通模块 build ID
+为 `a74a57ee65c444d38a481f14ae48213e8f31b1a0`，daemon/replay 为 `b1fc40b` 构建。
+两份测试 initramfs SHA-256 均为
+`8ef6d45bbcc963d89becfe01e752572c7cf41fbd34c5def73bfc1dff1f9c7411`；
+解包的 Himax/GPI/SPI/uinput 与磁盘一致。未改 Image、DTB、默认启动选择或 Android，
+没有自动重启；新镜像冷启动及真实触点/PM/故障恢复仍待验收。
+旧模块、程序、unit 和启动镜像备份在 `deploy-logs/restart-install-UV120Lpk/`。

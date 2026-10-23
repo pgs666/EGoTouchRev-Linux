@@ -55,7 +55,7 @@ sha256sum "$daemon" "$replay" > "$state_dir/binaries.sha256"
 sudo systemctl stop himax-touchd.service
 set +e
 sudo timeout --signal=TERM --kill-after=3 "$seconds" "$daemon" \
-	--record "$state_dir/capture.hxst" > "$state_dir/daemon.log" 2>&1 &
+	--experimental-restart --record "$state_dir/capture.hxst" > "$state_dir/daemon.log" 2>&1 &
 capture_pid=$!
 wait "$capture_pid"
 result=$?
