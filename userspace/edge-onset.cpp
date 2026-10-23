@@ -207,14 +207,19 @@ void RecoverEdgeOnset(uint8_t current, uint8_t previous, bool admitted) noexcept
         return;
 
     // If there are three observed positions, reject reversal or a sudden turn.
-    // For a one-frame debounce, prev.pos is the first sample itself.
+    // Edge-clamped samples can share a normal coordinate until admission:
+    // their zero normal step is not a reversal. Only accept that plateau at
+    // the exact boundary, and bound its tangential drift by the inward step.
+    // Interior plateaus and sub-threshold inward motion remain rejected.
     if (prev.timestamp > prev.startTimeMs) {
         const int before = alongDim1 ? prev.pos.dim1 : prev.pos.dim2;
         const int beforeOther = alongDim1 ? prev.pos.dim2 : prev.pos.dim1;
         const int step = far ? before - now : now - before;
         const int priorStep = far ? first - before : before - first;
-        if (step < 50 || priorStep < 50 || std::abs(nowOther - beforeOther) > step ||
-            std::abs(beforeOther - firstOther) > priorStep)
+        const bool boundaryPlateau = distance == 0 && priorStep == 0;
+        if (step < 50 || (priorStep < 50 && !boundaryPlateau) ||
+            std::abs(nowOther - beforeOther) > step ||
+            std::abs(beforeOther - firstOther) > (boundaryPlateau ? step : priorStep))
             return;
     }
     const int intercept = firstOther - static_cast<int>(

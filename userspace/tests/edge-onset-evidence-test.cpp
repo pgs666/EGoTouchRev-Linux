@@ -99,6 +99,50 @@ static bool Recover(Case test) {
     return c.rptPos.dim1 == fc.dim1NearEdge;
 }
 
+static void BoundaryPlateau() {
+    const auto& fc = PrmtFlashConst();
+    for (unsigned edge : {1u, 2u, 4u, 8u}) {
+        const bool dim1 = edge == 1 || edge == 2;
+        const bool far = edge == 2 || edge == 8;
+        const int boundary = dim1 ? (far ? fc.dim1FarEdge - 1 : fc.dim1NearEdge) :
+                                   (far ? fc.dim2FarEdge - 1 : fc.dim2NearEdge);
+        for (unsigned variant = 0; variant < 7; ++variant) {
+            himax::ResetEdgeOnset();
+            Static().noiseLevel = 0;
+            Touches() = {};
+            PrevTouches() = {};
+            Touches().count = PrevTouches().count = 1;
+            auto& c = Touches().unit[0];
+            auto& p = PrevTouches().unit[0];
+            const auto position = [&](int normal, int tangent) -> Point {
+                return dim1 ? Point{static_cast<uint16_t>(normal), static_cast<uint16_t>(tangent)} :
+                              Point{static_cast<uint16_t>(tangent), static_cast<uint16_t>(normal)};
+            };
+            const int direction = far ? -1 : 1;
+            const int start = boundary + (variant == 1 ? direction * 100 : 0);
+            p.startPos = position(start, 5000);
+            p.pos = position(start, 5030);
+            p.startTimeMs = 1000;
+            p.timestamp = 1009;
+            c.pos = c.rptPos = position(start + direction * 260, 5050);
+            c.timestamp = 1018;
+            c.event = TouchEvent::kTouchDown;
+            c.majorMm = c.maxMajorMm = 10;
+            if (variant == 2) p.pos = position(start + direction * 350, 5030); // Reversal.
+            if (variant == 3) p.pos = position(start, 5500); // Sideways turn.
+            if (variant == 4) c.timestamp = 1040; // Late slide from a held edge.
+            if (variant == 5) c.suppressFlags = 2; // Weak signal cannot bypass admission.
+            if (variant == 6) c.pos = c.rptPos = p.pos; // No inward motion.
+            const auto before = c.rptPos;
+            himax::RecoverEdgeOnset(0, 0, true);
+            const auto expected = position(boundary, 5000);
+            Check(variant ? (c.rptPos.dim1 == before.dim1 && c.rptPos.dim2 == before.dim2) :
+                            (c.rptPos.dim1 == expected.dim1 && c.rptPos.dim2 == expected.dim2),
+                  "only exact-boundary plateau followed by inward movement recovers on all four edges");
+        }
+    }
+}
+
 int main() {
     constexpr uint16_t frequencies[] = {100, 120};
     constexpr uint16_t rates[] = {120};
@@ -112,5 +156,7 @@ int main() {
              Case::BaselineReset, Case::ExistingTouch, Case::Exception, Case::MissingQuiet,
              Case::MissingCreation, Case::Gap, Case::TooSlow, Case::Cleared, Case::ClockRewind})
         Check(!Recover(test), "ambiguous/stale/unrelated boundary evidence is rejected");
-    std::cout << "Boundary evidence: entry accepted; 19 rejection/lifecycle cases passed\n";
+    BoundaryPlateau();
+    std::cout << "Boundary evidence: entry accepted; 19 rejection/lifecycle cases and "
+                 "four-edge plateau/interior/reversal/turn/late/weak/stationary checks passed\n";
 }
