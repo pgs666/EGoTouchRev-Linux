@@ -67,7 +67,7 @@ if (( result != 0 && result != 124 )); then
 	echo "Capture process failed (status=$result); evidence kept in $state_dir" >&2
 	exit 1
 fi
-sudo "$replay" --session "$state_dir/capture.hxst" \
+sudo "$replay" --session --touch-trace "$state_dir/core-touch-trace.csv" "$state_dir/capture.hxst" \
 	> "$state_dir/contacts.csv" 2> "$state_dir/replay.log" || {
 	tail -25 "$state_dir/daemon.log"
 	cat "$state_dir/replay.log"
@@ -76,7 +76,7 @@ sudo "$replay" --session "$state_dir/capture.hxst" \
 }
 # Return root-created evidence to the invoking developer.
 sudo chown "$(id -u):$(id -g)" \
-	"$state_dir/capture.hxst" "$state_dir/capture.hxst.events"
+	"$state_dir/capture.hxst" "$state_dir/capture.hxst.events" "$state_dir/core-touch-trace.csv"
 tail -14 "$state_dir/daemon.log"
 cat "$state_dir/replay.log"
 echo "Complete session: $state_dir"

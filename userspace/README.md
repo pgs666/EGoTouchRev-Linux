@@ -298,6 +298,17 @@ userspace/build/himax-replay --session --touch-trace /tmp/himax-candidates.csv \
 的 DOWN。如果首个候选已经在范围外，仍需回看录制内更早的 raw 网格，判断是
 检测过滤还是首次采样就已进入屏内；不能只凭这张 CSV 下结论。
 
+`scripts/capture-v4l2-session.sh 90` 现在会在新会话结束后自动生成
+`contacts.csv`、`core-touch-trace.csv` 和 `replay.log`，同时保留
+`capture.hxst` 与 `.events`；只有严格回放成功才报告会话完成。轨迹导出在离线阶段
+进行，不给常驻触控增加文件写入。该脚本会暂时重启 AFE/solver，获得可完整回放的
+初始状态；它不是不重置现状的 live 窗口。
+
+实际快滑对照应保持同一屏幕方向和同一条边，先做两次慢速屏外滑入，再做六次快速
+滑入，每次明显抬手并间隔约一秒；记下屏内起点出现在哪次。第一轮从边缘中段开始，
+避免角落的有意排除条件。对照成功和异常两组的首次 raw 信号、候选起始帧、
+首次获准上报及边缘范围；无法证明来源时不直接扩大补偿阈值。
+
 ## 构建
 
 需要支持 C++23 的 GCC/Clang、CMake、pkg-config、libsystemd 开发文件和当前内核 build tree。
