@@ -109,6 +109,17 @@ reset GPIO 99；尚无证据能把另一连接安全映射到 Linux。
 但本机内核拒绝通过 `/dev/mem` 读取；没有绕过限制、改内核或探测新 SPI 通道。
 本次 Windows 挂载全程只读，提取后已卸载。
 
+Windows 采集入口：`scripts/capture-windows-acpi.ps1`。在 Windows 的本仓库目录执行
+`powershell -NoProfile -File .\scripts\capture-windows-acpi.ps1`，将桌面的
+`GaokunAcpi-*.zip` 带回 Linux。它仅调用 Kernel32 的固件表读取 API，导出 DSDT、
+可见的首份 SSDT/FACP 和含校验结果的 manifest，不加载驱动或更改电源状态。
+微软 API 对同名表只能返回第一份；多份 SSDT 会明确标记 PARTIAL、退出码 2。
+若 DSDT 缺失则为 FAILED、退出码 1，仍保留采集结果供定位。该 Windows 入口尚未
+实机执行；若 HID 位于其余 SSDT 中，仍需补齐原始表，不能把一次 API 导出当成全部
+资源已经解析。
+PARTIAL/FAILED 时也请保留并带回 ZIP，其中的 manifest 会记录失败原因；重复调用
+同一 API 无法取回同名的第二份 SSDT。
+
 ## 事件栈生产、队列与用户态消费
 
 ```text
