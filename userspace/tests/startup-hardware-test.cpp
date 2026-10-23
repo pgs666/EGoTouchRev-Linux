@@ -11,6 +11,8 @@
 #include <iostream>
 #include <poll.h>
 #include <stdexcept>
+#include <sys/ioctl.h>
+#include <thread>
 
 namespace {
 uint64_t Now() {
@@ -19,6 +21,38 @@ uint64_t Now() {
 }
 void Check(bool ok, const std::string& message) {
     if (!ok) throw std::runtime_error(message);
+}
+
+void CancelStartup(const char* device) {
+    himax::Capture capture;
+    const auto start = Now();
+    Check(capture.Open(device) && capture.Start(), capture.Error());
+    hx_raw_state state{};
+    uint64_t epoch = 0;
+    bool stopped = false;
+    while (capture.Event(state)) {
+        Check(!state.running, "Cleanup finished before cancellation; timing trial inconclusive");
+        epoch = state.epoch;
+        stopped = true;
+    }
+    Check(capture.Error().empty() && stopped, "No pending/stopped epoch before STREAMOFF");
+    int type = V4L2_BUF_TYPE_META_CAPTURE;
+    Check(ioctl(capture.Fd(), VIDIOC_STREAMOFF, &type) == 0, "Early STREAMOFF failed");
+    const auto off = Now();
+    // A queued 200ms timer must not initialize/calibrate/publish running after
+    // stream closure. The trial script also checks the real kernel journal.
+    std::this_thread::sleep_for(std::chrono::milliseconds(350));
+    bool stopEvent = false;
+    while (capture.Event(state)) {
+        Check(!state.running && state.epoch > epoch,
+              "Delayed cleanup resurrected running or retained the old epoch after STREAMOFF");
+        stopEvent = true;
+    }
+    Check(capture.Error().empty() && stopEvent, "Missing STREAMOFF lifecycle event");
+    std::cout << "cancel-start pending_epoch=" << epoch
+              << " STREAMOFF_after_open_ms=" << (off - start) / 1000000.0
+              << " late_wait_ms=" << (Now() - off) / 1000000.0
+              << " no_late_running=1 (no forced suspend/IRQ fault)" << std::endl;
 }
 
 class Test {
@@ -147,10 +181,15 @@ private:
 int main(int argc, char** argv) {
     if (argc != 3) {
         std::cerr << "Usage: himax-startup-hardware-test /dev/himax-raw NEW.hxst\n"
+                  << "       himax-startup-hardware-test --cancel-start /dev/himax-raw\n"
                   << "Stop touch service first; keep hands off. Performs three client AFE resets.\n";
         return 2;
     }
     try {
+        if (std::strcmp(argv[1], "--cancel-start") == 0) {
+            CancelStartup(argv[2]);
+            return 0;
+        }
         Test test(argv[1], argv[2]);
         test.Run();
         return 0;
