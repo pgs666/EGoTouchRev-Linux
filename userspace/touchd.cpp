@@ -207,6 +207,7 @@ int main(int argc, char** argv) {
     std::array<uint8_t, Frame::kMasterFrameSize> thp{};
     std::array<himax::Contact, 10> contacts{};
     uint64_t epoch = 0, lastNs = NowNs();
+    uint64_t lastUsableEpoch = 0, lastUsableSequence = 0;
     uint64_t frames = 0, stale = 0, bad = 0;
     himax::StreamState stream;
     himax::ProducerRecovery producerRecovery;
@@ -335,6 +336,8 @@ int main(int argc, char** argv) {
     std::cerr << "afe_restart=" << (experimentalRestart ? "experimental" : "disabled") << '\n';
     while (!stopped) {
         const uint64_t loopNow = NowNs();
+        if (control && control->Tick(loopNow))
+            std::cerr << "Operator calibration timeout: no completion marker observed in eight seconds\n";
         if (liveCapture) liveCapture->Tick(loopNow);
         if (captureRequested) {
             captureRequested = 0;
@@ -394,6 +397,7 @@ int main(int argc, char** argv) {
                 stream.State({HX_RAW_ABI_VERSION, 0, afeRestart.Epoch()}, completedNs);
                 solver->OnAfeSos();
                 solver->OnAfeStopped();
+                if (control) control->CalibrationStopped();
                 afeStarted = false;
                 rearmPending = false;
                 readMode.Reset();
@@ -474,6 +478,7 @@ int main(int argc, char** argv) {
                     recordEvent(event);
                 }
                 if (!state.running || state.epoch != epoch) {
+                    if (control) control->CalibrationStopped();
                     rearmPending = false;
                     readMode.Reset();
                     if (!observe && !input.Release()) return 1;
@@ -499,11 +504,19 @@ int main(int argc, char** argv) {
                         " stale=" + std::to_string(stale) +
                         " contacts=" + std::to_string(solver->GetCachedContactCount()) +
                         " afe_status=" + std::to_string(solver->LastAfeStatus()) +
-                        " restart_waiting=" + std::to_string(afeRestart.Waiting()));
+                        " valid_epoch=" + std::to_string(lastUsableEpoch) +
+                        " valid_sequence=" + std::to_string(lastUsableSequence) +
+                        " restart_waiting=" + std::to_string(afeRestart.Waiting()) +
+                        " calibration=" + control->CalibrationState() +
+                        " calibration_done_frames=" + std::to_string(calibrationFrames));
                 } else if (command == himax::Control::Command::Invalid) {
                     control->Reply("ERR invalid command");
                 } else if (!stream.Running() || afeRestart.Waiting()) {
                     control->Reply("ERR AFE is stopped or reconstruction is pending");
+                } else if (command == himax::Control::Command::Calibrate &&
+                           (control->CalibrationPending() ||
+                            (solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kCalibDone))) {
+                    control->Reply("ERR calibration is pending or its previous marker is being acknowledged");
                 } else {
                     const bool reset = command == himax::Control::Command::Reset;
                     const bool ok = reset && !stream.Sequence() ?
@@ -515,11 +528,14 @@ int main(int argc, char** argv) {
                               << " epoch=" << stream.Epoch() << " sequence=" << stream.Sequence()
                               << " transport=" << error << '\n';
                     if (!ok) {
+                        if (!reset) control->CalibrationFailed();
                         control->Reply(std::string("ERR ") + std::strerror(error));
                     } else {
+                        if (!reset) control->CalibrationSent(stream.Epoch(), stream.Sequence(), NowNs());
                         control->Reply(reset ? "OK reset scheduled; confirm a new running epoch with status" :
                             "OK calibration command sent; firmware completion is pending");
                         if (reset) {
+                            control->CalibrationStopped();
                             // Fence old completed buffers while the real stopped
                             // event waits in V4L2's separate event queue.
                             stream.State({HX_RAW_ABI_VERSION, 0, stream.Epoch()}, NowNs());
@@ -618,6 +634,11 @@ int main(int argc, char** argv) {
             solveMax = std::max(solveMax, solveTime);
             idleFrames += !!(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle);
             calibrationFrames += !!(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kCalibDone);
+            if (control && control->CalibrationFrame(packet->epoch, packet->sequence,
+                    (solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kCalibDone) &&
+                    !(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kSos)))
+                std::cerr << "Operator calibration status=" << control->CalibrationState()
+                          << " epoch=" << packet->epoch << " sequence=" << packet->sequence << '\n';
             frequencyFrames += !!(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kFreqShiftDone);
             if (!solver->IsAvailable()) {
                 std::cerr << "TSACore initialization failed\n";
@@ -630,6 +651,10 @@ int main(int argc, char** argv) {
                 recordedFrame->digest = himax::ContactDigest(*frame);
             }
             requestReset = solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kSos;
+            if (!requestReset) {
+                lastUsableEpoch = packet->epoch;
+                lastUsableSequence = packet->sequence;
+            }
             if (experimentalRestart && afeRestart.Frame(*packet, now, !requestReset)) {
                 ++restartRecovered;
                 std::cerr << "Valid master/AFE data received after in-process reconstruction; epoch="

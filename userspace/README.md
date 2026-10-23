@@ -15,6 +15,8 @@ supervisor。裸运行 daemon 不加选项仍保持原回退行为；service 显
 sudo himaxctl status
 sudo himaxctl calibrate
 sudo himaxctl reset
+sudo himaxctl calibrate --wait
+sudo himaxctl reset --wait
 ```
 
 `status` 查询产帧状态、epoch/sequence、错误与当前触点数量。`calibrate` 发送 AFE
@@ -24,6 +26,12 @@ sudo himaxctl reset
 服务默认使用 `--control`，由 systemd 创建 root 专用的 `/run/himax-touchd`。
 操作复用 daemon 的 V4L2 队列所有权，在求解线程串行执行，关屏或自动重建中会
 拒绝硬件命令。操作日志可用 `journalctl -u himax-touchd` 查看。
+`--wait` 在客户端等待：校准以同一 epoch 后续有效帧中的新完成标记为准，reset
+以新 epoch 的实际有效数据为准；不阻塞求解线程。`status` 的 `calibration` 是
+最近一次手动校准状态：none/pending/done/timeout/interrupted/failed；未观察到
+完成标记满八秒为 timeout，AFE 停止或重建会中断尚未完成的请求。
+`valid_epoch/valid_sequence` 与普通 epoch/sequence 分开，避免把初始化完成通知
+或无效包误认成 reset 已恢复数据。IDLE 下校准反馈可能要等下一个慢速帧周期。
 
 开发中：新增 `VIDIOC_HIMAX_REARM_TAGGED` 和用户态无复位停帧恢复预算。
 当前 HEAD 已将自动补读改为 `--experimental-rearm` 显式启用，**默认关闭**，
@@ -1666,3 +1674,10 @@ epoch 3→4，重建后 sequence=91 并继续产帧，bad/stale=0、无服务重
 手动 calibration 的传输已确认，短观察窗口没有新的完成标记，未将它记作校准完成。
 本轮只更新用户态和 unit，内核模块、SPI/GPI 运行 notes 及启动镜像保持一致；
 旧程序和配置备份在 `deploy-logs/operator-install-B393RjMh/`。
+
+随后补齐 `--wait` 和校准状态并部署。实机在 IDLE 中下发手动校准后，已观察到新
+completion marker 和正常清状态握手，修正了前次仅观察半秒而“尚未确认”的记录。
+同一 PID=2754990 下 `reset --wait` 从 epoch 6 进入 7，确认有效帧后才返回成功。
+没有新增测试代码或改变内核/启动镜像；旧程序保存在
+`deploy-logs/operator-feedback-2PoDRond/`。这些结果证明命令/回执闭环，不证明
+任意触控异常都能被校准或重建修复。

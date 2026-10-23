@@ -3,6 +3,7 @@
 
 #include <string>
 #include <string_view>
+#include <cstdint>
 #include <sys/socket.h>
 #include <sys/un.h>
 
@@ -24,6 +25,13 @@ public:
     void Reply(std::string_view text) const;
     int Fd() const { return m_fd; }
     const std::string& Error() const { return m_error; }
+    const char* CalibrationState() const { return m_calibrationState; }
+    bool CalibrationPending() const { return m_calibrationPending; }
+    void CalibrationSent(uint64_t epoch, uint64_t sequence, uint64_t now);
+    void CalibrationFailed();
+    bool CalibrationStopped();
+    bool CalibrationFrame(uint64_t epoch, uint64_t sequence, bool done);
+    bool Tick(uint64_t now);
 
 private:
     int m_fd = -1;
@@ -31,6 +39,9 @@ private:
     sockaddr_un m_peer{};
     socklen_t m_peerLength = 0;
     std::string m_error;
+    const char* m_calibrationState = "none";
+    bool m_calibrationPending = false;
+    uint64_t m_calibrationEpoch = 0, m_calibrationSequence = 0, m_calibrationSentNs = 0;
 };
 
 } // namespace himax

@@ -77,4 +77,41 @@ void Control::Reply(std::string_view text) const {
                  reinterpret_cast<const sockaddr*>(&m_peer), m_peerLength);
 }
 
+void Control::CalibrationSent(uint64_t epoch, uint64_t sequence, uint64_t now) {
+    m_calibrationEpoch = epoch;
+    m_calibrationSequence = sequence;
+    m_calibrationSentNs = now;
+    m_calibrationPending = true;
+    m_calibrationState = "pending";
+}
+
+void Control::CalibrationFailed() {
+    m_calibrationPending = false;
+    m_calibrationState = "failed";
+}
+
+bool Control::CalibrationStopped() {
+    if (!m_calibrationPending) return false;
+    m_calibrationPending = false;
+    m_calibrationState = "interrupted";
+    return true;
+}
+
+bool Control::CalibrationFrame(uint64_t epoch, uint64_t sequence, bool done) {
+    if (!m_calibrationPending) return false;
+    if (epoch != m_calibrationEpoch) return CalibrationStopped();
+    if (!done || sequence <= m_calibrationSequence) return false;
+    m_calibrationPending = false;
+    m_calibrationState = "done";
+    return true;
+}
+
+bool Control::Tick(uint64_t now) {
+    if (!m_calibrationPending || now < m_calibrationSentNs ||
+        now - m_calibrationSentNs < 8000000000ULL) return false;
+    m_calibrationPending = false;
+    m_calibrationState = "timeout";
+    return true;
+}
+
 } // namespace himax
