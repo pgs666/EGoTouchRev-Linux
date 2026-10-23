@@ -43,6 +43,7 @@ struct himax_ts_data {
 	struct notifier_block charger_notifier;
 	bool irq_enabled;
 	struct hx_raw_power_state power;
+	struct hx_raw_retry_state retry;
 	struct hx_raw_charger_state charger;
 	bool otp_tried;
 	u8 afe_command_slot;

@@ -50,5 +50,17 @@ int main() {
     Check(empty.TimedOut(4000000101ULL), "missing first frame times out");
     Check(empty.State({HX_RAW_ABI_VERSION, 0, 2}, 4000000102ULL) &&
           !empty.TimedOut(9000000000ULL), "stop cancels startup deadline");
+    himax::StreamState retry;
+    Check(retry.State({HX_RAW_ABI_VERSION, 0, 1}, 100) &&
+          !retry.TimedOut(9000000000ULL), "failed init waits without a false producer stall");
+    Check(retry.State({HX_RAW_ABI_VERSION, 0, 2}, 9000000000ULL) &&
+          !retry.TimedOut(19000000000ULL), "multiple failed init epochs remain stopped");
+    Check(retry.State({HX_RAW_ABI_VERSION, 1, 3}, 19000000000ULL) &&
+          retry.TimedOut(23000000001ULL), "eventual running epoch must still produce frames");
+    frame.epoch = 3;
+    frame.sequence = 1;
+    frame.timestamp_ns = 23000000002ULL;
+    Check(retry.Accept(frame, frame.timestamp_ns) && !retry.TimedOut(frame.timestamp_ns),
+          "first successful frame clears retry-to-running deadline");
     std::cout << "Stream epoch, freshness and ABI tests passed\n";
 }

@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+"""Check native lifecycle extraction and pinned Windows backoff source guards."""
+from pathlib import Path
+import os
+import subprocess
+import sys
+import tempfile
+
+cmake, runtime, native, module = sys.argv[1:]
+original = (Path(runtime) / "DeviceRuntime.cpp").read_bytes()
+native_bytes = Path(native).read_bytes()
+with tempfile.TemporaryDirectory(prefix="himax-start-reference-") as directory:
+    root = Path(directory)
+    source = root / "DeviceRuntime.cpp"
+    source.write_bytes(original)
+    native_source = root / "native.c"
+    native_source.write_bytes(native_bytes)
+    script = root / "prepare.cmake"
+    script.write_text(f'include("{Path(module).as_posix()}")\n'
+                     f'himax_prepare_afe_start("{root.as_posix()}" '
+                     f'"{native_source.as_posix()}" "{root.as_posix()}")\n')
+
+    def prepare():
+        return subprocess.run([cmake, "-P", str(script)], capture_output=True,
+                              text=True, timeout=10)
+
+    result = prepare()
+    assert result.returncode == 0, result.stderr
+    output = root / "afe-start-native.c"
+    windows = root / "afe-start-windows.cpp"
+    generated, reference = output.read_text(), windows.read_text()
+    text = original.decode()
+    assert reference.count(text[text.index("std::chrono::milliseconds BringUpBackoff("):
+                                text.index("const char *StandbyReason(")]) == 1
+    text = native_bytes.decode()
+    for first, last in (("static int himax_start_afe(", "static void himax_return_buffers("),
+                        ("static int himax_stream_start(", "static const struct vb2_ops")):
+        assert generated.count(text[text.index(first):text.index(last)]) == 1
+    for first, last in (("static int himax_panel_disabling(", "static int himax_panel_unpreparing("),
+                        ("static int himax_raw_suspend(", "static int himax_raw_resume("),
+                        ("static void himax_raw_shutdown(", "static void himax_v4l2_release(")):
+        body = text[text.index(first):text.index(last)]
+        assert body.index("hx_raw_retry_reset(&ts->retry)") < body.index("himax_unlock(ts)")
+        assert body.index("himax_unlock(ts)") < body.index("cancel_delayed_work_sync")
+    for path in (output, windows):
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    assert prepare().returncode == 0
+    assert all(path.stat().st_mtime_ns == 1_000_000_000 for path in (output, windows))
+    source.write_bytes(original + b"\n// drift\n")
+    result = prepare()
+    assert result.returncode != 0 and "needs review" in result.stderr
+    source.unlink()
+    result = prepare()
+    assert result.returncode != 0 and "Missing upstream" in result.stderr
+    assert windows.read_text() == reference
+    source.write_bytes(original)
+    native_source.write_bytes(native_bytes.replace(b"int i, ret;", b"int i, ret = 0;"))
+    assert prepare().returncode == 0 and output.read_text() != generated
+print("Exact native startup/STREAMON/STREAMOFF, pinned Windows backoff, stop wiring, drift and refresh passed")

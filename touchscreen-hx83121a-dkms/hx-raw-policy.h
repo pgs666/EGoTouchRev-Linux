@@ -37,6 +37,25 @@ static inline bool hx_raw_can_read(const struct hx_raw_power_state *state)
 	return hx_raw_can_run(state) && state->controller_initialized;
 }
 
+/* DeviceRuntime::BringUpBackoff, without sleeping under the hardware mutex. */
+struct hx_raw_retry_state {
+	unsigned int failures;
+};
+
+static inline void hx_raw_retry_reset(struct hx_raw_retry_state *state)
+{
+	state->failures = 0;
+}
+
+static inline unsigned int hx_raw_retry_failed(struct hx_raw_retry_state *state)
+{
+	static const unsigned int delays[] = { 200, 500, 1000, 1500, 2000 };
+
+	if (state->failures != ~0U)
+		state->failures++;
+	return delays[state->failures >= 5 ? 4 : state->failures - 1];
+}
+
 /* Physical state is passed to the solver even if the firmware write failed.
  * A failed/partial write makes the applied state unknown, requiring retry.
  */

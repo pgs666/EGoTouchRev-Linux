@@ -548,6 +548,28 @@ suffix 中的 `0xbb` 是校准完成状态，通过 ClearStatus(8) 确认，不�
 行为变化：如果原版跳过过 checksum 合法的非固定头帧，新版会处理它，严格回放将
 明确不匹配，不会伪造当时输出。raw 回放仍可用于比较。
 
+## AFE 初始化失败的异步退避（候选，尚未部署）
+
+内核候选按固定上游 `DeviceRuntime::BringUpBackoff()` 的顺序采用
+200 / 500 / 1000 / 1500 / 2000 ms，之后封顶 2000 ms。每次 work 只做一次完整
+初始化，不再持有 `op_lock` 连续做三轮 reset/init；退避使用 delayed work，等待期间
+不持锁。协议内部的有界轮询/短等待没有改变，不能说整个初始化过程已可即时取消。
+
+`VIDIOC_STREAMON` 成功只表示流请求已接收（原本屏灭启动就有这种语义）；若初始化
+失败，发布 stopped epoch，IRQ 保持关闭，排队重试。消费端等待 running 事件与实际
+raw 帧后才处理，不能以 service active 或 STREAMON=0 作为触摸已恢复的证据。
+实际生产者进入 running 后仍受原四秒进度超时保护，未放宽为永不检查停滞。
+
+每次回调都重新检查 streaming、panel prepared/enabled、system suspend、shutdown
+与 initialized 状态；成功/STREAMOFF/屏灭/休眠/关闭会清零退避计数。设备移除仍通过
+ENODEV/队列错误断开，不会无限保留已移除设备的流。健康流收到迟到任务时不关 IRQ。
+每次硬件尝试推进 epoch，旧帧和命令失效，但外部 reset 命令的跨 epoch 限频不清零。
+
+这只移植社区 Windows 重写版的“一次尝试 + 异步退避”政策，不等于完整移植原厂状态机：
+Windows 的 master/slave 0x13 bus-ready 前置探测、每五次失败重开 THP 句柄，仍没有被
+冒充为 Linux 等价操作。没有新增 slave/笔读取，也绝不因此卸载或重绑 SPI/GPI 控制器。
+OTP、三帧 best-effort drain、calibration/rate best-effort、硬件单次初始化事务保持原策略。
+
 ## 不重置当前触控的运行中窗口录制
 
 代码提供可选 `--live-capture-dir PRIVATE_DIR` 和 `--live-capture-seconds 1..120`
@@ -1273,3 +1295,32 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
 - 日志、部署脚本、两份 raw 回放结果与旧程序副本保存在
   `deploy-logs/live-capture-install-c00844e/`。临时配置保留为
   `completed-runtime-override.conf`，不是生效中的服务配置。
+
+2026-10-23 AFE 异步初始化退避候选（尚未部署）：
+
+- `himax_start_afe()` 改为单次完整硬件尝试，STREAMON 与恢复 work 共用
+  `himax_start_or_retry()`；失败发布 stopped epoch、关闭 IRQ，再异步排队。
+  不再在同一 op_lock 临界区连试三次，也不因一次初始化失败立即拆队列/重启服务；
+- 退避来自固定上游 `DeviceRuntime::BringUpBackoff()` 的五档值，失败计数饱和，
+  成功或新生命周期清零。停止回调先关 gate/清计数、解锁后才同步取消 work，
+  迟到回调不能绕过 power/stream/initialized 检查；跨 epoch 的用户 reset 限频保留；
+- 测试直接提取生产 startup/retry/STREAMON/STREAMOFF，覆盖 64 种 power 组合、
+  检测及 power-on 连续失败、一次失败只做一次尝试、对应异步延迟、最终成功、
+  停止后迟到任务、设备移除后的 STREAMOFF、OTP 二次 reset 与原 best-effort 命令。
+  不模拟真实 kernel mutex/IRQ/workqueue 调度，不能据此声称并发/PM 已实机验证；
+- Windows 退避原函数直接编译，完整源 SHA-256 锁定；近一万次连续失败及计数上限
+  边界验证一致。提取门控检查原文完整、漂移/缺失拒绝、native 变更刷新，以及
+  停止回调的计数清除/解锁后取消顺序。StreamState 另覆盖多次 failed epoch 不误报
+  producer stall，以及进入 running 后仍必须持续产帧；
+- 46 项 Release 和完整 46 项 ASan/UBSan 通过；`make -C tests test`、checkpatch、
+  `git diff --check` 通过。编译服务器使用原匹配内核输出和独立
+  `afe-retry-fosBox` 模块目录构建普通 V4L2，未改共享源码或已安装模块，构建无警告/
+  错误；源码内容与本地逐文件校验一致；
+- 候选位于 `artifacts/afe-retry-himax1/`，vermagic 为 `7.1.8-gaokun3-himax1`，
+  模块 SHA-256：`1de7e614b3af24ab9eb5839f304022317975828cb2b8871ffd410be2dbb67da5`，
+  build ID：`89b9985b76556d2179e11e83e6e1b426f2864efe`。**没有安装/加载此候选**，
+  当前仍为 `44e6917` 模块和 `c00844e` 用户态；
+- Windows 的 0x13 master/slave ready 前置探测、THP 句柄重开未映射为 Linux 操作，
+  不因此启用笔或重绑控制器。未做真实 SPI 失败注入、工作队列取消竞态、睡眠唤醒或
+  长期坏硬件退避验收；正常帧流、baseline、检测/跟踪算法没有改动，也未宣称本次
+  修复已解释历史断触。下一步应受控试载、验证 healthy path，再验证初始化失败恢复。

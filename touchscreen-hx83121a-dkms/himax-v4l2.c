@@ -61,7 +61,7 @@ static int himax_read_raw(struct himax_ts_data *ts)
  */
 static int himax_start_afe(struct himax_ts_data *ts)
 {
-	int attempt, i, ret = -EIO;
+	int i, ret;
 
 	ts->power.controller_initialized = false;
 	ts->epoch++;
@@ -70,52 +70,73 @@ static int himax_start_afe(struct himax_ts_data *ts)
 	memset(ts->last_command_ns, 0,
 	       HX_RAW_RESET * sizeof(ts->last_command_ns[0]));
 	himax_state_event(ts, false);
-	for (attempt = 0; attempt < 3; attempt++) {
-		ts->charger.applied_valid = false;
+	ts->charger.applied_valid = false;
+	ret = hx83121a_chip_detect(ts);
+	if (ret)
+		goto failed;
+	if (!ts->otp_tried) {
+		ts->otp_tried = true;
+		himax_get_project_id_otp(ts, ts->project_id,
+					 sizeof(ts->project_id));
+		/* OTP changes DD-register access state. */
 		ret = hx83121a_chip_detect(ts);
 		if (ret)
-			continue;
-		if (!ts->otp_tried) {
-			ts->otp_tried = true;
-			himax_get_project_id_otp(ts, ts->project_id,
-						 sizeof(ts->project_id));
-			/* OTP changes DD-register access state. */
-			ret = hx83121a_chip_detect(ts);
-			if (ret)
-				continue;
-		}
-		/* Includes upstream preparation, power-on, verified raw selection
-		 * and producer handshake. Do not follow it with legacy runtime
-		 * replay: that rewrites the just-completed scan configuration.
-		 * Native charger policy is applied by charger_work below.
-		 */
-		ret = himax_mcu_power_on_init(ts);
-		if (ret)
-			continue;
-		/* Upstream thp_afe_start discards three buffered master frames
-		 * before StartCalibration, then requests 120 Hz. The slave/pen
-		 * channel is intentionally not enabled by this finger driver.
-		 */
-		for (i = 0; i < 3; i++) {
-			usleep_range(8000, 9000);
-			himax_read_raw(ts);
-		}
-		ts->afe_command_slot = 0;
-		ret = himax_afe_command(ts, HX_RAW_CALIBRATE, 0);
-		if (ret)
-			dev_warn(ts->dev, "initial calibration transport: %d\n", ret);
-		ret = himax_afe_command(ts, HX_RAW_FORCE_RATE, 0);
-		if (ret)
-			dev_warn(ts->dev, "initial scan-rate transport: %d\n", ret);
-		ts->power.controller_initialized = true;
-		ts->read_errors = 0;
-		himax_state_event(ts, true);
-		himax_int_enable(ts, true);
-		mod_delayed_work(system_wq, &ts->charger_work, 0);
-		return 0;
+			goto failed;
 	}
+	/* Includes upstream preparation, power-on, verified raw selection
+	 * and producer handshake. Do not follow it with legacy runtime
+	 * replay: that rewrites the just-completed scan configuration.
+	 * Native charger policy is applied by charger_work below.
+	 */
+	ret = himax_mcu_power_on_init(ts);
+	if (ret)
+		goto failed;
+	/* Upstream thp_afe_start discards three buffered master frames
+	 * before StartCalibration, then requests 120 Hz. The slave/pen
+	 * channel is intentionally not enabled by this finger driver.
+	 */
+	for (i = 0; i < 3; i++) {
+		usleep_range(8000, 9000);
+		himax_read_raw(ts);
+	}
+	ts->afe_command_slot = 0;
+	ret = himax_afe_command(ts, HX_RAW_CALIBRATE, 0);
+	if (ret)
+		dev_warn(ts->dev, "initial calibration transport: %d\n", ret);
+	ret = himax_afe_command(ts, HX_RAW_FORCE_RATE, 0);
+	if (ret)
+		dev_warn(ts->dev, "initial scan-rate transport: %d\n", ret);
+	ts->power.controller_initialized = true;
+	ts->read_errors = 0;
+	himax_state_event(ts, true);
+	himax_int_enable(ts, true);
+	mod_delayed_work(system_wq, &ts->charger_work, 0);
+	return 0;
+failed:
 	dev_err(ts->dev, "raw AFE startup failed: %d\n", ret);
 	return ret;
+}
+
+/* op_lock is held. Recheck gates when delayed work actually runs; never
+ * keep this mutex across the Windows retry backoff or rebind the SPI parent.
+ */
+static void himax_start_or_retry(struct himax_ts_data *ts)
+{
+	unsigned int delay;
+	int ret;
+
+	if (!hx_raw_can_start(&ts->power))
+		return;
+	himax_int_enable(ts, false);
+	ret = himax_start_afe(ts);
+	if (!ret) {
+		hx_raw_retry_reset(&ts->retry);
+		return;
+	}
+	delay = hx_raw_retry_failed(&ts->retry);
+	dev_warn_ratelimited(ts->dev, "AFE attempt %u failed (%d); retry in %u ms\n",
+			     ts->retry.failures, ret, delay);
+	mod_delayed_work(system_wq, &ts->panel_reinit_work, msecs_to_jiffies(delay));
 }
 
 static void himax_return_buffers(struct himax_ts_data *ts,
@@ -227,8 +248,8 @@ static int himax_stream_start(struct vb2_queue *q, unsigned int count)
 	} else {
 		ts->power.streaming = true;
 		ts->frame_flags = 0;
-		if (hx_raw_can_start(&ts->power))
-			ret = himax_start_afe(ts);
+		hx_raw_retry_reset(&ts->retry);
+		himax_start_or_retry(ts);
 	}
 	if (ret) {
 		ts->power.streaming = false;
@@ -249,6 +270,7 @@ static void himax_stream_stop(struct vb2_queue *q)
 		mutex_lock(&ts->op_lock);
 	ts->power.streaming = false;
 	ts->power.controller_initialized = false;
+	hx_raw_retry_reset(&ts->retry);
 	ts->epoch++;
 	himax_state_event(ts, false);
 	himax_return_buffers(ts, VB2_BUF_STATE_ERROR);
@@ -405,15 +427,10 @@ static void himax_panel_work(struct work_struct *work)
 					       struct himax_ts_data, panel_reinit_work);
 
 	mutex_lock(&ts->op_lock);
-	if (hx_raw_can_start(&ts->power)) {
-		/* The IRQ thread uses op_lock too. Do not synchronize an IRQ
-		 * waiting for this mutex, or disable a healthy stream's IRQ
-		 * when a duplicate work item has nothing to initialize.
-		 */
-		himax_int_enable(ts, false);
-		if (himax_start_afe(ts))
-			vb2_queue_error(&ts->queue);
-	}
+	/* The IRQ thread also needs op_lock. The helper only disables IRQ
+	 * without synchronizing it, and leaves a healthy stream alone.
+	 */
+	himax_start_or_retry(ts);
 	himax_unlock(ts);
 }
 
@@ -492,6 +509,7 @@ static int himax_panel_disabling(struct drm_panel_follower *follower)
 	himax_lock(ts);
 	ts->power.panel_enabled = false;
 	ts->power.controller_initialized = false;
+	hx_raw_retry_reset(&ts->retry);
 	ts->epoch++;
 	himax_state_event(ts, false);
 	himax_unlock(ts);
@@ -527,6 +545,7 @@ static int himax_raw_suspend(struct device *dev)
 	himax_lock(ts);
 	ts->power.system_suspended = true;
 	ts->power.controller_initialized = false;
+	hx_raw_retry_reset(&ts->retry);
 	ts->epoch++;
 	himax_state_event(ts, false);
 	himax_unlock(ts);
@@ -560,6 +579,7 @@ static void himax_raw_shutdown(struct spi_device *spi)
 	himax_lock(ts);
 	ts->power.shutting_down = true;
 	ts->power.controller_initialized = false;
+	hx_raw_retry_reset(&ts->retry);
 	ts->epoch++;
 	himax_state_event(ts, false);
 	himax_unlock(ts);

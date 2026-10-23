@@ -62,6 +62,12 @@ fresh 录制仍为 HXSE 1。配置、文件和验证边界见
 | `VIDIOC_HIMAX_COMMAND` | ClearStatus、频点、扫描率、IDLE、calibration、reset |
 | `V4L2_EVENT_HIMAX_STATE` | running/epoch；即使屏灭不再产帧也能及时释放触点 |
 
+AFE 初始化重试候选（尚未安装）：STREAMON 或恢复 work 每次只尝试一次，失败后发布
+stopped epoch、保持 IRQ 关闭，并按 Windows 200→500→1000→1500→2000 ms 异步
+退避；不持 op_lock 等待重试，也不直接把初始化错误转换为服务重启。STREAMON=0
+不代表硬件 ready，必须等待 running/raw；移除设备仍通过队列错误断开。
+迟到 work 必须通过电源/队列门控；真实故障、休眠和工作队列并发仍待实机验收。
+
 2026-10-23 起，新代码按固定 Windows `Frame::kMasterFrameSize` 一次读取 master，
 不再为旧记录容量的尾部发出第二次 event-stack 命令。结构大小和 ioctl 编号不变，
 INFO 与每帧的 `payload_size` 表示实际读取长度；新用户态兼容旧模块/文件的 5132
