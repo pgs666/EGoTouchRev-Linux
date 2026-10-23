@@ -593,3 +593,49 @@ sanitizer 52/52（107.52 秒）结果不等于对新硬件工具执行了 saniti
 原始 raw/会话与旧模块备份保存在各证据目录。此轮解除了“只有 host 模拟”的正常
 启动/显式 reset/STREAMOFF 证据缺口；真实超时、物理 SPI 错误、系统 PM/DPMS
 取消、手指在场及手势/长期性能仍未验收，不能声称完整恢复策略或移植已完成。
+
+## 两帧保留容量与队满行为
+
+依据前面同哈希 SPB 二进制的 FIFO 容量和 drop-new 分支，候选 `e962070` 将
+`himax_queue_setup()` 返回数量固定为 `HX_RAW_QUEUE_DEPTH=2`，用户态 Capture
+也只申请/映射两帧。HXST 布局、ABI v2 和 ioctl 编号不变。旧 daemon 请求四帧时
+可接受返回两帧，新 daemon 对旧模块请求两帧也可运行。
+
+不能改 `q->max_num_buffers=2`：已核对本机对应 `videobuf2-core.c` 的
+`vb2_core_queue_init()`，该索引空间上限小于 `VB2_MAX_FRAME` 会 WARN/失败。
+实际保留数由分配回调控制；本驱动未暴露 CREATE_BUFS。用户态仍先复制再 QBUF，
+没有为求解器持有 MMAP 缓冲；无空闲 buffer 时仍完成 SPI、递增 sequence，再丢新
+交付，不覆盖旧帧、不改 timestamp，也不为满队列复位 AFE。
+
+验证不是一个复制的 FIFO 模型：直接编译生产 queue_setup/publish/IRQ，覆盖请求
+0/1/2/4/8/32/UINT_MAX、布局复查和两包队满后连续 20 次生产。真实 Capture 源码
+仅用 link-wrap 替换 OS 边界，检查双缓冲申请、无效返回数、部分 MMAP 失败清理、
+复制早于 requeue、FIFO 次序与 gap 保留。最终 Release 53/53、完整 ASan/UBSan
+53/53（108.46 秒）、legacy 回归与 checkpatch 通过。
+
+编译服务器独立 `two-buffer-PpunGFVY` 目录构建匹配测试内核的普通模块成功，
+源码清单逐项一致，无 build warning/error。候选位于 `artifacts/two-buffer-himax1/`：
+
+- module SHA-256：`efa7362dee86c51bd6f0ff264dd22e3924474bf9b73049919ef0728f2e14f2f0`；
+- build ID：`0f0a1f302b188071dbc329a35f4b4509fe98a4ed`；
+- daemon SHA-256：`f1725ef1575993cc8d013be460fdcb47b3ee1d4a029fc63f8d71bab2627b89b3`；
+- replay 未变，仍为 `4a03b871…`。本项不改 baseline、算法或输入 mapper。
+
+临时实机试载 `deploy-logs/two-buffer-trial-m6JxStpd/`：
+
+- REQBUFS 请求 1/4/8/32 均返回 2；未设置上述错误的 max_num_buffers；
+- 专用工具只暂停消费者 120 ms，不停 IRQ/SPI；恢复时最老两包仍为 sequence
+  1/2、同 epoch=1，第一包取回时约 140.2 ms。下一包为 sequence 16，间隔 13，
+  checksum 有效，表明保留旧包/丢新交付而非覆盖最新；这些有意制造的旧帧没有
+  交给 solver，不能当作实时求解验收；
+- 正常 fresh daemon 20 秒会话 878 帧、bad/stale/dropped=0、无触点，strict replay
+  878/878；进入 IDLE，自动 rearm 仍关闭，没有额外 reset/stall；
+- pending STREAMOFF 后 350 ms 无迟到 running；重开及三次 reset 的 raw 共
+  190 帧、无无效或 stale，各 epoch 首个有效 sequence=1，看到校准完成；
+- 健康门控无新 fault，SPI/GPI notes 一致。试载退出已恢复旧客户端/常驻服务，
+  已安装模块/程序和两份 initramfs 哈希不变，**候选尚未持久部署**。
+
+这对齐了保留容量和溢出方向，不复制 Windows 动态节点分配、双通道串读或 KMDF
+异步完成模型。两帧中的一帧可能短暂处于用户态复制，不能等同于独立两节点 FIFO
+始终有同样容量；也不保证不会丢 UP、不会有调度延迟或游戏性能改善。后续需要真实
+有触点/负载和过载释放验证，不把空载测试当完整触控验收。

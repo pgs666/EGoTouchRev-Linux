@@ -685,6 +685,24 @@ OTP、calibration/rate best-effort、硬件单次初始化事务保持原策略�
   运行与磁盘程序以及两份 initramfs 全部恢复/核对，不持久安装候选。
   详细记录见 [SPB 启动实测](../docs/windows-spb-backend-audit.md#普通候选的真实启动reset-和启动中取消)。
 
+### 候选：两帧 raw 保留队列
+
+`e962070` 将内核分配回调和 Capture 的申请统一为两帧。队满仍读 SPI、丢新交付，
+旧包和原始 timestamp 保留，序号间隔可见；不是覆盖最旧包的 latest-only 策略。
+这样对齐已审计 Windows SPB FIFO 的保留容量与 drop-new 方向，不增加每帧分配。
+ABI/记录尺寸不变；勿设置 `vb2_queue.max_num_buffers=2`，该内核会 WARN。
+
+53 项 Release、完整 53 项 ASan/UBSan 和服务器模块构建通过。临时实机试载确认
+REQBUFS 请求 1/4/8/32 均返回 2；消费者停 120 ms 后仍取出 sequence 1/2，随后
+有效数据为 sequence 16，同 epoch，13 个被丢的新交付有序号证据。正常会话另录
+878 帧并通过严格输出回放，启动取消及三次 reset 也通过。详细测试和边界见
+[SPB 两帧队列审计](../docs/windows-spb-backend-audit.md#两帧保留容量与队满行为)。
+
+**候选未持久部署**：退出试载已恢复原 module/daemon/服务，两份 initramfs 未改。
+候选为 `artifacts/two-buffer-himax1/himax-spi.ko`（SHA-256 `efa7362d…`），
+本机 Release daemon 为 `f1725ef1…`，都不代表当前安装版本；证据和回退备份在
+`deploy-logs/two-buffer-trial-m6JxStpd/`。空载会话不能证明有触点/游戏/长时负载表现。
+
 诊断构建（`HIMAX_AFE_DIAGNOSTICS=1`）另提供仅模块加载时配置的
 `afe_start_failures=0..8`（默认 0、只读参数）。probe 将预算复制到每个设备；每次
 AFE 尝试在 IC 检测/SPI 之前消耗一次并返回 EAGAIN，用于检验真实 workqueue 的
