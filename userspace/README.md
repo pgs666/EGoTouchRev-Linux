@@ -647,7 +647,7 @@ Windows 的 master/slave 0x13 bus-ready 前置探测、每五次失败重开 THP
 OTP、calibration/rate best-effort、硬件单次初始化事务保持原策略。当前源码的清帧
 已改为下面说明的异步 producer cleanup，已安装模块仍是旧的定时三次直读实现。
 
-### 候选：IRQ producer 启动清帧
+### IRQ producer 启动清帧
 
 `himax-v4l2-startup.h` 将 consumer-ready 与硬件初始化完成分开：打开 IRQ 后
 做一次初始 producer 读取，随后由正常 IRQ 消耗剩余的启动读取尝试。每次最多等
@@ -666,8 +666,8 @@ OTP、calibration/rate best-effort、硬件单次初始化事务保持原策略�
 服务器已构建匹配测试内核的普通模块，候选为
 `artifacts/startup-drain-himax1/himax-spi.ko`，SHA-256 为
 `648ef91a7b050d6a7be2e8f71013f2e5b8bb9af165d165c0edb623a36a52de59`。
-**未部署此模块**，当前用户态仍是前述边界修复版本；真实启动/取消/手势和延迟
-还需试载，不用离线测试冒充实机完成。
+构建完成时尚未部署此模块；当时用户态仍为前述边界修复版本。随后的试载与正式
+安装记录见下文，不用离线测试冒充实机完成。
 
 随后已完成普通候选的两轮临时试载，**试载后仍恢复原已安装模块**：
 
@@ -685,7 +685,7 @@ OTP、calibration/rate best-effort、硬件单次初始化事务保持原策略�
   运行与磁盘程序以及两份 initramfs 全部恢复/核对，不持久安装候选。
   详细记录见 [SPB 启动实测](../docs/windows-spb-backend-audit.md#普通候选的真实启动reset-和启动中取消)。
 
-### 候选：两帧 raw 保留队列
+### 两帧 raw 保留队列
 
 `e962070` 将内核分配回调和 Capture 的申请统一为两帧。队满仍读 SPI、丢新交付，
 旧包和原始 timestamp 保留，序号间隔可见；不是覆盖最旧包的 latest-only 策略。
@@ -698,10 +698,33 @@ REQBUFS 请求 1/4/8/32 均返回 2；消费者停 120 ms 后仍取出 sequence 
 878 帧并通过严格输出回放，启动取消及三次 reset 也通过。详细测试和边界见
 [SPB 两帧队列审计](../docs/windows-spb-backend-audit.md#两帧保留容量与队满行为)。
 
-**候选未持久部署**：退出试载已恢复原 module/daemon/服务，两份 initramfs 未改。
+本轮试载退出时尚未持久部署：已恢复原 module/daemon/服务，两份 initramfs 未改。
 候选为 `artifacts/two-buffer-himax1/himax-spi.ko`（SHA-256 `efa7362d…`），
 本机 Release daemon 为 `f1725ef1…`，都不代表当前安装版本；证据和回退备份在
 `deploy-logs/two-buffer-trial-m6JxStpd/`。空载会话不能证明有触点/游戏/长时负载表现。
+
+### 2026-10-24：启动清帧和两帧队列已安装
+
+完成前述试载后，已将普通构建安装到当前 `7.1.8-gaokun3-himax1`：
+
+- Himax module：SHA-256 `efa7362dee86c51bd6f0ff264dd22e3924474bf9b73049919ef0728f2e14f2f0`，
+  build ID `0f0a1f302b188071dbc329a35f4b4509fe98a4ed`；
+- daemon：SHA-256 `f1725ef1575993cc8d013be460fdcb47b3ee1d4a029fc63f8d71bab2627b89b3`，
+  仍含此前边界 plateau 首点修复；replay/算法源码没有因队列改动再次改变；
+- 常驻 PID=2275950、epoch=1，878→919 帧时 bad/stale=0，IDLE 帧 5→46，
+  NRestarts=0，无触点、额外 reset/stall 或自动 kick；
+- 自动 rearm 仍默认关闭，无 live-capture 参数或管理线程，没有部署诊断注入模块；
+- `/boot` 与 ESP 测试项 initramfs 均为 SHA-256
+  `f9c9d15aa8333b827c30447ad729579e7eca249fa569bd57a2b3efa0839540a2`，
+  解包 Himax/GPI/SPI/uinput 与磁盘逐字节相同；
+- Image、DTB、BLS entry、unit、loader.conf 和 SPI/GPI 运行 notes 未改，
+  bootctl 前后相同。没有重启、自动睡眠、改默认启动项或部署 Android；
+- 旧模块、daemon/replay、两份旧 initramfs、安装脚本及 kernel health 证据保存在
+  `deploy-logs/two-buffer-install-jVfctxCC/previous-*` 及同目录，不占 ESP 备份空间。
+
+当前会话已使用新版，无需重启生效。下次仍需选择 **Himax SPI/GPI test** 项；默认
+启动项保持旧内核。更新镜像未冷启动验收，真实系统 PM、触点/过载释放、游戏与
+长期性能仍待测试；空载统计只证明这段正常帧流。
 
 诊断构建（`HIMAX_AFE_DIAGNOSTICS=1`）另提供仅模块加载时配置的
 `afe_start_failures=0..8`（默认 0、只读参数）。probe 将预算复制到每个设备；每次

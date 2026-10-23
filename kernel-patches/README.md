@@ -277,3 +277,22 @@ owner/限频/STREAMOFF、672 帧 fresh strict replay 通过。
 解包模块核对通过；Image、DTB、BLS entry、SPI/GPI 未改，未自动重启。
 旧模块/程序/镜像及 kernel health 证据：
 `deploy-logs/tagged-rearm-install-jZr7HanI/`。
+
+## 2026-10-24：测试项已更新为异步启动清帧与两帧队列
+
+保留同一个完整宿主内核，不改 GPI/SPI 修复、Image、DTB 或 boot entry。
+Himax module 更新为 `e962070` 普通构建，SHA-256 为
+`efa7362dee86c51bd6f0ff264dd22e3924474bf9b73049919ef0728f2e14f2f0`，
+运行/磁盘 build ID 为 `0f0a1f302b188071dbc329a35f4b4509fe98a4ed`。
+用户态配套两帧 Capture；启动先开 producer、异步消费三次再发布 ready。
+各项 host 和临时硬件试载边界见用户态说明与 SPB 后端审计。
+
+已重建 `/boot` 和 ESP 测试项 initramfs，两者 SHA-256 均为
+`f9c9d15aa8333b827c30447ad729579e7eca249fa569bd57a2b3efa0839540a2`；
+解包 Himax/GPI/SPI/uinput 与磁盘逐字节一致，SPI/GPI 运行 notes 未改变。
+常驻服务 878→919 帧、bad/stale=0、零重启，无新 kernel fault；该窗口无触点，
+不能声称实际手势/长期性能验收通过。新镜像尚未冷启动。
+
+仅新测试项继续保留原 DKMS mask，默认启动选择仍为旧内核。没有自动重启、
+改 Android 或重新加载父控制器。旧模块/程序/两份 initramfs 与部署证据在
+`deploy-logs/two-buffer-install-jVfctxCC/`，可回退；未清理任何旧版本文件。

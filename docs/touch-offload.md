@@ -241,7 +241,8 @@ report/status/ctrl/触点摘要。只有收到 `END`、两文件数量匹配、d
 `VB2_MAX_FRAME`，否则 WARN；实际容量通过 queue_setup/REQBUFS 协商。
 本驱动没有提供 CREATE_BUFS 扩容 ioctl。两帧包括正在被用户态复制的 buffer，
 与 Windows 动态节点 FIFO/异步 completion 的调度并非逐项等价；仍需实测。
-本项为候选源码，常驻部署状态以用户态运行说明和部署证据为准。
+该两帧策略已随异步启动清帧安装到当前 Linux 测试内核，启动镜像也已同步；
+冷启动与长期触控负载仍未验收。具体版本与备份见用户态运行说明。
 
 硬件不等待算法线程。MMAP 避免 read 的 copy_to_user，但当前仍有
 SPI bounce buffer → event buffer → vb2 buffer → 用户态私有帧的拷贝，不声称零拷贝。
@@ -259,8 +260,8 @@ daemon 使用 poll，逐帧求解；超过 50 ms 的旧帧、重复/乱序 seque
 
 ## 硬件和算法生命周期
 
-当前候选源码的 STREAMON、亮屏恢复和受限 reset 执行如下；其异步清帧已临时试载，
-尚未因此默认替换常驻模块：
+当前源码与已部署测试模块的 STREAMON、亮屏恢复和受限 reset 执行如下；
+正常启动、显式 reset、启动中 STREAMOFF 已试载验证，系统睡眠等仍有验收缺口：
 
 ```text
 关 IRQ / 停止事件

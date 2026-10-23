@@ -639,3 +639,25 @@ sanitizer 52/52（107.52 秒）结果不等于对新硬件工具执行了 saniti
 异步完成模型。两帧中的一帧可能短暂处于用户态复制，不能等同于独立两节点 FIFO
 始终有同样容量；也不保证不会丢 UP、不会有调度延迟或游戏性能改善。后续需要真实
 有触点/负载和过载释放验证，不把空载测试当完整触控验收。
+
+### 2026-10-24 常驻安装与测试启动镜像同步
+
+试载之外，随后已将 `e962070` 的普通模块和两帧 Capture daemon 正式安装。
+运行和磁盘 module build ID 均为 `0f0a1f302b188071dbc329a35f4b4509fe98a4ed`，
+daemon/exe 与上述 `f1725ef1…` Release 产物一致。没有顺带启用自动 rearm、
+诊断注入或运行录制；现有边界起点修复保留，replay 文件未改。
+
+安装后常驻 PID=2275950、epoch=1，878→919 帧、bad/stale=0，IDLE 5→46 帧，
+NRestarts=0，没有触点报告、reset/stall/kick；kernel 记录启动 `discarded=3 timeouts=0`。
+health 门控无新增 Oops/WARN/坏页，SPI/GPI 运行 notes 安装前后相同。
+
+`/boot` 和 ESP 同一测试启动项的 initramfs 已同步：SHA-256
+`f9c9d15aa8333b827c30447ad729579e7eca249fa569bd57a2b3efa0839540a2`。
+解包后的四个 Himax/GPI/SPI/uinput 模块均与已安装文件逐字节一致。
+Image、DTB、BLS entry、loader.conf、systemd unit 和默认启动选择均不变；
+bootctl 输出前后相同，没有自动重启或改 Android。
+
+证据与可回退旧模块/daemon/replay/两份 initramfs 位于
+`deploy-logs/two-buffer-install-jVfctxCC/`。新模块当前已运行，新 initramfs 尚未
+冷启动验收；真实有触点/过载释放、系统 PM/DPMS、长时性能和实验自动 rearm
+验收仍未完成，不能将本次部署称为完整 Windows 驱动移植完成。
