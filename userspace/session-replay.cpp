@@ -4,6 +4,9 @@
 #include "capture-session.h"
 #include "solver-screen.h"
 #include "stream-state.h"
+#include "afe-restart.h"
+
+#include <algorithm>
 #include "touch-trace.h"
 
 #include <iostream>
@@ -30,17 +33,47 @@ int ReplaySession(const char* path, std::ostream* touchTrace) {
     std::array<uint8_t, Frame::kMasterFrameSize> thp{};
     uint64_t epoch = 0, frames = 0, validFrames = 0, lastTime = 0;
     bool started = false, observe = false;
+    bool restartEnabled = false;
+    uint64_t restartCompleted = 0, lastHost = 0, restarts = 0;
+    AfeRestart restart;
     MasterFrameHealth frameHealth;
     std::cout << "frame,time_ms,afe_status,ctrl,report,id,event,x,y,pressure\n";
     while (reader.Next(*event)) {
         const auto& e = *event;
-        if (e.kind == SessionKind::Begin) { observe = e.observe; continue; }
+        if (e.kind == SessionKind::Begin) {
+            observe = e.observe;
+            restartEnabled = e.restartEnabled;
+            continue;
+        }
+        if (e.hostTimeNs < restartCompleted) {
+            std::cerr << "Session event precedes completed restart request\n";
+            return 1;
+        }
+        if (e.kind == SessionKind::Restart) {
+            if (observe || !restartEnabled || e.hostTimeNs < lastHost ||
+                e.restart.epoch != stream.Epoch() || e.restart.sequence != stream.Sequence() ||
+                restart.Next(stream, e.hostTimeNs, true) != AfeRestart::Step::Request) {
+                std::cerr << "Invalid session restart request/token/budget\n";
+                return 1;
+            }
+            restartCompleted = e.restart.completedNs;
+            if (restart.Result(e.restart.result, restartCompleted)) {
+                stream.State({HX_RAW_ABI_VERSION, 0, e.restart.epoch}, restartCompleted);
+                solver->OnAfeSos();
+                solver->OnAfeStopped();
+                started = false;
+            }
+            ++restarts;
+            continue;
+        }
         if (e.kind == SessionKind::Release) continue; // Input-only timeout; mapper is unchanged.
         if (e.kind == SessionKind::State) {
-            if (!stream.State(e.state, e.hostTimeNs)) {
+            if (!restart.Allows(e.state) || !stream.State(e.state, e.hostTimeNs)) {
                 std::cerr << "Invalid session lifecycle event\n";
                 return 1;
             }
+            lastHost = std::max(lastHost, e.hostTimeNs);
+            restart.State(e.state);
             if (!e.state.running || e.state.epoch != epoch) {
                 solver->OnAfeStopped();
                 started = false;
@@ -49,11 +82,14 @@ int ReplaySession(const char* path, std::ostream* touchTrace) {
         }
         ++frames;
         const auto& packet = e.packet;
-        if (packet.timestamp_ns < lastTime || !stream.Accept(packet, e.hostTimeNs)) {
+        if (packet.timestamp_ns < lastTime || !restart.Allows(packet) ||
+            restart.Next(stream, e.hostTimeNs, false) == AfeRestart::Step::Fallback ||
+            !stream.Accept(packet, e.hostTimeNs)) {
             std::cerr << "Invalid session timeline\n";
             return 1;
         }
         lastTime = packet.timestamp_ns;
+        lastHost = e.hostTimeNs;
         if (packet.epoch != epoch || !started) {
             solver->OnAfeStopped();
             if (packet.flags & HX_RAW_FRAME_SOS) solver->OnAfeSos();
@@ -69,6 +105,7 @@ int ReplaySession(const char* path, std::ostream* touchTrace) {
         bool reset = frameHealth.Observe(error, packet.flags & HX_RAW_FRAME_REARM);
         bool report = false;
         if (!valid) {
+            restart.Frame(packet, e.hostTimeNs, false);
             if (e.report || e.status || e.ctrl || e.digest) {
                 std::cerr << "Unexpected solver result on invalid frame " << frames << '\n';
                 return 1;
@@ -80,6 +117,7 @@ int ReplaySession(const char* path, std::ostream* touchTrace) {
             report = screen.Process(*solver, *frame, packet.timestamp_ns / 1000000);
             if (!solver->IsAvailable()) return 1;
             reset = solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kSos;
+            restart.Frame(packet, e.hostTimeNs, !reset);
             if (report != e.report || solver->LastAfeStatus() != e.status ||
                 solver->LastCtrlFlags() != e.ctrl || ContactDigest(*frame) != e.digest) {
                 std::cerr << "Session solver output mismatch at frame " << frames << '\n';
@@ -114,7 +152,7 @@ int ReplaySession(const char* path, std::ostream* touchTrace) {
                 solver->OnAfeActionExecuted(action, e.actions[index++].result == 0);
             }
         }
-        if (reset && !observe) {
+        if (reset && !observe && !restart.Waiting()) {
             if (!matches(HX_RAW_RESET, 0)) {
                 std::cerr << "Session reset mismatch at frame " << frames << '\n';
                 return 1;
@@ -132,6 +170,8 @@ int ReplaySession(const char* path, std::ostream* touchTrace) {
     }
     std::cerr << "session_frames=" << frames << " verified_frames=" << validFrames
               << " live_output_verified=" << !!validFrames
+              << " restart_requests=" << restarts
+              << " restart_waiting=" << restart.Waiting()
               << " profile=" << solver->LoadedPrmtName() << '\n';
     return validFrames ? 0 : 1;
 }

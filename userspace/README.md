@@ -529,7 +529,7 @@ bash scripts/test-v4l2-panel.sh
 录制创建两个新文件，不覆盖已有文件：
 
 - `FILE.hxst`：原有 HXRC v1 面板头及未经修改的 HXST 帧；
-- `FILE.hxst.events`：HXSE v1 侧车，保存每帧使用的方向、求解结果摘要、AFE 请求及
+- `FILE.hxst.events`：HXSE v3 recovery 侧车（旧文件为 v1），保存每帧使用的方向、求解结果摘要、AFE 请求及
   执行退出状态、panel 生命周期和超时释放事件，以及完整性尾记录。
 
 输入线程不等待磁盘：队列满或后台写入失败会禁用录制并记录错误，触控继续。
@@ -1555,7 +1555,7 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
 - 没有真实触点、真实 lost-IRQ 或系统 suspend/resume 验收，不能将短期正常 IDLE
   通过称为历史断触根因已解决，也没有因此默认启用实验恢复。
 
-### 2026-10-24：无首帧时的 AFE 重建接口（尚未接入 daemon）
+### 2026-10-24：无首帧时的 AFE 重建接口（d75f89c 检查点）
 
 固定上游 `DeviceRuntime::OnStreaming()` 在 `GetFrame()` 返回 SOS 后调用
 `OnAfeSos()`、`BeginBringUp()`，保留同一个 solver/core 及进程；退出 streaming
@@ -1589,3 +1589,41 @@ producer 超时耗尽仍退出 daemon，由 supervisor 重启，尚不是这条�
 顺序、有界等待新 epoch 与第一份有效数据、`ESTALE/EAGAIN` 竞态处理和旧模块
 fallback。先保留显式试验入口，再做实机正常 IDLE、故障恢复及手势回归，不把
 调度成功或一份合法帧等同于触控质量恢复。
+
+### 2026-10-24：同进程重建闭环（候选，默认关闭）
+
+上节检查点之后，daemon 已接入独立的 `--experimental-restart`，继续保留同一个
+Capture、uinput 设备、solver 和 TSACore 对象。未加此选项的常驻配置仍使用原有
+四秒 supervisor fallback；它不隐式打开 `--experimental-rearm`。只开 restart 时
+四秒耗尽后申请 +4；两选项一起开时沿用原 producer kick 预算再申请 +4。
+observe/info 模式拒绝实验恢复选项。
+
+请求受理后立即执行 `OnAfeSos → OnAfeStopped → input.Release`，在主线程本地
+关闭旧 epoch，不依赖稍后 DQEVENT 才隔离旧 completed buffer。迟到的旧 ready
+event/旧 packet 不能重新打开输入。后续新 epoch 仍经过身份检查、正常
+`OnAfeStarted` 和 raw/AFE status 校验，保持同一个 core；新数据可用才增加
+`afe_restart valid_after`。它不意味着真实手势质量已恢复。
+
+单次竞态只允许一秒、100 ms 间隔重试，进度/epoch/sequence 改变会取消旧请求；
+ENOTTY/其他致命错误退回 supervisor。受理后最多等待十五秒新可用帧，不因收到
+stopped/ready 或坏包延长；等待中不再发嵌套 reset。连续三次受理后需要三十秒
+持续好数据才补回预算，状态停止、坏数据或超过四秒的数据间隔打断稳定窗口。
+这些是 Linux 防循环边界，不是上游 Windows 参数；真实 panel off 发生在受理
+等待中也可能触发十五秒 supervisor fallback，当前生命周期 UAPI 未区分 stop 原因。
+既有 250 ms 无帧释放行为保留。
+
+fresh `--record` 改为 `HXSE 3 recovery`，Begin 记录实验选项；独立的
+`J decision_ns completed_ns epoch sequence errno` 保存无帧请求，旧 HXSE 1 继续可读。
+回放重建同样的 SOS/stop/start 和旧流隔离，核对输出/命令及请求 token/预算；
+不把 host 回放称为物理 SPI 或超时原因验证。live 窗口仍无 checkpoint，不允许
+严格 replay。完整语法见 [offload 录制说明](../docs/touch-offload.md#正常-afe-闭环录制)。
+
+新增测试直接执行生产 `touchd` main、真实 TSACore、录制与回放，只替换 Capture/
+input/桌面边界和主线程时钟。覆盖健康/默认不开启、触点在场停帧、无首帧、两次
+EAGAIN 后受理、重建后的前五帧坏包、旧模块 ENOTTY、永不 ready 和持续坏帧。
+同一流只 Open/Start 一次；重建后旧包/旧 ready 事件被隔离，失败有界退出。
+另有独立 policy 纳秒边界/重复故障测试，以及真实 solver 会话的 token/时间/策略
+元数据损坏反例。这些都是离线边界模拟，尚未证明真实停 IRQ 后恢复成功。
+
+此候选未安装到本机，未修改 unit/initramfs、SPI/GPI 或 Android；普通常驻版本仍为
+前面的两帧队列部署。下一步是配套模块的受控试载、真实恢复证据和手势/PM 回归。

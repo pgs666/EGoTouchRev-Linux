@@ -134,6 +134,13 @@ Linux producer 超时耗尽仍退出整个 daemon。新增严格 owner/epoch/精
 无帧请求的诊断/strict replay 与有界恢复状态机一起接入，再做真实故障及 PM 验收；
 详细接口与证据见 SPB 审计和 userspace README。
 
+该接口之后已接入独立 `--experimental-restart`：在同一个进程保留 core，受理即
+SOS/stop/release、本地隔离旧流，新 epoch 的可用数据才计恢复，失败/重复故障有界
+退回 supervisor。fresh HXSE 3 增加独立无帧请求与策略记录，兼容读取 HXSE 1。
+直接执行实际 daemon main 的离线边界测试覆盖正常/无首帧/竞态/旧包/坏包/不支持/
+超时，daemon 生成的采集严格回放通过。默认 unit、自动 kick 开关和本机运行版本
+未改；候选尚未试载，不把离线状态机通过称为真实 producer 故障恢复已验收。
+
 | 范围 | 当前状态 | 尚需证据或实现 |
 |---|---|---|
 | 手指求解 | 直接编译固定版本上游的所有实际源码模块、adapter、solver、参数表和 mapper | 不等于恢复了上游自身裁去的原厂私有功能；仍需真实多指、边缘、快速滑动验收 |

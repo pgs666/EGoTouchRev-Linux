@@ -31,8 +31,11 @@ assert "lastFrameValid" not in daemon
 capture_source = (Path(native).parent.parent / "userspace" / "v4l2-capture.cpp").read_text()
 assert "return ioctl(m_fd, VIDIOC_HIMAX_REARM_TAGGED, &request) == 0;" in capture_source
 assert "return ioctl(m_fd, VIDIOC_HIMAX_RESTART, &request) == 0;" in capture_source
-# Interface-only checkpoint: do not silently enable a new runtime policy.
-assert "capture.Restart(" not in daemon
+# Runtime reconstruction remains opt-in until actual fault/gesture validation.
+assert "bool experimentalRestart = false;" in daemon
+assert 'arg == "--experimental-restart"' in daemon
+assert "capture.Restart(afeRestart.Epoch(), afeRestart.Sequence())" in daemon
+assert "if (requestReset && !observe && !afeRestart.Waiting())" in daemon
 assert "const bool fromRearm = packet->flags & HX_RAW_FRAME_REARM;" in daemon
 with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     root = Path(directory)

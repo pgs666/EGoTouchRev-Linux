@@ -10,13 +10,20 @@
 
 namespace himax {
 
-enum class SessionKind { Begin, Frame, State, Release, EndWindow };
+enum class SessionKind { Begin, Frame, State, Release, Restart, EndWindow };
 enum class SessionOrigin { Fresh, Live };
 
 struct RecordedAction {
     uint32_t action = 0;
     uint32_t parameter = 0;
     int result = -1;  // 0 success, positive errno, -1 observe-only/not executed.
+};
+
+struct RecordedRestart {
+    uint64_t completedNs = 0;
+    uint64_t epoch = 0;
+    uint64_t sequence = 0;
+    int result = 0;
 };
 
 struct SessionEvent {
@@ -34,6 +41,8 @@ struct SessionEvent {
     std::array<char, 16> project{};
     uint32_t coordinateFlags = 0;
     bool observe = false;
+    bool restartEnabled = false;
+    RecordedRestart restart{};
 };
 
 // Diagnostic fingerprint of mapper output, including UP events and float bits.
@@ -87,6 +96,7 @@ private:
     uint64_t m_frames = 0;
     bool m_begun = false;
     bool m_ended = false;
+    bool m_recoveryVersion = false;
 };
 
 }  // namespace himax

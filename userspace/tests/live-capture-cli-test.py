@@ -11,10 +11,12 @@ daemon, helper = sys.argv[1:]
 result = subprocess.run([daemon, "--help"], capture_output=True, text=True, timeout=10)
 assert result.returncode == 0 and "--live-capture-dir" in result.stderr
 assert "--experimental-rearm" in result.stderr and "default off" in result.stderr
+assert "--experimental-restart" in result.stderr
 invalid = [["--live-capture-seconds", value] for value in
            ("0", "121", "-1", "1x", "999999999999999999999999", "1")]
 invalid += [["--info", "--live-capture-dir", "/tmp"],
             ["--info", "--experimental-rearm"], ["--observe", "--experimental-rearm"],
+            ["--info", "--experimental-restart"], ["--observe", "--experimental-restart"],
             ["--record", "/tmp/not-created.hxst", "--live-capture-dir", "/tmp"],
             ["--live-capture-dir"], ["--live-capture-seconds"]]
 for arguments in invalid:

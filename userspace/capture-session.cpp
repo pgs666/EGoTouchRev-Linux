@@ -84,7 +84,9 @@ struct SessionRecorder::Impl {
                 return;
             }
             begun = true;
-            events << "B " << project << ' ' << e.coordinateFlags << ' ' << e.observe << '\n';
+            events << "B " << project << ' ' << e.coordinateFlags << ' ' << e.observe;
+            if (origin == SessionOrigin::Fresh) events << ' ' << e.restartEnabled;
+            events << '\n';
             break;
         }
         case SessionKind::Frame:
@@ -104,6 +106,10 @@ struct SessionRecorder::Impl {
         case SessionKind::Release:
             events << "R " << e.hostTimeNs << '\n';
             break;
+        case SessionKind::Restart:
+            events << "J " << e.hostTimeNs << ' ' << e.restart.completedNs << ' '
+                   << e.restart.epoch << ' ' << e.restart.sequence << ' ' << e.restart.result << '\n';
+            break;
         case SessionKind::EndWindow:
             Fail(EINVAL); // LiveCapture consumes this control item, not a disk record.
             return;
@@ -111,7 +117,7 @@ struct SessionRecorder::Impl {
         if (!raw || !events) Fail(EIO);
     }
     void Run() {
-        events << (origin == SessionOrigin::Fresh ? "HXSE 1\n" : "HXSE 2 live-no-checkpoint\n");
+        events << (origin == SessionOrigin::Fresh ? "HXSE 3 recovery\n" : "HXSE 2 live-no-checkpoint\n");
         for (;;) {
             SessionEvent event;
             while (queue.TryPop(event)) Write(event);
@@ -203,6 +209,8 @@ SessionReader::SessionReader(const char* path)
             m_error = "Unsupported or missing HXSE sidecar";
         else if (std::string_view(line.data()) == "HXSE 2 live-no-checkpoint")
             m_error = "Live capture has no solver checkpoint; use raw --hxst replay, not --session";
+        else if (std::string_view(line.data()) == "HXSE 3 recovery")
+            m_recoveryVersion = true;
         else if (std::string_view(line.data()) != "HXSE 1")
             m_error = "Unsupported or missing HXSE sidecar";
     }
@@ -229,10 +237,14 @@ bool SessionReader::Next(SessionEvent& e) {
         std::string project;
         int observe = 0;
         in >> project >> e.coordinateFlags >> observe;
+        int restart = 0;
+        if (m_recoveryVersion) in >> restart;
         valid = !m_begun && project == m_raw.ProjectId() &&
-                e.coordinateFlags == m_raw.CoordinateFlags() && (observe == 0 || observe == 1);
+                e.coordinateFlags == m_raw.CoordinateFlags() && (observe == 0 || observe == 1) &&
+                (restart == 0 || restart == 1) && !(observe && restart);
         if (valid) std::copy(project.begin(), project.end(), e.project.begin());
         e.observe = observe;
+        e.restartEnabled = restart;
         m_begun = true;
     } else if (kind == "S") {
         e.kind = SessionKind::State;
@@ -242,6 +254,13 @@ bool SessionReader::Next(SessionEvent& e) {
     } else if (kind == "R") {
         e.kind = SessionKind::Release;
         in >> e.hostTimeNs;
+    } else if (kind == "J") {
+        e.kind = SessionKind::Restart;
+        in >> e.hostTimeNs >> e.restart.completedNs >> e.restart.epoch
+           >> e.restart.sequence >> e.restart.result;
+        valid = m_recoveryVersion && m_begun && e.restart.epoch &&
+                e.restart.completedNs >= e.hostTimeNs && e.restart.result >= 0 &&
+                e.restart.result <= 4095;
     } else if (kind == "F") {
         e.kind = SessionKind::Frame;
         uint64_t index = 0;

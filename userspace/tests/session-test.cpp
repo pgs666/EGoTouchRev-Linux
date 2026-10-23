@@ -249,8 +249,18 @@ int main(int argc, char** argv) {
         Check(Replay(argv[1], path, path.c_str()) != 0 && Read(path) == raw &&
               Read(path + ".events") == original, "trace cannot overwrite raw session or sidecar");
     }
-    Check(original.starts_with("HXSE 1\n") && original.ends_with("END 300 0 0\n"),
+    Check(original.starts_with("HXSE 3 recovery\n") && original.ends_with("END 300 0 0\n"),
           "explicit complete footer");
+    {
+        auto legacy = original;
+        legacy.replace(0, std::string("HXSE 3 recovery\n").size(), "HXSE 1\n");
+        const auto begin = legacy.find("B W273AS2700 5 0 0\n");
+        Check(begin != legacy.npos, "version-three policy metadata exists");
+        legacy.replace(begin, std::string("B W273AS2700 5 0 0\n").size(), "B W273AS2700 5 0\n");
+        Write(path + ".events", legacy);
+        Check(Replay(argv[1], path) == 0, "legacy HXSE 1 still verifies without recovery records");
+        Write(path + ".events", original);
+    }
     {
         // Removing the first-frame bus-filler reset must not pass strict replay
         // merely because ordinary checksum recovery would wait five frames.

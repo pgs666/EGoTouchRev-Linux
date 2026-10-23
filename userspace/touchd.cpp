@@ -8,6 +8,7 @@
 #include "v4l2-capture.h"
 #include "stream-state.h"
 #include "producer-recovery.h"
+#include "afe-restart.h"
 #include "frame-read-mode.h"
 #include "service-notify.h"
 #include "screen-rotation.h"
@@ -48,11 +49,13 @@ int main(int argc, char** argv) {
     std::optional<int> fixedRotation;
     bool observe = false, infoOnly = false;
     bool experimentalRearm = false;
+    bool experimentalRestart = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--observe") observe = true;
         else if (arg == "--info") infoOnly = true;
         else if (arg == "--experimental-rearm") experimentalRearm = true;
+        else if (arg == "--experimental-restart") experimentalRestart = true;
         else if (arg == "--device" && i + 1 < argc) device = argv[++i];
         else if (arg == "--project" && i + 1 < argc) project = argv[++i];
         else if (arg == "--record" && i + 1 < argc) recording = argv[++i];
@@ -80,6 +83,7 @@ int main(int argc, char** argv) {
                       << "                    [--rotation 0..3|90|180|270] [--rotation-file FILE]\n"
                       << "                    [--observe] [--record FILE.hxst]\n"
                       << "                    [--experimental-rearm] (unvalidated; default off)\n"
+                      << "                    [--experimental-restart] (in-process AFE; default off)\n"
                       << "                    [--live-capture-dir PRIVATE_DIR [--live-capture-seconds 1..120]]\n"
                       << "       himax-touchd [--device /dev/videoN] --info\n";
             return arg == "--help" ? 0 : 2;
@@ -95,11 +99,11 @@ int main(int argc, char** argv) {
         std::cerr << "Live capture requires its own directory and cannot be combined with --record\n";
         return 2;
     }
-    if (experimentalRearm && observe) {
-        std::cerr << "--experimental-rearm cannot be combined with --observe\n";
+    if ((experimentalRearm || experimentalRestart) && observe) {
+        std::cerr << "Experimental recovery cannot be combined with --observe\n";
         return 2;
     }
-    if (infoOnly && (observe || experimentalRearm || !recording.empty() || !autoProject ||
+    if (infoOnly && (observe || experimentalRearm || experimentalRestart || !recording.empty() || !autoProject ||
                      fixedRotation || !rotationFile.empty() || !captureDirectory.empty())) {
         std::cerr << "--info cannot be combined with solver/capture options\n";
         return 2;
@@ -191,10 +195,12 @@ int main(int argc, char** argv) {
     uint64_t frames = 0, stale = 0, bad = 0;
     himax::StreamState stream;
     himax::ProducerRecovery producerRecovery;
+    himax::AfeRestart afeRestart;
     himax::FrameReadMode readMode;
     uint64_t rearmRequests = 0, rearmTransfers = 0, rearmRaces = 0, rearmFailed = 0;
     uint64_t rearmUnsupported = 0, rearmValid = 0, rearmEpoch = 0, rearmSequence = 0;
     uint64_t emptyRearms = 0;
+    uint64_t restartRequests = 0, restartScheduled = 0, restartRecovered = 0;
     bool rearmPending = false;
     bool afeStarted = false;
     bool profileSelected = false;
@@ -255,6 +261,9 @@ int main(int argc, char** argv) {
                       << " transferred=" << rearmTransfers << " raced=" << rearmRaces
                       << " failed=" << rearmFailed << " unsupported=" << rearmUnsupported
                       << " valid_after=" << rearmValid << " empty=" << emptyRearms << '\n';
+        if (restartRequests)
+            std::cerr << "afe_restart requested=" << restartRequests << " scheduled=" << restartScheduled
+                      << " valid_after=" << restartRecovered << " waiting=" << afeRestart.Waiting() << '\n';
         std::cerr << "screen_rotation=" << solverScreen.Rotation()
                   << " (-1 means no host orientation)\n";
         if (recorder)
@@ -273,11 +282,42 @@ int main(int argc, char** argv) {
         std::cerr << "screen_rotation=" << sample->value
                   << " source=" << sample->source << '\n';
     };
+    const auto selectProfile = [&] {
+        // A running lifecycle event proves OTP was attempted even when no
+        // first frame ever arrives. Record identity before a no-frame restart.
+        if (!capture.RefreshInfo()) {
+            std::cerr << capture.Error() << '\n';
+            return false;
+        }
+        if (autoProject) {
+            project = Solvers::Tsa::ResolvePanelProjectId(capture.Info().project_id);
+            if (project != capture.Info().project_id)
+                std::cerr << "OTP unavailable; using upstream fallback " << project << '\n';
+        }
+        if ((profileSelected && project != solver->PanelProjectId()) ||
+            !solver->SetPanelProjectId(project)) {
+            std::cerr << "Panel project changed within the capture session\n";
+            return false;
+        }
+        profileSelected = true;
+        if (recorder && !recordingHeaderWritten) {
+            himax::SessionEvent event;
+            event.kind = himax::SessionKind::Begin;
+            std::copy(project.begin(), project.end(), event.project.begin());
+            event.coordinateFlags = capture.Info().coordinate_flags;
+            event.observe = observe;
+            event.restartEnabled = experimentalRestart;
+            recordEvent(event);
+            recordingHeaderWritten = true;
+        }
+        return true;
+    };
     himax::NotifyService("READY=1");
     std::cerr << (observe ? "Observing " : "Solving ") << capture.Path()
               << " project=" << (autoProject ? "pending-OTP" : project) << '\n';
     std::cerr << "producer_rearm=" << (experimentalRearm ? "experimental" : "disabled")
               << " (disabled uses four-second stall deadline)\n";
+    std::cerr << "afe_restart=" << (experimentalRestart ? "experimental" : "disabled") << '\n';
     while (!stopped) {
         const uint64_t loopNow = NowNs();
         if (liveCapture) liveCapture->Tick(loopNow);
@@ -294,17 +334,64 @@ int main(int argc, char** argv) {
             std::copy(project.begin(), project.end(), begin.project.begin());
             begin.coordinateFlags = capture.Info().coordinate_flags;
             begin.observe = observe;
+            begin.restartEnabled = experimentalRestart;
             if (!liveCapture->Start(begin, loopNow)) std::cerr << "Live capture could not start\n";
             liveCapturePending = false;
         }
         pollRotation(loopNow);
         if (dumpRequested) { dumpRequested = 0; printStats(); }
-        const auto recovery = producerRecovery.Next(stream, loopNow,
+        const auto recovery = afeRestart.Waiting() ? himax::ProducerRecovery::Step::None :
+            producerRecovery.Next(stream, loopNow,
                 afeStarted && readMode.IdleRetry(), experimentalRearm);
-        if (recovery == himax::ProducerRecovery::Step::Exhausted) {
+        const bool exhausted = recovery == himax::ProducerRecovery::Step::Exhausted;
+        if (exhausted && !experimentalRestart) {
             std::cerr << "AFE producer stall budget exhausted; restarting through supervisor\n";
             exitCode = 1;
             break;
+        }
+        const auto restartStep = experimentalRestart ? afeRestart.Next(stream, loopNow, exhausted) :
+            himax::AfeRestart::Step::None;
+        if (restartStep == himax::AfeRestart::Step::Fallback) {
+            std::cerr << "In-process AFE restart failed/exhausted; falling back to supervisor\n";
+            exitCode = 1;
+            break;
+        }
+        if (restartStep == himax::AfeRestart::Step::Request) {
+            if (!profileSelected && !selectProfile()) return 1;
+            // Preserve the exact policy-decision clock, including time spent
+            // selecting initial identity before the actual ioctl.
+            const uint64_t requestedNs = loopNow;
+            ++restartRequests;
+            const bool ok = capture.Restart(afeRestart.Epoch(), afeRestart.Sequence());
+            const int error = ok ? 0 : errno;
+            const uint64_t completedNs = NowNs();
+            if (recordingActive()) {
+                himax::SessionEvent event;
+                event.kind = himax::SessionKind::Restart;
+                event.hostTimeNs = requestedNs;
+                event.restart = {completedNs, afeRestart.Epoch(), afeRestart.Sequence(), error};
+                recordEvent(event);
+            }
+            if (afeRestart.Result(error, completedNs)) {
+                ++restartScheduled;
+                // Fence completed old buffers immediately; DQEVENT is a
+                // separate queue and may not have been drained yet.
+                stream.State({HX_RAW_ABI_VERSION, 0, afeRestart.Epoch()}, completedNs);
+                solver->OnAfeSos();
+                solver->OnAfeStopped();
+                afeStarted = false;
+                rearmPending = false;
+                readMode.Reset();
+                if (!input.Release()) return 1;
+                std::cerr << "AFE reconstruction scheduled; epoch=" << afeRestart.Epoch()
+                          << " after_sequence=" << afeRestart.Sequence() << " (not recovered)\n";
+            } else {
+                std::cerr << "AFE reconstruction request rejected: " << std::strerror(error) << '\n';
+                if (error != ESTALE && error != EAGAIN && error != EBUSY) {
+                    exitCode = 1;
+                    break;
+                }
+            }
         }
         if (recovery == himax::ProducerRecovery::Step::Rearm) {
             ++rearmRequests;
@@ -359,7 +446,9 @@ int main(int argc, char** argv) {
         if (pending.revents & POLLPRI) {
             hx_raw_state state{};
             while (capture.Event(state)) {
+                if (!afeRestart.Allows(state)) continue;
                 if (!stream.State(state, NowNs())) continue;
+                afeRestart.State(state);
                 if (recordingActive()) {
                     himax::SessionEvent event;
                     event.kind = himax::SessionKind::State;
@@ -374,6 +463,7 @@ int main(int argc, char** argv) {
                     solver->OnAfeStopped();
                     afeStarted = false;
                 }
+                if (state.running && !profileSelected && !selectProfile()) return 1;
             }
         }
         if (!capture.Error().empty()) {
@@ -391,38 +481,19 @@ int main(int argc, char** argv) {
         }
         ++frames;
         const uint64_t now = NowNs();
-        if (!stream.Accept(*packet, now)) {
+        if (afeRestart.Waiting() &&
+            afeRestart.Next(stream, now, false) == himax::AfeRestart::Step::Fallback) {
+            std::cerr << "AFE reconstruction data deadline expired\n";
+            exitCode = 1;
+            break;
+        }
+        if (!afeRestart.Allows(*packet) || !stream.Accept(*packet, now)) {
             ++stale;
             continue;
         }
         if (packet->epoch != epoch || !afeStarted) {
             if (rearmPending && packet->epoch != rearmEpoch) rearmPending = false;
-            // STREAMON while the panel is off does not read OTP. Only a
-            // running epoch proves that hardware initialization attempted it.
-            if (!capture.RefreshInfo()) {
-                std::cerr << capture.Error() << '\n';
-                return 1;
-            }
-            if (autoProject) {
-                project = Solvers::Tsa::ResolvePanelProjectId(capture.Info().project_id);
-                if (project != capture.Info().project_id)
-                    std::cerr << "OTP unavailable; using upstream fallback " << project << '\n';
-            }
-            if ((profileSelected && project != solver->PanelProjectId()) ||
-                !solver->SetPanelProjectId(project)) {
-                std::cerr << "Panel project changed within the capture session\n";
-                return 1;
-            }
-            profileSelected = true;
-            if (recorder && !recordingHeaderWritten) {
-                himax::SessionEvent event;
-                event.kind = himax::SessionKind::Begin;
-                std::copy(project.begin(), project.end(), event.project.begin());
-                event.coordinateFlags = capture.Info().coordinate_flags;
-                event.observe = observe;
-                recordEvent(event);
-                recordingHeaderWritten = true;
-            }
+            if (!selectProfile()) return 1;
             if (!observe && !input.Release()) return 1;
             solver->OnAfeStopped();
             if (packet->flags & HX_RAW_FRAME_SOS) solver->OnAfeSos();
@@ -449,6 +520,7 @@ int main(int argc, char** argv) {
         const bool wasResetRequested = frameHealth.ResetRequested();
         bool requestReset = frameHealth.Observe(error, fromRearm);
         if (error != himax::FrameError::None) {
+            if (experimentalRestart) afeRestart.Frame(*packet, now, false);
             if (emptyRearm) {
                 ++emptyRearms;
                 std::cerr << "Empty producer poll; epoch=" << packet->epoch
@@ -489,6 +561,11 @@ int main(int argc, char** argv) {
                 recordedFrame->digest = himax::ContactDigest(*frame);
             }
             requestReset = solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kSos;
+            if (experimentalRestart && afeRestart.Frame(*packet, now, !requestReset)) {
+                ++restartRecovered;
+                std::cerr << "Valid master/AFE data received after in-process reconstruction; epoch="
+                          << packet->epoch << " (touch quality not yet verified)\n";
+            }
             if (!requestReset && !observe && report) {
                 size_t count = 0;
                 for (const auto& t : frame->touch.output.contacts) {
@@ -536,7 +613,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        if (requestReset && !observe) {
+        if (requestReset && !observe && !afeRestart.Waiting()) {
             if (!input.Release()) return 1;
             ++resetRequests;
             const bool ok = capture.Command(epoch, packet->sequence, HX_RAW_RESET, 0);

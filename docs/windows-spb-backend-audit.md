@@ -721,3 +721,42 @@ NRestarts=0；启动镜像、SPI/GPI 父设备和 Android 未修改。现有默�
 顺序、有界等待 running/new epoch/首份有效帧、旧缓冲拒绝和 `ESTALE/EAGAIN/ENOTTY`
 退路，再受控试载。正常启动重置测试不能证明真实 producer stall 已恢复；也不能
 把本接口的代码/离线门控通过写成同进程恢复移植已完成。
+
+### 同进程恢复的用户态候选与收尾边界
+
+随后接入显式 `--experimental-restart`，不是默认服务配置。它独立于实验 producer
+kick：只开 restart 在四秒预算后申请 +4，两者都开则在原 kick 预算耗尽后申请。
+接受后按 `OnAfeSos → OnAfeStopped → input.Release` 停止当前链路，本地立即 fence
+旧 epoch，避免 V4L2 的状态和 buffer 两条队列不同步时继续求解旧数据。新 epoch
+沿用同一 core，正常 `OnAfeStarted`，raw 和 AFE status 可用后才统计 `valid_after`。
+受理、running event、有效数据和触控质量四者没有合并成一个“恢复成功”标记。
+
+Linux 边界：竞态最多一秒、100 ms 退避；受理后等待新数据最多十五秒；连续最多
+三次受理，三十秒稳定有效数据才补回预算。等待中不嵌套 frame-bound reset，
+ENOTTY/致命错误立即退出给 supervisor，保留 250 ms input-only release。
+受理期间遇到真实 panel off 也可能等十五秒后退出，因为现有 stop event 未区分
+关屏和重建原因。这些预算不是 Windows 原样参数，不把额外门控称为等价实现。
+
+fresh sidecar 现写 HXSE 3 recovery，Begin 显式记录实验开关，独立 J 记录保存
+决策/完成时间、精确 epoch/sequence 和 errno；兼容读取旧 HXSE 1。回放验证
+token、重试/等待状态、SOS/stop/start 和原始算法输出。它不独立证明为什么原
+producer 预算耗尽，也不模拟真实 SPI 静默门控。live 窗口仍无 checkpoint。
+
+验证不仅是重新拼一条状态机：直接编译执行生产 `touchd` main，保留真实 TSACore、
+异步 recorder 与 session replay，只替换 Capture/input/桌面边界与主线程时钟。
+十种场景覆盖正常、默认不开启、已有触点停帧、无首帧、两次 EAGAIN、首五帧坏包、
+七次 no-reset kick 耗尽、ENOTTY、永不 ready 和持续坏包；一次 Open/Start、旧包/
+旧 ready 事件隔离、有界退出、致命拒绝后不再 poll 均有断言。成功场景实际 daemon
+写出的会话可严格回放。独立真实 solver 会话另覆盖 token/时间/策略元数据破坏，
+旧 HXSE 1 兼容保留；policy 测试覆盖纳秒边界、重复故障和稳定预算。
+
+最终候选 Release 57/57、完整 ASan/UBSan 57/57（108.83 秒）、legacy 回归及
+diff 检查通过；日志在 `artifacts/in-process-restart/verified-*`。本轮内核源码
+没有改变，配套模块仍为 d75f89c 的服务器产物。新 daemon/replay 仅本地构建，
+没有替换本机常驻模块或程序、改 unit/initramfs 或 Android。常驻仍为 PID=2275950、
+NRestarts=0，磁盘哈希与上一部署一致。
+
+本检查点之后优先进行实际部署和故障/PM/手势验收，而非继续扩展离线框架。
+完成边界是本机、固定上游 v1.4.0 的已启用手指路径；用户要求关闭的笔继续关闭，
+Android 新架构单列。跳频/扫描率固件完成未证实的项目仍需查清，不能被更多 host
+测试替代。完整移植尚未完成，但后续工作不再以不断添加参考模型作为主要进度。

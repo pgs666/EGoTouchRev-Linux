@@ -46,7 +46,7 @@ Linux 有两处宿主方向适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys
 可选用户态运行窗口采集不新增内核 ioctl，不另开 V4L2 consumer，也不 reset AFE。
 默认无录制管理线程/队列；显式配置后由 SIGUSR2 触发限时窗口。其 HXRC raw 格式
 不变，但侧车标注 `HXSE 2 live-no-checkpoint`，严格 session replay 拒绝中途状态；
-fresh 录制仍为 HXSE 1。配置、文件和验证边界见
+fresh 录制现写 HXSE 3 recovery（继续读取旧 HXSE 1）。配置、文件和验证边界见
 [运行中窗口录制](../userspace/README.md#不重置当前触控的运行中窗口录制)。
 `c00844e` 已在本机完成两个无重置窗口（560/2 帧）的首轮验证，并安装用户态程序；
 测试配置已移除，默认仍关闭录制。尚无有触点录制的实机时延/手势质量验收。
@@ -61,6 +61,7 @@ fresh 录制仍为 HXSE 1。配置、文件和验证边界见
 | `VIDIOC_HIMAX_INFO` | ABI、网格 40×60、payload 长度、OTP project ID、固件坐标变换 |
 | `VIDIOC_HIMAX_COMMAND` | ClearStatus、频点、扫描率、IDLE、calibration、reset |
 | `VIDIOC_HIMAX_REARM_TAGGED` | 带明确来源的主动补读；旧模块不支持时返回 ENOTTY |
+| `VIDIOC_HIMAX_RESTART` | 精确 epoch/sequence 的静默 producer 异步重建，允许首帧未到；受理不等于恢复 |
 | `V4L2_EVENT_HIMAX_STATE` | running/epoch；即使屏灭不再产帧也能及时释放触点 |
 
 AFE 初始化重试（已部署普通模块）：STREAMON 或恢复 work 每次只尝试一次，失败后发布
@@ -199,13 +200,14 @@ daemon 在打开设备和 STREAMON 前建立接收器，并向抽象地址
 退出先释放输入，再排空队列；异常退出、丢事件或缺少尾记录均不能通过严格回放。
 未启用录制时没有队列、写盘线程、raw 诊断复制或输出摘要计算。
 
-HXSE v1 为 ASCII、十进制整数、每行一条记录，解析限长 1023 字节：
+fresh HXSE v3 为 ASCII、十进制整数、每行一条记录，解析限长 1023 字节：
 
 ```text
-HXSE 1
-B PROJECT_ID coordinate_flags observe
+HXSE 3 recovery
+B PROJECT_ID coordinate_flags observe experimental_restart
 S host_ns epoch running
 R host_ns
+J decision_ns completed_ns epoch sequence errno
 F index host_ns rotation report afe_status ctrl contact_digest action_count [action parameter result]...
 END frame_count dropped errno
 ```
@@ -215,6 +217,15 @@ END frame_count dropped errno
 IRQ 时间戳；被 transport 时序策略丢弃的旧帧不进入求解或录制。`S` 是主线程实际处理
 的有效生命周期事件；`R` 是无新帧 250 ms 的输入释放，不复位算法 mapper。
 `F` 的方向为 TSACore 的 `-1/0..3`；`-1` 表示宿主尚未获得方向。
+`J` 是无新帧时的独立重建请求，不伪造 raw 包或 frame-bound action。
+记录 policy 决策时间、ioctl 完成时间、精确 producer token 和返回 errno；0 只表示
+scheduled。只有 `B` 明确开启实验恢复且非 observe 时才接受；失败请求不清 solver，
+受理请求按 `OnAfeSos → OnAfeStopped` 隔离旧流，后续新 epoch 重新 `OnAfeStarted`。
+生命周期、ready event、SPI 完整包和触控质量恢复仍是不同层次的证据。
+
+继续支持旧 `HXSE 1`：其 `B` 没有实验标志、也不允许 `J`。新 writer 总是使用 v3，
+旧 reader 不能假装理解新恢复流程。运行中窗口仍用 v2/no-checkpoint，可能包含
+`J` 供人工诊断，但严格 replay 继续拒绝它，而不推测中途 solver 状态。
 
 `action` 使用 `hx_raw_action` ABI，`parameter` 为原始参数，`result=0` 表示命令
 传输成功、正数为 Linux errno、`-1` 表示观察模式没有执行。后续 raw 状态仍是固件
@@ -227,6 +238,9 @@ report/status/ctrl/触点摘要。只有收到 `END`、两文件数量匹配、d
 至少有一帧实际求解成功，才报告 `live_output_verified=1`。正常采集包含完整初始化
 历史；它不是既有进程的中途状态 checkpoint，也不能把跨编译器浮点差异当作同一输出。
 录制没有逐帧 fsync，完整性检查不承诺掉电持久性。
+重建回放验证请求 token、结果范围/时间、重试与等待预算、旧流隔离和算法输出。
+它不重放实际 SPI，也不独立证明请求前的 kernel 静默门控或 producer retry 预算
+为何耗尽；这些由生产内核门控/host policy 测试及真实故障采集分别提供证据。
 
 ## 队列和时序
 
@@ -349,9 +363,22 @@ STREAMOFF 和 shutdown 阻止后台硬件访问；新 AFE 启动时重新安排�
 只有 `REARM + AllZero` 被解释为“轮询无数据”：不送入 solver、不更新 baseline、
 不推进 IRQ 错误阈值，也不清已有真实错误；pending reset 不被它取消。
 REARM 的 checksum、filler、长度错误仍按真实错误处理，有效 REARM 仍正常解算。
-raw HXRC/HXST 与 fresh HXSE 1 侧车配对读取都保留来源；strict replay 用同一规则。
+raw HXRC/HXST 与 fresh HXSE 1/3 侧车配对读取都保留来源；strict replay 用同一规则。
 raw `--hxst` 单独列出 `empty_rearms`，不把它们称为有效帧；没有有效帧仍不能回放成功。
 旧文件不含来源标记时保持原错误语义，不能根据时间接近就给它补造 provenance。
+
+同进程重建目前需要显式 `--experimental-restart`，独立于 `--experimental-rearm`。
+未开启时仍按四秒 stall deadline 退出给 supervisor；只开 restart 时在四秒耗尽后
+调用 +4；两者都开时在已有 producer kick 预算耗尽后调用 +4。旧模块 ENOTTY 或
+其他致命请求错误仍退出给 supervisor。该选项不是重新启用默认自动 kick。
+
+重建受理立即停止 solver/input，并在事件队列尚未排空时就 fence 旧 epoch；
+无效新帧/SOS 数据和 running event 均不能记为恢复。新 epoch 的 raw 与 AFE status
+都可用才结束等待。Linux 额外设置竞态重试一秒、100 ms 退避、受理后十五秒等数据、
+最多连续三次受理；连续三十秒好数据且无过长间隔后才恢复预算。它们是本地边界，
+不是 Windows 原样参数。等待期间不嵌套发 frame-bound reset，不因更多坏帧无限
+重置等待时间；既有 250 ms input-only release 保留。该路径尚未实机故障验收，
+默认 unit 不加选项；当前安装状态见 SPB 审计，不将离线测试当作部署成功。
 
 ## Linux 与 Android
 
