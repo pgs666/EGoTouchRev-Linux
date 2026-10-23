@@ -55,6 +55,7 @@ extern \"C\" int hx_dispatch_windows(hx_dispatch_device* device, u32 action, u8 
     case HX_RAW_FORCE_RATE: result = afe.ForceToScanRate(parameter); break;
     case HX_RAW_ENTER_IDLE: result = afe.EnterIdle(parameter); break;
     case HX_RAW_CALIBRATE: result = afe.StartCalibration(parameter); break;
+    case HX_RAW_FORCE_EXIT_IDLE: if (!parameter) result = afe.ForceExitIdle(); break;
     }
     return result ? 0 : -1;
 }

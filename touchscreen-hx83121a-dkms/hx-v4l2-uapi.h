@@ -58,6 +58,9 @@ enum hx_raw_action {
 	HX_RAW_ENTER_IDLE,
 	HX_RAW_CALIBRATE,
 	HX_RAW_RESET,
+	/* Additive ABI v2 action; old RESET remains 5. Manual command only. */
+	HX_RAW_FORCE_EXIT_IDLE,
+	HX_RAW_ACTION_COUNT,
 };
 
 /* Narrow hardware commands only; no arbitrary AHB/firmware access. */

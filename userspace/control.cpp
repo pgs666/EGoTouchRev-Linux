@@ -67,6 +67,7 @@ bool Control::Receive(Command& command) {
         if (text == "status") command = Command::Status;
         else if (text == "calibrate") command = Command::Calibrate;
         else if (text == "reset") command = Command::Reset;
+        else if (text == "wake") command = Command::Wake;
     }
     return true;
 }
@@ -77,40 +78,41 @@ void Control::Reply(std::string_view text) const {
                  reinterpret_cast<const sockaddr*>(&m_peer), m_peerLength);
 }
 
-void Control::CalibrationSent(uint64_t epoch, uint64_t sequence, uint64_t now) {
-    m_calibrationEpoch = epoch;
-    m_calibrationSequence = sequence;
-    m_calibrationSentNs = now;
-    m_calibrationPending = true;
-    m_calibrationState = "pending";
+void Control::Operation::Sent(uint64_t newEpoch, uint64_t newSequence, uint64_t now) {
+    epoch = newEpoch;
+    sequence = newSequence;
+    sentNs = now;
+    pending = true;
+    state = "pending";
 }
 
-void Control::CalibrationFailed() {
-    m_calibrationPending = false;
-    m_calibrationState = "failed";
+void Control::Operation::Failed() {
+    pending = false;
+    state = "failed";
 }
 
-bool Control::CalibrationStopped() {
-    if (!m_calibrationPending) return false;
-    m_calibrationPending = false;
-    m_calibrationState = "interrupted";
+bool Control::Operation::Stop() {
+    if (!pending) return false;
+    pending = false;
+    state = "interrupted";
     return true;
 }
 
-bool Control::CalibrationFrame(uint64_t epoch, uint64_t sequence, bool done) {
-    if (!m_calibrationPending) return false;
-    if (epoch != m_calibrationEpoch) return CalibrationStopped();
-    if (!done || sequence <= m_calibrationSequence) return false;
-    m_calibrationPending = false;
-    m_calibrationState = "done";
+bool Control::Operation::Frame(uint64_t frameEpoch, uint64_t frameSequence, uint64_t sampleNs, bool done) {
+    if (!pending) return false;
+    if (frameEpoch != epoch) return Stop();
+    // The frame-bound ioctl permits a small producer lead. A queued frame
+    // can therefore have a newer sequence while predating this command.
+    if (!done || frameSequence <= sequence || sampleNs < sentNs) return false;
+    pending = false;
+    state = "done";
     return true;
 }
 
-bool Control::Tick(uint64_t now) {
-    if (!m_calibrationPending || now < m_calibrationSentNs ||
-        now - m_calibrationSentNs < 8000000000ULL) return false;
-    m_calibrationPending = false;
-    m_calibrationState = "timeout";
+bool Control::Operation::Tick(uint64_t now) {
+    if (!pending || now < sentNs || now - sentNs < 8000000000ULL) return false;
+    pending = false;
+    state = "timeout";
     return true;
 }
 

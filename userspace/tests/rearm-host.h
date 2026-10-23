@@ -43,7 +43,7 @@ struct himax_ts_data {
     struct list_head buffers;
     int buffer_lock;
     u64 epoch, sequence, last_frame_ns, last_rearm_ns, last_poll_done_ns;
-    u64 last_command_ns[HX_RAW_RESET + 1];
+    u64 last_command_ns[HX_RAW_ACTION_COUNT];
     u64 read_duration_ns;
     unsigned read_errors, frame_flags;
     unsigned char event_buf[HX_RAW_PAYLOAD_SIZE];

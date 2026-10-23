@@ -516,9 +516,16 @@ int himax_set_charger(struct himax_ts_data *ts, bool connected)
 
 int himax_afe_command(struct himax_ts_data *ts, u32 action, u32 parameter)
 {
-	static const u8 commands[] = { 0x06, 0x0c, 0x0e, 0x0a, 0x01 };
+	static const u8 commands[] = {
+		[HX_RAW_CLEAR_STATUS] = 0x06,
+		[HX_RAW_FORCE_FREQ] = 0x0c,
+		[HX_RAW_FORCE_RATE] = 0x0e,
+		[HX_RAW_ENTER_IDLE] = 0x0a,
+		[HX_RAW_CALIBRATE] = 0x01,
+		[HX_RAW_FORCE_EXIT_IDLE] = 0x0b,
+	};
 
-	if (action >= ARRAY_SIZE(commands))
+	if (action >= ARRAY_SIZE(commands) || !commands[action])
 		return -EINVAL;
 	if (action == HX_RAW_CLEAR_STATUS) {
 		if (parameter != 4 && parameter != 8)

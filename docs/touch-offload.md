@@ -397,11 +397,15 @@ Linux 服务和 udev 安装、采集/回放及恢复命令见
 [`userspace/README.md`](../userspace/README.md)。内核需要 uinput、video/vb2-vmalloc 和
 当前 DRM panel follower 支持。
 
-运行中操作由 `himaxctl status|calibrate|reset` 交给 daemon，在同一个 V4L2 owner/
+运行中操作由 `himaxctl status|calibrate|reset|wake` 交给 daemon，在同一个 V4L2 owner/
 求解线程执行。默认 service 的 `--control` 监听 root 专用 RuntimeDirectory 下的
 Unix datagram socket；不增加采帧线程。校准只确认命令传输，reset 只确认调度，
 用户通过后续帧/epoch 验证结果；`--wait` 在客户端等待校准完成标记或新 epoch 的
-有效 raw/AFE 数据，超时或中断会返回失败。外部命令写入 service journal，strict session
+有效 raw/AFE 数据，超时或中断会返回失败。`wake` 使用新增动作值 6，原 RESET=5
+和 ioctl 布局保持不变；它发送 `0x0b, 0`，不接入自动恢复。`wake --wait` 只在同一
+epoch、命令发送后采集的新 active 帧出现时成功，不从传输返回值推断 IC 已退出 IDLE。
+校准和 wake 确认同时检查帧序与采帧时间，避免用命令前已排队的帧充当回执。
+外部命令写入 service journal，strict session
 仍按后续 raw、SOS 与实际生命周期事件重建输出，不重放这些操作的物理 SPI。
 
 Android 还需要 native vendor daemon、init 生命周期、SELinux、uinput 设备映射、

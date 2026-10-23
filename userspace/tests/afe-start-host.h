@@ -25,7 +25,7 @@ struct himax_ts_data {
     uint64_t startup_deadline_ns;
     unsigned start_test_failures;
     struct hx_raw_charger_state charger;
-    uint64_t epoch, sequence, last_command_ns[HX_RAW_RESET + 1];
+    uint64_t epoch, sequence, last_command_ns[HX_RAW_ACTION_COUNT];
     uint64_t last_frame_ns, last_poll_done_ns;
     char project_id[16];
     bool otp_tried, irq_enabled;

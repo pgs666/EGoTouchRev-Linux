@@ -17,6 +17,7 @@ sudo himaxctl calibrate
 sudo himaxctl reset
 sudo himaxctl calibrate --wait
 sudo himaxctl reset --wait
+sudo himaxctl wake --wait
 ```
 
 `status` 查询产帧状态、epoch/sequence、错误与当前触点数量。`calibrate` 发送 AFE
@@ -32,6 +33,16 @@ sudo himaxctl reset --wait
 完成标记满八秒为 timeout，AFE 停止或重建会中断尚未完成的请求。
 `valid_epoch/valid_sequence` 与普通 epoch/sequence 分开，避免把初始化完成通知
 或无效包误认成 reset 已恢复数据。IDLE 下校准反馈可能要等下一个慢速帧周期。
+
+`wake` 对应 Windows 的外部 `ForceExitIdle`：发送 master 邮箱命令 `0x0b, 0`，
+不执行硬件 reset 或重建 solver，也不会点亮屏幕。需要面板已开启；旧模块可能
+返回 EINVAL。`wake --wait` 等待同一 epoch、命令之后的新有效 active 帧，`status`
+中的 `wake` 保存 none/pending/done/timeout/interrupted/failed；八秒未确认则超时，
+关屏或 reset 会中断等待。它不强制保持 active，之后仍由原版算法决定是否进入 IDLE，
+自动恢复也不调用它。命令发送成功不会提前清除 IDLE 等待许可，以实际帧尾为准。
+已在本机从 IDLE 验证 `wake --wait`，确认新 active 帧后同一 PID/epoch 继续运行，
+校准等待也再次确认完成。配套模块及两份测试 initramfs 已更新；新镜像未冷启动。
+备份与实机记录：`deploy-logs/v4l2-20261024-031052-By3NgmvP/`。
 
 读帧恢复使用 `VIDIOC_HIMAX_REARM_TAGGED`，普通运行约 200 ms、已允许 IDLE
 长等待时约 3600 ms 没有进展后申请一次无复位补读；重试预算耗尽后才申请 AFE

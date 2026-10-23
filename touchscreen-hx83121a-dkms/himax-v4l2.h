@@ -58,7 +58,7 @@ struct himax_ts_data {
 	u64 last_frame_ns;
 	u64 last_poll_done_ns;
 	u64 last_rearm_ns;
-	u64 last_command_ns[HX_RAW_RESET + 1];
+	u64 last_command_ns[HX_RAW_ACTION_COUNT];
 	u32 frame_flags;
 	u32 coordinate_flags;
 	char project_id[16];

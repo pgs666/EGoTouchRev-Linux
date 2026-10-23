@@ -11,12 +11,12 @@ import time
 
 def main():
     parser = argparse.ArgumentParser(description="Control the running Himax touch daemon")
-    parser.add_argument("command", choices=("status", "calibrate", "reset"))
+    parser.add_argument("command", choices=("status", "calibrate", "reset", "wake"))
     parser.add_argument("--wait", action="store_true",
-                        help="wait for a calibration completion marker or a new running reset epoch")
+                        help="wait for calibration, reset data, or an active AFE frame after wake")
     args = parser.parse_args()
     if args.wait and args.command == "status":
-        parser.error("--wait applies to calibrate or reset")
+        parser.error("--wait applies to calibrate, reset or wake")
     if os.geteuid() != 0:
         parser.error("Run with sudo; the control socket is root-only")
     # An abstract return address avoids creating or cleaning client files.
@@ -49,12 +49,14 @@ def main():
                     if not response.startswith("OK "):
                         break
                     state = fields(response)
-                    if args.command == "calibrate":
-                        if state.get("calibration") == "done":
-                            print("OK calibration completion marker observed")
+                    if args.command in ("calibrate", "wake"):
+                        key = "calibration" if args.command == "calibrate" else "wake"
+                        if state.get(key) == "done":
+                            print("OK calibration completion marker observed" if key == "calibration"
+                                  else "OK newer active AFE frame observed after wake")
                             return 0
-                        if state.get("calibration") in ("timeout", "interrupted", "failed"):
-                            print("ERR calibration " + state["calibration"], file=sys.stderr)
+                        if state.get(key) in ("timeout", "interrupted", "failed"):
+                            print(f"ERR {key} {state[key]}", file=sys.stderr)
                             return 1
                     elif (state.get("running") == "1" and int(state["epoch"]) > prior_epoch
                           and state.get("valid_epoch") == state["epoch"]

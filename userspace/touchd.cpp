@@ -352,7 +352,7 @@ int main(int argc, char** argv) {
                 recordEvent(event);
             }
             if (!state.running || state.epoch != epoch) {
-                if (control) control->CalibrationStopped();
+            if (control) control->AfeStopped();
                 rearmPending = false;
                 readMode.Reset();
                 if (!observe && !input.Release()) return false;
@@ -374,7 +374,7 @@ int main(int argc, char** argv) {
         afeStarted = false;
         readMode.Reset();
         rearmPending = false;
-        if (control) control->CalibrationStopped();
+        if (control) control->AfeStopped();
         if (recordingActive()) {
             himax::SessionEvent event;
             event.kind = himax::SessionKind::State;
@@ -393,7 +393,8 @@ int main(int argc, char** argv) {
     while (!stopped) {
         const uint64_t loopNow = NowNs();
         if (control && control->Tick(loopNow))
-            std::cerr << "Operator calibration timeout: no completion marker observed in eight seconds\n";
+            std::cerr << "Operator command timeout: calibration=" << control->CalibrationState()
+                      << " wake=" << control->WakeState() << '\n';
         if (liveCapture) liveCapture->Tick(loopNow);
         if (captureRequested) {
             captureRequested = 0;
@@ -463,7 +464,7 @@ int main(int argc, char** argv) {
                 stream.State({HX_RAW_ABI_VERSION, 0, afeRestart.Epoch()}, completedNs);
                 solver->OnAfeSos();
                 solver->OnAfeStopped();
-                if (control) control->CalibrationStopped();
+                if (control) control->AfeStopped();
                 afeStarted = false;
                 rearmPending = false;
                 readMode.Reset();
@@ -573,31 +574,39 @@ int main(int argc, char** argv) {
                         " last_idle_result=" + std::to_string(idleRequestResult) +
                         " restart_waiting=" + std::to_string(afeRestart.Waiting()) +
                         " calibration=" + control->CalibrationState() +
+                        " wake=" + control->WakeState() +
                         " calibration_done_frames=" + std::to_string(calibrationFrames));
                 } else if (command == himax::Control::Command::Invalid) {
                     control->Reply("ERR invalid command");
                 } else if (!stream.Running() || afeRestart.Waiting()) {
                     control->Reply("ERR AFE is stopped or reconstruction is pending");
+                } else if (command == himax::Control::Command::Wake && control->WakePending()) {
+                    control->Reply("ERR wake is pending");
                 } else if (command == himax::Control::Command::Calibrate &&
                            (control->CalibrationPending() ||
                             (solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kCalibDone))) {
                     control->Reply("ERR calibration is pending or its previous marker is being acknowledged");
                 } else {
                     const bool reset = command == himax::Control::Command::Reset;
+                    const bool wake = command == himax::Control::Command::Wake;
                     const bool ok = reset && !stream.Sequence() ?
                         capture.Restart(stream.Epoch(), 0) :
                         capture.Command(stream.Epoch(), stream.Sequence(),
-                                        reset ? HX_RAW_RESET : HX_RAW_CALIBRATE, 0);
+                                        reset ? HX_RAW_RESET :
+                                        wake ? HX_RAW_FORCE_EXIT_IDLE : HX_RAW_CALIBRATE, 0);
                     const int error = ok ? 0 : errno;
-                    std::cerr << "Operator " << (reset ? "reset" : "calibrate")
+                    std::cerr << "Operator " << (reset ? "reset" : wake ? "wake" : "calibrate")
                               << " epoch=" << stream.Epoch() << " sequence=" << stream.Sequence()
                               << " transport=" << error << '\n';
                     if (!ok) {
-                        if (!reset) control->CalibrationFailed();
+                        if (wake) control->WakeFailed();
+                        else if (!reset) control->CalibrationFailed();
                         control->Reply(std::string("ERR ") + std::strerror(error));
                     } else {
-                        if (!reset) control->CalibrationSent(stream.Epoch(), stream.Sequence(), NowNs());
+                        if (wake) control->WakeSent(stream.Epoch(), stream.Sequence(), NowNs());
+                        else if (!reset) control->CalibrationSent(stream.Epoch(), stream.Sequence(), NowNs());
                         control->Reply(reset ? "OK reset scheduled; confirm a new running epoch with status" :
+                            wake ? "OK wake command sent; an active AFE frame is pending" :
                             "OK calibration command sent; firmware completion is pending");
                         if (reset) {
                             stopAcceptedReset(stream.Epoch());
@@ -694,10 +703,15 @@ int main(int argc, char** argv) {
             solveMax = std::max(solveMax, solveTime);
             idleFrames += !!(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle);
             calibrationFrames += !!(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kCalibDone);
-            if (control && control->CalibrationFrame(packet->epoch, packet->sequence,
+            if (control && control->CalibrationFrame(packet->epoch, packet->sequence, packet->timestamp_ns,
                     (solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kCalibDone) &&
                     !(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kSos)))
                 std::cerr << "Operator calibration status=" << control->CalibrationState()
+                          << " epoch=" << packet->epoch << " sequence=" << packet->sequence << '\n';
+            if (control && control->WakeFrame(packet->epoch, packet->sequence, packet->timestamp_ns,
+                    !(solver->LastAfeStatus() &
+                      (Solvers::Tsa::AfeStatus::kIdle | Solvers::Tsa::AfeStatus::kSos))))
+                std::cerr << "Operator wake status=" << control->WakeState()
                           << " epoch=" << packet->epoch << " sequence=" << packet->sequence << '\n';
             frequencyFrames += !!(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kFreqShiftDone);
             if (!solver->IsAvailable()) {

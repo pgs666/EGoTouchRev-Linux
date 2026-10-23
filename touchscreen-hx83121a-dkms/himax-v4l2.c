@@ -93,6 +93,7 @@ static int himax_start_afe(struct himax_ts_data *ts)
 	/* A new epoch does not grant permission for another immediate reset. */
 	memset(ts->last_command_ns, 0,
 	       HX_RAW_RESET * sizeof(ts->last_command_ns[0]));
+	ts->last_command_ns[HX_RAW_FORCE_EXIT_IDLE] = 0;
 	himax_state_event(ts, false);
 	ts->charger.applied_valid = false;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
@@ -529,7 +530,7 @@ static long himax_private_ioctl(struct file *file, void *priv,
 		goto out;
 	}
 	if (c->size != sizeof(*c) || c->version != HX_RAW_ABI_VERSION ||
-	    c->reserved[0] || c->reserved[1] || c->action > HX_RAW_RESET ||
+	    c->reserved[0] || c->reserved[1] || c->action >= HX_RAW_ACTION_COUNT ||
 	    (c->action == HX_RAW_RESET && c->parameter)) {
 		ret = -EINVAL;
 		goto out;

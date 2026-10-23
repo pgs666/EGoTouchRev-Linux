@@ -47,9 +47,11 @@ int main() {
         Vector{Action::ForceToScanRate, HX_RAW_FORCE_RATE, 0x0e},
         Vector{Action::EnterIdle, HX_RAW_ENTER_IDLE, 0x0a},
         Vector{Action::StartCalibration, HX_RAW_CALIBRATE, 0x01},
+        Vector{static_cast<Action>(255), HX_RAW_FORCE_EXIT_IDLE, 0x0b},
     };
     for (const auto& v : vectors) {
-        Check(himax::HardwareAction(v.solver) == v.host, "actual solver-to-host mapping");
+        if (v.host != HX_RAW_FORCE_EXIT_IDLE)
+            Check(himax::HardwareAction(v.solver) == v.host, "actual solver-to-host mapping");
         for (unsigned value = 0; value < 256; ++value) {
             const bool allowed = v.host == HX_RAW_CLEAR_STATUS ? value == 4 || value == 8 :
                                  v.host == HX_RAW_FORCE_FREQ ? value < 2 : value == 0;
@@ -61,7 +63,7 @@ int main() {
                 w.idle_retry = priorIdle;
                 himax::FrameReadMode readMode;
                 readMode.Action(HX_RAW_ENTER_IDLE, priorIdle);
-                const int nr = hx_dispatch_native(&n, himax::HardwareAction(v.solver), value);
+                const int nr = hx_dispatch_native(&n, v.host, value);
                 const int wr = hx_dispatch_windows(&w, v.host, value);
                 readMode.Action(v.host, nr == 0);
                 if (!allowed) {
@@ -104,6 +106,6 @@ int main() {
     }
     Check(himax::HardwareAction(static_cast<Action>(255)) == HX_RAW_RESET,
           "unknown solver action sentinel remains rejected by host");
-    std::cout << "Actual solver/native/Windows AFE dispatch: five actions, byte-domain parameters, "
+    std::cout << "Actual solver/native/Windows AFE dispatch: six actions, byte-domain parameters, "
                  "five slots, transport faults, disconnected Windows and invalid UAPI passed\n";
 }
