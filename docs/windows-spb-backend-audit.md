@@ -550,3 +550,46 @@ plateau 修正版 `04f904d`。两份 initramfs 未改，不影响当前用户的
 本实现按每个 packet 当场消费启动队列，没有新建 Windows 的两帧 KMDF FIFO，
 也没有启用 slave，不能称双通道/队列调度完全等价。真实 STREAMON、explicit reset、
 DPMS/睡眠取消、启动时手指在场和启动延迟仍需受控试载验收后再部署。
+
+### 普通候选的真实启动、reset 和启动中取消
+
+随后进行了两轮临时试载，均只卸载/加载 Himax 客户端，不碰 SPI/GPI 控制器。
+内核候选仍为上述 `648ef91a…` / `d09d12dc…`，用户态使用已安装的边缘修正版。
+完成后恢复旧客户端；磁盘模块、两个 initramfs、daemon/replay 哈希及控制器 notes
+逐项核对，均未改。没有自动重启、系统 suspend 或显示电源操作。
+
+第一轮 `deploy-logs/startup-drain-trial-aeuKccJc/`：
+
+- 正常 daemon 会话 869 帧，bad/stale/dropped=0、无实际触点，strict replay
+  869/869 输出一致；默认自动 rearm 关闭，无 reset/stall；
+- opt-in `himax-startup-hardware-test` 新会话后执行三次显式 AFE reset。
+  四个 epoch 分别为 3/4/5/6，每个首个有效帧 sequence=1，每轮连续检查 24 帧并
+  观察到 startup calibration-done suffix；完整 raw 188 帧、无无效或 stale；
+- 第一次从 Open 请求到首个有效数据约 423.9 ms，后三次 reset 请求到首个有效
+  数据约 434.6/434.6/428.8 ms。这包含硬件初始化与用户态等待，不是纯清帧耗时、
+  触摸延迟或系统唤醒延迟；不能比较不同起点的 STREAMON 返回时间与 IRQ 时间；
+- 原有 `--basic` AFE 测试另检查显式校准完成、清校准状态及 IDLE suffix，39 帧
+  全有效；rate0 仍仅有 transport 证据，跳频明确跳过；
+- 六次完成的启动均由 kernel 日志记录 `discarded=3 timeouts=0`。这确认正常 IRQ
+  参与清理，不是超时后固定补读凑数；没有实测超时失败分支。
+
+第二轮 `deploy-logs/startup-cancel-trial-B5iUmFI3/`：
+
+- `--cancel-start` 在读到 stopped epoch=1、未见 running 后立即 STREAMOFF，
+  再等 350 ms，收到更高 epoch 的 stopped，未出现迟到 running。同期 kernel
+  journal 没有任何 `startup master queue` 完成日志；这不是仅检查一个内存 bool；
+- 包括首次 OTP 的 Open→STREAMOFF 约 600.4 ms，取消后的观察约 350.3 ms。
+  STREAMOFF 发生在 STREAMON 返回之后，**不证明硬件初始化事务中途可取消**；
+- 后续新流 + 三次 reset 恢复到 epoch 3/4/5/6，187 帧全有效、stale=0，四轮都
+  看到校准完成。初次有效数据约 439.9 ms，reset 后约 435.1/443.0/429.8 ms；
+- 四次完成记录均为 `discarded=3 timeouts=0`。helper 从未注册为 CTest，也没有
+  通过普通测试自动访问设备；硬件执行的是 Release 构建，sanitizer 仅构建该工具。
+
+两轮健康门控均无新增 Oops/WARN/坏页，taint=4096（OOT）；最后恢复正常服务。
+恢复后 PID=2142318、NRestarts=0，885 帧时 bad=1（all-zero）、stale=0，无触点报告；
+该统计属于恢复后的旧模块，不是候选试载记录，也没有逐帧证据为该错误确定时点。
+工具加入后 Release 52/52 和相关八项 ASan/UBSan 通过；此前候选实现的完整
+sanitizer 52/52（107.52 秒）结果不等于对新硬件工具执行了 sanitizer 实机试验。
+原始 raw/会话与旧模块备份保存在各证据目录。此轮解除了“只有 host 模拟”的正常
+启动/显式 reset/STREAMOFF 证据缺口；真实超时、物理 SPI 错误、系统 PM/DPMS
+取消、手指在场及手势/长期性能仍未验收，不能声称完整恢复策略或移植已完成。

@@ -669,6 +669,22 @@ OTP、calibration/rate best-effort、硬件单次初始化事务保持原策略�
 **未部署此模块**，当前用户态仍是前述边界修复版本；真实启动/取消/手势和延迟
 还需试载，不用离线测试冒充实机完成。
 
+随后已完成普通候选的两轮临时试载，**试载后仍恢复原已安装模块**：
+
+- 869 帧 fresh daemon 会话全部有效、零丢失，strict replay 输出一致；
+- 新的 opt-in `himax-startup-hardware-test DEVICE NEW.hxst` 只在手动执行时访问
+  设备，记录 fresh start 和三次显式 reset 的 raw/epoch/首次有效数据及校准完成。
+  两轮分别 188/187 帧全有效。它不运行 solver，不用 raw 回放冒充实时求解一致；
+- `himax-startup-hardware-test --cancel-start DEVICE` 在只见 stopped epoch 时
+  STREAMOFF，再观察 350 ms 没有迟到 running；kernel 清帧完成日志也未出现。
+  后续重开并三次 reset 正常。取消在 STREAMON 返回后，不能称事务中途取消；
+- 基础 AFE 确认校准/清状态/IDLE，跳频不测，rate0 仍仅传输证据；
+- 正常路径共十次启动清理均为三包消费、零超时。没有主动停 IRQ 或制造 DMA/SPI
+  错误；睡眠、DPMS、手指/掌压在场与实际手势仍未验收；
+- 两轮只换 Himax 客户端，不重载父控制器；无新 kernel fault。旧模块、正常服务、
+  运行与磁盘程序以及两份 initramfs 全部恢复/核对，不持久安装候选。
+  详细记录见 [SPB 启动实测](../docs/windows-spb-backend-audit.md#普通候选的真实启动reset-和启动中取消)。
+
 诊断构建（`HIMAX_AFE_DIAGNOSTICS=1`）另提供仅模块加载时配置的
 `afe_start_failures=0..8`（默认 0、只读参数）。probe 将预算复制到每个设备；每次
 AFE 尝试在 IC 检测/SPI 之前消耗一次并返回 EAGAIN，用于检验真实 workqueue 的
