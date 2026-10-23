@@ -510,3 +510,43 @@ ApplyFrameReadPolicy 和清帧循环，以及实际 ApplyFrameReadPolicy 方法�
 三次 event stack；其时序不等价，不能将目前的常规启动成功视为这一移植项完成。
 后续应将初始化后的帧生产、队列清理与 AFE 就绪发布拆开，并验证超时、取消、
 旧 epoch 帧与 IRQ 竞争；不能在持有 IRQ 所需的 op_lock 时等待 IRQ 来完成清帧。
+
+### 异步 master 清帧候选实现（尚未部署）
+
+上述参考之后，Linux 启动路径已改为原生异步 producer cleanup：
+
+1. reset/OTP/verified raw producer 初始化成功后，仍保持 consumer stopped；
+2. 先打开 IRQ producer，并做一次对应 IntOpen 的完整 master 读取；
+3. 成功交付消耗一次启动读取尝试，不发给 solver；仍有尝试则排队下一次 200 ms
+   超时任务，释放 op_lock，让正常 IRQ 继续生产和消耗；
+4. 超时先消耗一次尝试，再做一笔对应 IntOpen 的 producer kick；成功数据可立即
+   满足下一次消费。三次尝试耗尽后的 kick 属于后续流，不作为第四次清帧丢掉；
+5. 完成时才发初始 calibration/rate、发布 running 并应用 charger。命令仍为
+   best-effort，不把 transport success 叫作 firmware completion；
+6. cleanup 期间拒绝用户硬件命令/运行时 rearm，启动读取错误不推进正常 IRQ 的
+   三次错误复位计数。STREAMOFF/panel-off/suspend/shutdown 先取消状态，迟到任务
+   重新检查全部 power gates，不等待 IRQ、不重置父控制器。
+
+每次成功的主动读另记录 `last_poll_done_ns`：IRQ 在 SPI 读取期间已排队时，不能
+仅因其时间晚于“请求开始”就重复消费同一包。交付 timestamp 仍保留采集开始时刻，
+completion 门控与采集时间分开。运行时 rearm 的内核 200 ms 静默限制也检查实际
+完成时间。真实 pthread 测试安排 IRQ 在 150 ms 读操作中途进入，覆盖启动最终
+kick 和运行时 tagged kick，均只读一次；还覆盖 IRQ 先完成、迟到超时、重新计时、
+最终 kick 失败与 backpressure。测试不模拟真实 GPI/DMA 时序。
+
+新 native 状态机直接与固定 Windows 清帧循环比较全部八种 master 成功/超时组合，
+另覆盖最终 kick 成功/失败、六类取消门控、早到/迟到工作，以及初始探测失败与
+diagnostic 注入。最终 Release 52/52、完整 ASan/UBSan 52/52（107.52 秒）、
+`make -C tests clean test`、checkpatch 和 diff 检查通过。
+
+编译服务器原匹配内核的独立 `startup-drain-b9uB3AFi` 目录构建普通 V4L2 模块成功，
+构建日志未发现 warning/error，本机与服务器源码清单逐项一致。候选取回：
+`artifacts/startup-drain-himax1/`，vermagic 为 `7.1.8-gaokun3-himax1`，
+SHA-256 为 `648ef91a7b050d6a7be2e8f71013f2e5b8bb9af165d165c0edb623a36a52de59`，
+build ID 为 `d09d12dc6ece5f3e23d9bd25aad8d9c9cdb3574d`。
+
+**候选未安装/加载**，运行的触摸模块仍是 `cbef3bb5…`，用户态仍为已部署的边界
+plateau 修正版 `04f904d`。两份 initramfs 未改，不影响当前用户的滑入复测。
+本实现按每个 packet 当场消费启动队列，没有新建 Windows 的两帧 KMDF FIFO，
+也没有启用 slave，不能称双通道/队列调度完全等价。真实 STREAMON、explicit reset、
+DPMS/睡眠取消、启动时手指在场和启动延迟仍需受控试载验收后再部署。

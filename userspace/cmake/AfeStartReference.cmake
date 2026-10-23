@@ -26,9 +26,12 @@ function(himax_prepare_afe_start runtime chip native output_directory)
     himax_raw_reference_extract("${source}" "static int himax_stream_start("
         "static const struct vb2_ops" stream)
     set(native_body "#include \"afe-start-host.h\"
+#include \"himax-v4l2-startup.h\"
+uint64_t hx_start_test_now = 1000000000ULL;
 ${startup}
 ${stream}
 int hx_start_once(struct himax_ts_data* ts) { return himax_start_afe(ts); }
+bool hx_startup_frame(struct himax_ts_data* ts) { return himax_startup_frame(ts); }
 void hx_start_or_retry(struct himax_ts_data* ts) { himax_start_or_retry(ts); }
 int hx_stream_on(struct himax_ts_data* ts) {
     struct vb2_queue q = { ts };

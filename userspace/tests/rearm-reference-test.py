@@ -51,13 +51,21 @@ with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     generated = (root / "native-out.c").read_text()
     text = production.decode()
     for first, last in (("struct himax_video_buffer {", "static void himax_state_event("),
-                        ("static int himax_capture_frame(", "static int himax_queue_setup(")):
+                        ("static void himax_publish_frame(struct himax_ts_data *ts, u64 now, bool rearm)\n{",
+                         "static int himax_queue_setup(")):
         assert generated.count(text[text.index(first):text.index(last)]) == 1
     ioctl = text[text.index("static long himax_private_ioctl("):text.index("static const struct v4l2_ioctl_ops")]
     assert ioctl.index("mutex_lock(&ts->op_lock)") < ioctl.index("cmd == VIDIOC_HIMAX_REARM")
     assert "ret = himax_rearm(ts, file, arg, cmd == VIDIOC_HIMAX_REARM_TAGGED);" in ioctl
     assert ioctl.index("cmd == VIDIOC_HIMAX_REARM") < ioctl.index("cmd != VIDIOC_HIMAX_COMMAND")
     assert ioctl.index("himax_rearm(ts, file, arg,") < ioctl.index("mutex_unlock(&ts->op_lock)")
+    startup = text[text.index("static void himax_start_or_retry("):
+                   text.index("static void himax_return_buffers(")]
+    assert "if (himax_startup_timeout(ts))\n\t\t\thimax_publish_frame(ts, ts->last_frame_ns, false);" in startup
+    assert "if (!hx_raw_can_read(&ts->power) || ts->startup.active ||" in ioctl
+    charger = text[text.index("static void himax_charger_work("):
+                   text.index("static int himax_charger_notify(")]
+    assert "if (!hx_raw_can_read(&ts->power) || ts->startup.active)" in charger
     expected = windows.decode()
     exact = expected[expected.index("    enum class Read :"):expected.index("    // ── slave（笔）──")]
     exact = exact.replace("std::this_thread::sleep_for", "TestSleep")
@@ -76,6 +84,8 @@ with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     # Capture extraction still contains the changed real body, not an old fixture.
     assert prepare().returncode == 0 and "renamed_rearm(" in (root / "native-out.c").read_text()
     source.write_bytes(production.replace(b"static int himax_capture_frame(", b"static int renamed_capture("))
+    assert prepare().returncode == 0 and "renamed_capture(" in (root / "native-out.c").read_text()
+    source.write_bytes(production.replace(b"static void himax_publish_frame(", b"static void renamed_publish("))
     assert prepare().returncode != 0
     source.write_bytes(production)
     (root / "HimaxChipFrame.cpp").write_bytes(windows + b"\n// drift\n")

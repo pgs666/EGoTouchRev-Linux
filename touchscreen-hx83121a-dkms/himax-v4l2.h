@@ -44,6 +44,8 @@ struct himax_ts_data {
 	bool irq_enabled;
 	struct hx_raw_power_state power;
 	struct hx_raw_retry_state retry;
+	struct hx_raw_startup_state startup;
+	u64 startup_deadline_ns;
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
 	unsigned int start_test_failures;
 #endif
@@ -54,6 +56,7 @@ struct himax_ts_data {
 	u64 epoch;
 	u64 sequence;
 	u64 last_frame_ns;
+	u64 last_poll_done_ns;
 	u64 last_rearm_ns;
 	u64 last_command_ns[HX_RAW_RESET + 1];
 	u32 frame_flags;

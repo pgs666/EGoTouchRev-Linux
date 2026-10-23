@@ -15,6 +15,7 @@ DRIVER_STYLE_SOURCES := $(DRIVER_DIR)/himax-spi-core.c \
 	$(DRIVER_DIR)/hx-raw-init.c $(DRIVER_DIR)/hx-raw-init.h \
 	$(DRIVER_DIR)/hx-ahb.c $(DRIVER_DIR)/hx-ahb.h \
 	$(DRIVER_DIR)/himax-v4l2.c $(DRIVER_DIR)/himax-v4l2.h \
+	$(DRIVER_DIR)/himax-v4l2-startup.h \
 	$(DRIVER_DIR)/hx-v4l2-uapi.h $(DRIVER_DIR)/hx-raw-policy.h
 
 .PHONY: all clean driver test userspace check checkpatch

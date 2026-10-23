@@ -129,10 +129,12 @@ if(BUILD_TESTING)
     himax_prepare_startup_drain("${UPSTREAM}/EGoTouchService/Device/himax"
         "${TSACORE_OVERLAY}/startup-drain-windows.cpp")
     add_executable(himax-startup-drain-test tests/startup-drain-test.cpp
-        "${TSACORE_OVERLAY}/startup-drain-windows.cpp")
+        "${TSACORE_OVERLAY}/startup-drain-windows.cpp"
+        "${TSACORE_OVERLAY}/afe-start-native.c")
     target_include_directories(himax-startup-drain-test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/tests" "${UPSTREAM}/Common/include")
-    target_compile_options(himax-startup-drain-test PRIVATE -Wall -Wextra -Werror)
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests" "${UPSTREAM}/Common/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_options(himax-startup-drain-test PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
     add_test(NAME windows-startup-drain COMMAND himax-startup-drain-test)
     add_test(NAME startup-drain-reference-integration COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup-drain-reference-test.py" "${CMAKE_COMMAND}"

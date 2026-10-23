@@ -12,6 +12,7 @@ static void Check(bool value, const char* message) {
 struct Fixture {
     himax_ts_data ts{};
     Fixture() {
+        hx_start_test_now = 1000000000ULL;
         ts.power = {true, true, false, false, true, false};
         ts.otp_tried = true;
         ts.epoch = 7;
@@ -85,13 +86,19 @@ int main() {
         f.ts.detect_result = f.ts.init_result = 0;
         hx_start_or_retry(&f.ts);
         Check(f.ts.power.controller_initialized && f.ts.irq_enabled && f.ts.retry.failures == 0 &&
-              f.ts.drains == 3 && f.ts.sleeps == 3 && f.ts.calibration == 1 && f.ts.rate == 1 &&
-              f.ts.started_events == 1 && f.ts.read_errors == 0 && !f.ts.charger.applied_valid &&
-              f.ts.work_kinds[7] == 1 && f.ts.delays[7] == 0,
-              "eventual success clears failure state, drains, calibrates, starts IRQ and replays charger");
+              f.ts.drains == 1 && f.ts.sleeps == 0 && !f.ts.calibration && !f.ts.rate &&
+              !f.ts.started_events && f.ts.startup.active && f.ts.startup.remaining == 2 &&
+              f.ts.read_errors == 0 && !f.ts.charger.applied_valid &&
+              f.ts.work_kinds[7] == 0 && f.ts.delays[7] == 200,
+              "eventual hardware success starts the producer and one consume, without publishing ready");
+        Check(hx_startup_frame(&f.ts) && hx_startup_frame(&f.ts) &&
+              !f.ts.startup.active && f.ts.startup.discarded == 3 &&
+              f.ts.started_events == 1 && f.ts.calibration == 1 && f.ts.rate == 1 &&
+              f.ts.work_kinds[9] == 1 && f.ts.delays[9] == 0,
+              "third delivered packet completes cleanup, calibrates and replays charger");
         const auto changes = f.ts.irq_changes;
         hx_start_or_retry(&f.ts);
-        Check(f.ts.irq_changes == changes && f.ts.scheduled == 8, "late duplicate retry leaves healthy stream alone");
+        Check(f.ts.irq_changes == changes && f.ts.scheduled == 10, "late duplicate retry leaves healthy stream alone");
     }
     {
         for (unsigned value = 0; value < 256; ++value) {
@@ -124,8 +131,11 @@ int main() {
               "long unpowered wait never accumulates init failures or resets");
         f.ts.probe_value = 0x31;
         hx_start_or_retry(&f.ts);
-        Check(f.ts.inits == 1 && f.ts.started_events == 1 && f.ts.retry.failures == 0,
-              "power becoming ready starts the unchanged full initialization");
+        Check(f.ts.inits == 1 && f.ts.startup.active && !f.ts.started_events && f.ts.retry.failures == 0,
+              "power becoming ready starts initialization followed by producer cleanup");
+        hx_startup_frame(&f.ts);
+        hx_startup_frame(&f.ts);
+        Check(f.ts.started_events == 1, "running follows all three cleanup attempts");
     }
     {
         Fixture f;
@@ -175,9 +185,17 @@ int main() {
         f.ts.otp_tried = false;
         f.ts.calibration_result = f.ts.rate_result = f.ts.drain_result = -EIO;
         Check(hx_start_once(&f.ts) == 0 && f.ts.otps == 1 && f.ts.detects == 2 &&
-              f.ts.drains == 3 && f.ts.sleeps == 3 && f.ts.calibration == 1 && f.ts.rate == 1 &&
-              f.ts.power.controller_initialized,
-              "OTP second reset and best-effort drain/calibration/rate policy are unchanged");
+              f.ts.drains == 1 && !f.ts.sleeps && !f.ts.calibration && !f.ts.rate &&
+              f.ts.power.controller_initialized && f.ts.startup.remaining == 3,
+              "OTP second reset precedes asynchronous cleanup even if initial producer kick fails");
+        for (unsigned i = 0; i < 3; ++i) {
+            hx_start_test_now += 200000000;
+            hx_start_or_retry(&f.ts);
+        }
+        Check(!f.ts.startup.active && f.ts.startup.timeouts == 3 && f.ts.drains == 4 &&
+              f.ts.calibration == 1 && f.ts.rate == 1 && f.ts.started_events == 1 &&
+              !f.ts.published && !f.ts.sleeps,
+              "three failed waits/kicks finish best-effort cleanup and commands without a fabricated packet");
     }
     std::cout << "Actual AFE startup/retry: Windows backoff, one-attempt faults, all power gates, "
                  "late work, epoch/reset limits, eventual success and startup policy passed\n";

@@ -6,9 +6,10 @@ function(himax_prepare_rearm native output)
     file(READ "${native}" source)
     himax_raw_reference_extract("${source}" "struct himax_video_buffer {"
         "static void himax_state_event(" buffer)
-    himax_raw_reference_extract("${source}" "static int himax_capture_frame("
+    himax_raw_reference_extract("${source}" "static void himax_publish_frame(struct himax_ts_data *ts, u64 now, bool rearm)\n{"
         "static int himax_queue_setup(" capture)
     set(generated "#include \"rearm-host.h\"
+#include \"himax-v4l2-startup.h\"
 ${buffer}
 ${capture}
 int hx_rearm(struct himax_ts_data *ts, struct file *file, const struct hx_raw_rearm *request) {
@@ -24,6 +25,12 @@ int hx_rearm_legacy(struct himax_ts_data *ts, struct file *file, const struct hx
     return result;
 }
 int hx_irq(struct himax_ts_data *ts) { return himax_raw_irq(0, ts); }
+void hx_startup_tick(struct himax_ts_data *ts) {
+    mutex_lock(&ts->op_lock);
+    if (himax_startup_timeout(ts))
+        himax_publish_frame(ts, ts->last_frame_ns, false);
+    mutex_unlock(&ts->op_lock);
+}
 void hx_enqueue(struct himax_ts_data *ts, void *storage) {
     struct himax_video_buffer *buf = storage;
     buf->link.next = &ts->buffers;

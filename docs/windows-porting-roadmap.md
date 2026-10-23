@@ -97,6 +97,14 @@ strict replay 878/878 一致。这不是历史异常根因或真实 lost-IRQ 恢
 报告时刻和全部 ID/事件/压力不变。52 项 Release 与完整 sanitizer 通过，
 这仍是本地修正与离线证据，不冒充上游原样实现或实机手势验收。
 
+随后已实现异步 master startup cleanup 候选：先打开 producer，再由 IRQ 消费三次
+启动读取尝试；200 ms 等待超时才 kick，清理结束后发布 consumer-ready，停止/
+休眠取消。成功主动读的完成时间另作 IRQ 去重与静默门控，覆盖慢 SPI 中途 IRQ
+到达，保留原始采集 timestamp。52 项 Release、完整 sanitizer、legacy 回归及
+checkpatch 通过；编译服务器匹配内核模块构建成功，尚未加载/部署。
+仍未复刻 Windows 双通道两帧 FIFO，不将 packet 当场消费宣称队列调度完全等价。
+本机保持 `04f904d` 边缘修复供用户复测；候选详情和待验收范围见 SPB 审计。
+
 | 范围 | 当前状态 | 尚需证据或实现 |
 |---|---|---|
 | 手指求解 | 直接编译固定版本上游的所有实际源码模块、adapter、solver、参数表和 mapper | 不等于恢复了上游自身裁去的原厂私有功能；仍需真实多指、边缘、快速滑动验收 |

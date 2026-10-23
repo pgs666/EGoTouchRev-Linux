@@ -9,6 +9,7 @@
 
 u64 hx_test_now = 2000000000;
 void (*hx_before_lock)(void) = nullptr;
+void (*hx_during_read)(void) = nullptr;
 static void Check(bool ok, const char* message) {
     if (!ok) { std::cerr << "FAIL: " << message << '\n'; std::exit(1); }
 }
@@ -22,6 +23,8 @@ struct Fixture {
         pthread_mutex_init(&ts.op_lock, nullptr);
         ts.power = {true, true, false, false, true, true};
         ts.queue = {this, true};
+        ts.panel_reinit_work = {&ts, 0};
+        ts.charger_work = {&ts, 1};
         ts.epoch = 7;
         ts.last_frame_ns = 1000000000;
         ts.buffers.next = ts.buffers.prev = &ts.buffers;
@@ -39,7 +42,98 @@ static void BeforeLock() {
     while (!allowIrq.load(std::memory_order_acquire)) std::this_thread::yield();
 }
 
+static himax_ts_data* duringReadDevice = nullptr;
+static std::thread duringReadIrq;
+static void DuringRead() {
+    hx_during_read = nullptr;
+    hx_test_now += 75000000;
+    hx_before_lock = BeforeLock;
+    duringReadIrq = std::thread([] { hx_irq(duringReadDevice); });
+    while (!irqWaiting.load(std::memory_order_acquire)) std::this_thread::yield();
+    hx_before_lock = nullptr;
+}
+
 int main() {
+    for (bool startup : {false, true}) {
+        Fixture f;
+        if (startup) {
+            f.ts.startup = {1, 2, 0, true};
+            f.ts.startup_deadline_ns = hx_test_now;
+        }
+        const auto started = hx_test_now;
+        f.ts.read_duration_ns = 75000000;
+        duringReadDevice = &f.ts;
+        irqWaiting.store(false, std::memory_order_relaxed);
+        allowIrq.store(false, std::memory_order_relaxed);
+        hx_during_read = DuringRead;
+        if (startup) hx_startup_tick(&f.ts);
+        else Check(f.Rearm() == 0, "slow tagged poll");
+        allowIrq.store(true, std::memory_order_release);
+        duringReadIrq.join();
+        Check(f.ts.reads == 1 && f.ts.sequence == 1 && f.ts.last_poll_done_ns == hx_test_now &&
+              hx_test_now == started + 150000000 &&
+              f.Output().vb2_buf.frame.timestamp_ns == started,
+              "IRQ timestamped DURING slow startup/runtime poll cannot reread; acquisition timestamp is preserved");
+        hx_enqueue(&f.ts, f.buffer);
+        f.request.sequence = f.ts.sequence;
+        hx_test_now += 199000000;
+        Check(f.Rearm() == -EAGAIN && f.ts.reads == 1,
+              "kernel quiet interval starts after actual poll completion, not submission");
+        hx_test_now++;
+        Check(f.Rearm() == -EAGAIN, "quiet interval boundary not rounded down");
+        hx_test_now += 999999;
+        Check(f.Rearm() == 0 && f.ts.reads == 2, "full 200ms post-completion quiet allows next request");
+    }
+    {
+        Fixture f;
+        f.ts.startup = {2, 1, 0, true}; // Initial producer kick already consumed one.
+        Check(f.Rearm() == -ESTALE && !f.ts.reads, "consumer cannot rearm during startup cleanup");
+        hx_irq(&f.ts);
+        Check(f.ts.startup.remaining == 1 && f.ts.startup.discarded == 2 && !f.ts.sequence &&
+              !f.Output().vb2_buf.done && !f.ts.state_events && !f.ts.calibration,
+              "IRQ producer packet is consumed without leaking to solver or running event");
+        hx_test_now += 8000000;
+        hx_irq(&f.ts);
+        Check(!f.ts.startup.active && f.ts.startup.discarded == 3 && !f.ts.sequence &&
+              !f.Output().vb2_buf.done && f.ts.state_events == 1 &&
+              f.ts.calibration == 1 && f.ts.rate == 1,
+              "third startup packet completes commands/ready but cannot be solved twice");
+        hx_test_now += 8000000;
+        hx_irq(&f.ts);
+        Check(f.ts.sequence == 1 && f.Output().vb2_buf.done == VB2_BUF_STATE_DONE &&
+              f.ts.reads == 3, "only the following IRQ publishes the first consumer sequence");
+    }
+    for (bool success : {false, true}) {
+        Fixture f;
+        f.ts.startup = {1, 2, 0, true};
+        f.ts.startup_deadline_ns = hx_test_now;
+        if (!success) f.ts.spi_error = -EIO;
+        hx_startup_tick(&f.ts);
+        Check(!f.ts.startup.active && f.ts.startup.discarded == 2 &&
+              f.ts.startup.timeouts == 1 && f.ts.calibration == 1 && f.ts.state_events == 1,
+              "final timeout ends cleanup even when producer kick fails");
+        Check(f.ts.sequence == unsigned(success) &&
+              f.Output().vb2_buf.done == (success ? VB2_BUF_STATE_DONE : 0),
+              "successful final kick is buffered normal data, failed SPI cannot fabricate a frame");
+        if (success)
+            Check(f.Output().vb2_buf.frame.timestamp_ns == hx_test_now &&
+                  f.Output().vb2_buf.frame.payload[HX_RAW_MASTER_SIZE - 1] == 0x37 &&
+                  f.Output().vb2_buf.frame.payload[HX_RAW_MASTER_SIZE] == 0 &&
+                  !(f.Output().vb2_buf.frame.flags & HX_RAW_FRAME_REARM),
+                  "complete bootstrap data keeps actual timestamp/padding, not runtime tagged-poll semantics");
+    }
+    {
+        Fixture f;
+        f.ts.startup = {2, 1, 0, true};
+        f.ts.spi_error = -EIO;
+        for (unsigned i = 0; i < 3; ++i) {
+            ++hx_test_now;
+            hx_irq(&f.ts);
+        }
+        Check(f.ts.startup.active && f.ts.startup.remaining == 2 && !f.ts.read_errors &&
+              !f.ts.sequence && !f.ts.state_events && !f.ts.schedules && !f.ts.irq_changes,
+              "startup read failure waits for cleanup timeout, not ordinary third-IRQ reset");
+    }
     {
         Fixture f;
         f.ts.frame_flags = HX_RAW_FRAME_SOS;
@@ -157,8 +251,41 @@ int main() {
     }
     {
         Fixture f;
+        f.ts.startup = {1, 2, 0, true};
+        f.ts.startup_deadline_ns = hx_test_now;
+        irqWaiting.store(false, std::memory_order_relaxed);
+        allowIrq.store(false, std::memory_order_relaxed);
+        pthread_mutex_lock(&f.ts.op_lock);
+        hx_before_lock = BeforeLock;
+        std::thread irq([&] { hx_irq(&f.ts); });
+        while (!irqWaiting.load(std::memory_order_acquire)) std::this_thread::yield();
+        hx_before_lock = nullptr;
+        ++hx_test_now;
+        pthread_mutex_unlock(&f.ts.op_lock);
+        hx_startup_tick(&f.ts);
+        allowIrq.store(true, std::memory_order_release);
+        irq.join();
+        Check(f.ts.reads == 1 && f.ts.sequence == 1 && !f.ts.startup.active &&
+              f.ts.startup.discarded == 2 && f.ts.startup.timeouts == 1,
+              "final timeout wins: older pending IRQ cannot reread the kick or discard it twice");
+    }
+    {
+        Fixture f;
+        f.ts.startup = {1, 2, 0, true};
+        f.ts.startup_deadline_ns = hx_test_now;
+        hx_irq(&f.ts);
+        hx_startup_tick(&f.ts);
+        Check(f.ts.reads == 1 && !f.ts.sequence && !f.ts.startup.active &&
+              f.ts.startup.discarded == 3 && !f.ts.startup.timeouts &&
+              !f.Output().vb2_buf.done,
+              "IRQ wins: late timeout cannot kick a fourth cleanup packet");
+    }
+    {
+        Fixture f;
         // Hold the real mutex while an IRQ timestamps its invocation and
         // reaches the lock. Publish a later kick before releasing that IRQ.
+        irqWaiting.store(false, std::memory_order_relaxed);
+        allowIrq.store(false, std::memory_order_relaxed);
         pthread_mutex_lock(&f.ts.op_lock);
         hx_before_lock = BeforeLock;
         std::thread irq([&] { hx_irq(&f.ts); });

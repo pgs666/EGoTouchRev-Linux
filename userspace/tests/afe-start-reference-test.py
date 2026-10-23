@@ -38,6 +38,7 @@ with tempfile.TemporaryDirectory(prefix="himax-start-reference-") as directory:
                                 text.index("const char *StandbyReason(")]) == 1
     text = native_bytes.decode()
     startup = text[text.index("static void himax_start_or_retry("):text.index("static void himax_return_buffers(")]
+    assert startup.index("ts->startup.active") < startup.index("hx_raw_can_start")
     assert startup.index("hx_raw_can_start") < startup.index("himax_spi_read(ts, 0x13, &bus_value, 1)")
     assert startup.index("himax_spi_read(ts, 0x13") < startup.index("himax_start_afe(ts)")
     assert startup.index("ts->start_test_failures") < startup.index("himax_spi_read(ts, 0x13")
@@ -57,6 +58,8 @@ with tempfile.TemporaryDirectory(prefix="himax-start-reference-") as directory:
                         ("static int himax_raw_suspend(", "static int himax_raw_resume("),
                         ("static void himax_raw_shutdown(", "static void himax_v4l2_release(")):
         body = text[text.index(first):text.index(last)]
+        assert body.index("hx_raw_startup_cancel(&ts->startup)") < body.index("himax_unlock(ts)")
+        assert body.index("ts->startup_deadline_ns = 0") < body.index("himax_unlock(ts)")
         assert body.index("hx_raw_retry_reset(&ts->retry)") < body.index("himax_unlock(ts)")
         assert body.index("himax_unlock(ts)") < body.index("cancel_delayed_work_sync")
     for path in (output, windows):
@@ -71,7 +74,9 @@ with tempfile.TemporaryDirectory(prefix="himax-start-reference-") as directory:
     assert result.returncode != 0 and "Missing upstream" in result.stderr
     assert windows.read_text() == reference
     source.write_bytes(original)
-    native_source.write_bytes(native_bytes.replace(b"int i, ret;", b"int i, ret = 0;"))
+    native_source.write_bytes(native_bytes.replace(
+        b"static int himax_start_afe(struct himax_ts_data *ts)\n{\n\tint ret;",
+        b"static int himax_start_afe(struct himax_ts_data *ts)\n{\n\tint ret = 0;"))
     assert prepare().returncode == 0 and output.read_text() != generated
     for name in ("HimaxChip.cpp", "HimaxChip.h"):
         vendor = (root / name).read_bytes()

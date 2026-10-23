@@ -31,9 +31,12 @@ int main() {
           ts.delays[2] == 500 && !ts.probes && !ts.detects && !ts.started_events,
           "last synthetic failure still cannot run initialization or report ready");
     hx_start_or_retry(&ts);
-    Check(ts.probes == 1 && ts.detects == 1 && ts.inits == 1 && ts.drains == 3 && ts.calibration == 1 &&
-          ts.rate == 1 && ts.irq_enabled && ts.started_events == 1 && ts.retry.failures == 0,
-          "exhausted diagnostic budget reaches the unchanged real startup path");
+    Check(ts.probes == 1 && ts.detects == 1 && ts.inits == 1 && ts.drains == 1 && !ts.calibration &&
+          !ts.rate && ts.irq_enabled && !ts.started_events && ts.retry.failures == 0 && ts.startup.active,
+          "exhausted diagnostic budget reaches real initialization and producer cleanup");
+    Check(hx_startup_frame(&ts) && hx_startup_frame(&ts) && !ts.startup.active &&
+          ts.calibration == 1 && ts.rate == 1 && ts.started_events == 1,
+          "actual cleanup completion, not diagnostic failure, publishes ready");
     hx_stream_off(&ts);
     Check(hx_stream_on(&ts) == 0 && ts.detects == 2 && ts.retry.failures == 0 &&
           ts.start_test_failures == 0, "diagnostic budget never rearms on ordinary STREAMON");

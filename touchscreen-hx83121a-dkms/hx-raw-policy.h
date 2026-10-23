@@ -42,6 +42,22 @@ struct hx_raw_retry_state {
 	unsigned int failures;
 };
 
+/* Hardware is initialized while the producer consumes startup queue data.
+ * Consumer-facing running is published only after three consume attempts.
+ */
+struct hx_raw_startup_state {
+	unsigned int remaining;
+	unsigned int discarded;
+	unsigned int timeouts;
+	bool active;
+};
+
+static inline void hx_raw_startup_cancel(struct hx_raw_startup_state *state)
+{
+	state->active = false;
+	state->remaining = 0;
+}
+
 static inline void hx_raw_retry_reset(struct hx_raw_retry_state *state)
 {
 	state->failures = 0;

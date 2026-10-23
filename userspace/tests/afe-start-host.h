@@ -6,6 +6,8 @@
 #include <stdint.h>
 #include <string.h>
 typedef uint8_t u8;
+typedef uint64_t u64;
+#define NSEC_PER_MSEC 1000000ULL
 
 #ifdef __cplusplus
 extern "C" {
@@ -19,10 +21,12 @@ struct himax_ts_data {
     void *dev;
     struct hx_raw_power_state power;
     struct hx_raw_retry_state retry;
+    struct hx_raw_startup_state startup;
+    uint64_t startup_deadline_ns;
     unsigned start_test_failures;
     struct hx_raw_charger_state charger;
     uint64_t epoch, sequence, last_command_ns[HX_RAW_RESET + 1];
-    uint64_t last_frame_ns;
+    uint64_t last_frame_ns, last_poll_done_ns;
     char project_id[16];
     bool otp_tried, irq_enabled;
     unsigned char afe_command_slot, read_errors;
@@ -37,12 +41,14 @@ struct himax_ts_data {
     int probe_result;
     unsigned stopped_events, started_events, scheduled;
     unsigned work_kinds[64], delays[64];
-    unsigned lifecycle_locks, mutex_locks, unlocks, returned_buffers, returned_state;
+    unsigned lifecycle_locks, mutex_locks, unlocks, returned_buffers, returned_state, published;
 };
 int hx_start_once(struct himax_ts_data *);
 void hx_start_or_retry(struct himax_ts_data *);
 int hx_stream_on(struct himax_ts_data *);
 void hx_stream_off(struct himax_ts_data *);
+bool hx_startup_frame(struct himax_ts_data *);
+extern uint64_t hx_start_test_now;
 unsigned hx_windows_backoff(int failures);
 bool hx_windows_bus_ready(bool io_ok, unsigned char master, unsigned char slave);
 unsigned hx_windows_bus_poll(void);
@@ -55,6 +61,12 @@ static inline void mutex_unlock(struct mutex *m) { ++m->owner->unlocks; }
 static inline void himax_return_buffers(struct himax_ts_data *ts, enum vb2_buffer_state state) {
     ++ts->returned_buffers;
     ts->returned_state = state;
+}
+static inline void himax_publish_frame(struct himax_ts_data *ts, u64 now, bool rearm) {
+    (void)rearm;
+    ++ts->published;
+    ++ts->sequence;
+    ts->last_frame_ns = now;
 }
 
 static inline int hx83121a_chip_detect(struct himax_ts_data *ts) {
@@ -108,7 +120,7 @@ static inline bool mod_delayed_work(void *queue, struct delayed_work *work, unsi
     return false;
 }
 #define system_wq ((void *)0)
-static inline uint64_t ktime_get_ns(void) { return 1000000000ULL; }
+static inline uint64_t ktime_get_ns(void) { return hx_start_test_now; }
 #define msecs_to_jiffies(value) (value)
 // Protocol waits are tested separately. No wall-time sleeps or real IRQ/SPI.
 #define usleep_range(low, high) (++ts->sleeps)

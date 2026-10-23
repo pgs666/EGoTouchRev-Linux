@@ -8,7 +8,7 @@ function(himax_prepare_event_read directory output)
     file(READ "${source}" contents)
     file(READ "${header}" definitions)
     himax_raw_reference_extract("${contents}" "static int himax_read_raw("
-        "/* IRQs must be disabled" function_body)
+        "#include \"himax-v4l2-startup.h\"" function_body)
     set(constants "")
     foreach(field IN ITEMS HIMAX_FULL_EVENT_STACK_SIZE HIMAX_BUS_READ_HEADER_SIZE
                            HIMAX_EVENT_STACK_ADDRESS)

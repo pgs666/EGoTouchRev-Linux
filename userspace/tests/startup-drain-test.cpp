@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "startup-drain-host.h"
+#include "afe-start-host.h"
 #include "FrameLayout.h"
 
 #include <algorithm>
@@ -41,6 +42,109 @@ struct Fixture {
         return hx_windows_startup_drain(&bus, &discarded);
     }
 };
+
+static himax_ts_data NativeFixture() {
+    himax_ts_data ts{};
+    ts.power = {true, true, false, false, true, false};
+    ts.otp_tried = true;
+    hx_start_test_now = 1000000000ULL;
+    return ts;
+}
+
+static void InitNative(himax_ts_data& ts) {
+    ts.panel_reinit_work = {&ts, 0};
+    ts.charger_work = {&ts, 1};
+    ts.op_lock = {&ts};
+}
+
+static void NativeComparison() {
+    for (unsigned failed = 0; failed < 8; ++failed) for (bool finalKick : {false, true}) {
+        Fixture windows;
+        for (unsigned i = 0; i < 3; ++i)
+            if (failed & (1u << i)) windows.failedReads |= 1u << (2 * i + 1);
+        unsigned discarded = 0;
+        Check(windows.Run(discarded) == 0, "actual Windows cleanup oracle");
+        auto ts = NativeFixture();
+        InitNative(ts);
+        ts.drain_result = failed & 1 ? -EIO : 0;
+        Check(hx_start_once(&ts) == 0 && ts.irq_enabled && !ts.started_events,
+              "native opens producer before finishing queue cleanup");
+        unsigned attempts = (failed & 1) ? 0 : 1;
+        while (attempts < 3) {
+            Check(ts.startup.active && !ts.started_events && !ts.calibration &&
+                  !ts.rate && !ts.sequence, "no packet or running state escapes before cleanup");
+            if (!(failed & (1u << attempts))) {
+                Check(hx_startup_frame(&ts), "natural producer packet satisfies next consume");
+                ++attempts;
+            } else {
+                const auto next = attempts + 1;
+                const bool kick = next == 3 ? finalKick : !(failed & (1u << next));
+                ts.drain_result = kick ? 0 : -EIO;
+                hx_start_test_now += 200000000;
+                hx_start_or_retry(&ts);
+                ++attempts;
+                if (next < 3 && kick) ++attempts;
+            }
+        }
+        Check(!ts.startup.active && ts.startup.discarded + 3 == discarded &&
+              ts.startup.discarded + ts.startup.timeouts == 3,
+              "native master consumes same three success/timeout attempts as unchanged Windows code");
+        Check(ts.calibration == 1 && ts.rate == 1 && ts.started_events == 1 &&
+              ts.detects == 1 && ts.inits == 1 && ts.drains == 1 + ts.startup.timeouts &&
+              !ts.sleeps, "only initial open and timed-out waits kick, without reset or fixed sleeps");
+        Check(ts.published == unsigned((failed & 4) && finalKick) && ts.sequence == ts.published,
+              "post-final-timeout kick is first normal data, not a fourth discarded packet");
+    }
+    {
+        auto ts = NativeFixture();
+        InitNative(ts);
+        hx_start_once(&ts);
+        const auto reads = ts.drains, scheduled = ts.scheduled;
+        const auto epoch = ts.epoch;
+        hx_start_test_now += 199000000;
+        hx_start_or_retry(&ts);
+        Check(ts.drains == reads && ts.startup.remaining == 2 && ts.epoch == epoch &&
+              ts.delays[scheduled] == 1, "early/duplicate work reschedules remaining wait, no hardware");
+        hx_startup_frame(&ts);
+        const auto deadline = ts.startup_deadline_ns;
+        hx_start_test_now += 1000000;
+        hx_start_or_retry(&ts);
+        Check(ts.drains == reads && ts.startup.remaining == 1 &&
+              ts.startup_deadline_ns == deadline, "new IRQ restarts next wait, stale timer cannot consume it");
+        hx_startup_frame(&ts);
+        hx_start_test_now += 200000000;
+        hx_start_or_retry(&ts);
+        Check(ts.drains == reads && ts.started_events == 1 && ts.inits == 1,
+              "late cleanup work leaves the healthy stream intact");
+    }
+    for (unsigned gate = 0; gate < 6; ++gate) {
+        auto ts = NativeFixture();
+        InitNative(ts);
+        hx_start_once(&ts);
+        if (gate == 0) ts.power.streaming = false;
+        if (gate == 1) ts.power.panel_prepared = false;
+        if (gate == 2) ts.power.panel_enabled = false;
+        if (gate == 3) ts.power.system_suspended = true;
+        if (gate == 4) ts.power.shutting_down = true;
+        if (gate == 5) ts.power.controller_initialized = false;
+        hx_start_test_now += 200000000;
+        hx_start_or_retry(&ts);
+        Check(!ts.startup.active && !ts.startup_deadline_ns && ts.drains == 1 &&
+              !ts.calibration && !ts.rate && !ts.started_events && ts.inits == 1,
+              "every closed lifecycle gate cancels cleanup before any SPI or command");
+    }
+    {
+        auto ts = NativeFixture();
+        InitNative(ts);
+        hx_start_once(&ts);
+        hx_stream_off(&ts);
+        const auto epoch = ts.epoch;
+        hx_start_test_now += 200000000;
+        hx_start_or_retry(&ts);
+        Check(!ts.startup.active && !ts.startup_deadline_ns && ts.epoch == epoch && ts.drains == 1,
+              "STREAMOFF cancels producer cleanup and a late callback cannot resurrect the epoch");
+    }
+}
 
 int main() {
     using Op = Fixture::Operation;
@@ -84,6 +188,7 @@ int main() {
         }
         Check(f.operations == expected, "read policy or slave-open failure closes both channels");
     }
-    std::cout << "Original Windows startup queue drain: ordered policy, all 64 read outcomes, "
-                 "failed reopens, early failure/close handling and 200ms waits passed\n";
+    NativeComparison();
+    std::cout << "Original Windows startup queue drain and native master state machine: "
+                 "all read outcomes, failed reopens, bounded waits, late work and cancellation passed\n";
 }

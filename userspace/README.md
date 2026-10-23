@@ -644,7 +644,30 @@ ENODEV/队列错误断开，不会无限保留已移除设备的流。健康流�
 这只移植社区 Windows 重写版的“一次尝试 + 异步退避”政策，不等于完整移植原厂状态机：
 Windows 的 master/slave 0x13 bus-ready 前置探测、每五次失败重开 THP 句柄，仍没有被
 冒充为 Linux 等价操作。没有新增 slave/笔读取，也绝不因此卸载或重绑 SPI/GPI 控制器。
-OTP、三帧 best-effort drain、calibration/rate best-effort、硬件单次初始化事务保持原策略。
+OTP、calibration/rate best-effort、硬件单次初始化事务保持原策略。当前源码的清帧
+已改为下面说明的异步 producer cleanup，已安装模块仍是旧的定时三次直读实现。
+
+### 候选：IRQ producer 启动清帧
+
+`himax-v4l2-startup.h` 将 consumer-ready 与硬件初始化完成分开：打开 IRQ 后
+做一次初始 producer 读取，随后由正常 IRQ 消耗剩余的启动读取尝试。每次最多等
+200 ms，超时才补读；不持锁等待 IRQ、不循环固定睡 8 ms 直读。三次尝试结束才
+校准/设速并发布 running，启动数据不送入 TSACore；最后一次超时后的成功 kick
+保留为第一份正常流数据。停止/休眠取消状态，命令与 charger 写入在清帧期间关门。
+无数据/失败仍在三次有界尝试后完成 best-effort 清理，后续缺帧由既有 supervisor
+处理；没有把“清理结束”当成有效触控或校准完成。
+
+新增独立 poll-completion 时间，防止 IRQ 在主动 SPI 读取中途排队后再次读同一包；
+不改 HXST 的采集 timestamp。普通路径无 baseline/跟踪代码变化，也不默认打开
+运行时实验恢复。完整验证与移植边界见
+[SPB 启动清帧审计](../docs/windows-spb-backend-audit.md#启动清帧的可执行参考)。
+
+最终 52 项 Release、52 项完整 ASan/UBSan、legacy host tests 和 checkpatch 通过。
+服务器已构建匹配测试内核的普通模块，候选为
+`artifacts/startup-drain-himax1/himax-spi.ko`，SHA-256 为
+`648ef91a7b050d6a7be2e8f71013f2e5b8bb9af165d165c0edb623a36a52de59`。
+**未部署此模块**，当前用户态仍是前述边界修复版本；真实启动/取消/手势和延迟
+还需试载，不用离线测试冒充实机完成。
 
 诊断构建（`HIMAX_AFE_DIAGNOSTICS=1`）另提供仅模块加载时配置的
 `afe_start_failures=0..8`（默认 0、只读参数）。probe 将预算复制到每个设备；每次

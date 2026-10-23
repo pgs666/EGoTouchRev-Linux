@@ -63,13 +63,19 @@ static int himax_read_raw(struct himax_ts_data *ts)
 	return 0;
 }
 
+#include "himax-v4l2-startup.h"
+
+static void himax_publish_frame(struct himax_ts_data *ts, u64 now, bool rearm);
+
 /* IRQs must be disabled and op_lock held. No algorithm qualification here:
  * the upstream solver owns validity, calibration state and baseline policy.
  */
 static int himax_start_afe(struct himax_ts_data *ts)
 {
-	int i, ret;
+	int ret;
 
+	hx_raw_startup_cancel(&ts->startup);
+	ts->startup_deadline_ns = 0;
 	ts->power.controller_initialized = false;
 	ts->epoch++;
 	ts->sequence = 0;
@@ -107,27 +113,11 @@ static int himax_start_afe(struct himax_ts_data *ts)
 	ret = himax_mcu_power_on_init(ts);
 	if (ret)
 		goto failed;
-	/* Upstream thp_afe_start discards three buffered master frames
-	 * before StartCalibration, then requests 120 Hz. The slave/pen
-	 * channel is intentionally not enabled by this finger driver.
+	/* Start the producer, then consume three buffered delivery attempts.
+	 * IRQs/work finish cleanup without blocking this lock waiting for IRQ.
+	 * The slave/pen channel remains disabled.
 	 */
-	for (i = 0; i < 3; i++) {
-		usleep_range(8000, 9000);
-		himax_read_raw(ts);
-	}
-	ts->afe_command_slot = 0;
-	ret = himax_afe_command(ts, HX_RAW_CALIBRATE, 0);
-	if (ret)
-		dev_warn(ts->dev, "initial calibration transport: %d\n", ret);
-	ret = himax_afe_command(ts, HX_RAW_FORCE_RATE, 0);
-	if (ret)
-		dev_warn(ts->dev, "initial scan-rate transport: %d\n", ret);
-	ts->power.controller_initialized = true;
-	ts->read_errors = 0;
-	ts->last_frame_ns = ktime_get_ns();
-	himax_state_event(ts, true);
-	himax_int_enable(ts, true);
-	mod_delayed_work(system_wq, &ts->charger_work, 0);
+	himax_startup_begin(ts);
 	return 0;
 failed:
 	dev_err(ts->dev, "raw AFE startup failed: %d\n", ret);
@@ -143,6 +133,11 @@ static void himax_start_or_retry(struct himax_ts_data *ts)
 	u8 bus_value = 0;
 	int ret;
 
+	if (ts->startup.active) {
+		if (himax_startup_timeout(ts))
+			himax_publish_frame(ts, ts->last_frame_ns, false);
+		return;
+	}
 	if (!hx_raw_can_start(&ts->power))
 		return;
 	himax_int_enable(ts, false);
@@ -195,23 +190,18 @@ static void himax_return_buffers(struct himax_ts_data *ts,
 /* op_lock is held. IRQ and rearm share record publication except origin.
  * SPI failures do not advance the producer or destroy its last complete data.
  */
-static int himax_capture_frame(struct himax_ts_data *ts, u64 now, bool rearm)
+static void himax_publish_frame(struct himax_ts_data *ts, u64 now, bool rearm)
 {
 	struct himax_video_buffer *buf;
 	struct hx_raw_frame *frame;
 	unsigned long flags;
-	int ret;
 
-	ret = himax_read_raw(ts);
-	if (ret)
-		return ret;
-	ts->read_errors = 0;
 	ts->sequence++;
 	ts->last_frame_ns = now;
 	spin_lock_irqsave(&ts->buffer_lock, flags);
 	if (list_empty(&ts->buffers)) {
 		spin_unlock_irqrestore(&ts->buffer_lock, flags);
-		return 0; /* IRQ drains SPI even when the reader falls behind. */
+		return; /* IRQ drains SPI even when the reader falls behind. */
 	}
 	buf = list_first_entry(&ts->buffers, struct himax_video_buffer, link);
 	list_del(&buf->link);
@@ -232,6 +222,19 @@ static int himax_capture_frame(struct himax_ts_data *ts, u64 now, bool rearm)
 	buf->vb.vb2_buf.timestamp = now;
 	vb2_set_plane_payload(&buf->vb.vb2_buf, 0, sizeof(*frame));
 	vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+}
+
+static int himax_capture_frame(struct himax_ts_data *ts, u64 now, bool rearm)
+{
+	int ret;
+
+	ret = himax_read_raw(ts);
+	if (ret)
+		return ret;
+	ts->read_errors = 0;
+	ts->last_frame_ns = now;
+	if (!himax_startup_frame(ts))
+		himax_publish_frame(ts, now, rearm);
 	return 0;
 }
 
@@ -245,6 +248,7 @@ static int himax_rearm(struct himax_ts_data *ts, struct file *file,
 	unsigned long flags;
 	bool available;
 	u64 now;
+	int ret;
 
 	if (request->size != sizeof(*request) ||
 	    request->version != HX_RAW_ABI_VERSION ||
@@ -254,11 +258,12 @@ static int himax_rearm(struct himax_ts_data *ts, struct file *file,
 		return -ENODEV;
 	if (!vb2_is_busy(&ts->queue) || ts->queue.owner != file->private_data)
 		return -EBUSY;
-	if (!hx_raw_can_read(&ts->power) || !request->epoch ||
+	if (!hx_raw_can_read(&ts->power) || ts->startup.active || !request->epoch ||
 	    request->epoch != ts->epoch || request->sequence != ts->sequence)
 		return -ESTALE;
 	now = ktime_get_ns();
 	if (now - ts->last_frame_ns < 200 * NSEC_PER_MSEC ||
+	    now - ts->last_poll_done_ns < 200 * NSEC_PER_MSEC ||
 	    (ts->last_rearm_ns && now - ts->last_rearm_ns < 200 * NSEC_PER_MSEC))
 		return -EAGAIN;
 	spin_lock_irqsave(&ts->buffer_lock, flags);
@@ -270,22 +275,30 @@ static int himax_rearm(struct himax_ts_data *ts, struct file *file,
 	/* Do not initialize AFE, change epoch, or escalate a failed kick to reset.
 	 * Userspace owns the bounded stall budget and verifies subsequent frames.
 	 */
-	return himax_capture_frame(ts, now, tagged);
+	ret = himax_capture_frame(ts, now, tagged);
+	if (!ret)
+		ts->last_poll_done_ns = ktime_get_ns();
+	return ret;
 }
 
 static irqreturn_t himax_raw_irq(int irq, void *data)
 {
 	struct himax_ts_data *ts = data;
 	u64 now = ktime_get_ns();
+	bool starting;
 	int ret;
 
 	(void)irq;
 	mutex_lock(&ts->op_lock);
-	if (!hx_raw_can_read(&ts->power) || now <= ts->last_frame_ns)
+	if (!hx_raw_can_read(&ts->power) || now <= ts->last_frame_ns ||
+	    now <= ts->last_poll_done_ns)
 		goto out;
-	/* A queued IRQ older than a successful rearm must not reread its frame. */
+	/* An IRQ queued before or during a successful producer poll must not
+	 * reread that packet. Keep the original acquisition timestamp separate.
+	 */
+	starting = ts->startup.active;
 	ret = himax_capture_frame(ts, now, false);
-	if (ret && ++ts->read_errors >= 3) {
+	if (ret && !starting && ++ts->read_errors >= 3) {
 		himax_int_enable(ts, false);
 		ts->power.controller_initialized = false;
 		ts->frame_flags = HX_RAW_FRAME_SOS;
@@ -360,6 +373,8 @@ static void himax_stream_stop(struct vb2_queue *q)
 		mutex_lock(&ts->op_lock);
 	ts->power.streaming = false;
 	ts->power.controller_initialized = false;
+	hx_raw_startup_cancel(&ts->startup);
+	ts->startup_deadline_ns = 0;
 	hx_raw_retry_reset(&ts->retry);
 	ts->epoch++;
 	himax_state_event(ts, false);
@@ -460,7 +475,7 @@ static long himax_private_ioctl(struct file *file, void *priv,
 		ret = -EBUSY;
 		goto out;
 	}
-	if (!hx_raw_can_read(&ts->power) ||
+	if (!hx_raw_can_read(&ts->power) || ts->startup.active ||
 	    c->epoch != ts->epoch || !c->sequence || c->sequence > ts->sequence ||
 	    ts->sequence - c->sequence > 8) {
 		ret = -ESTALE;
@@ -536,7 +551,7 @@ static void himax_charger_work(struct work_struct *work)
 	int ret;
 
 	mutex_lock(&ts->op_lock);
-	if (!hx_raw_can_read(&ts->power))
+	if (!hx_raw_can_read(&ts->power) || ts->startup.active)
 		goto out;
 	supplied = power_supply_is_system_supplied();
 	if (supplied < 0)
@@ -603,6 +618,8 @@ static int himax_panel_disabling(struct drm_panel_follower *follower)
 	himax_lock(ts);
 	ts->power.panel_enabled = false;
 	ts->power.controller_initialized = false;
+	hx_raw_startup_cancel(&ts->startup);
+	ts->startup_deadline_ns = 0;
 	hx_raw_retry_reset(&ts->retry);
 	ts->epoch++;
 	himax_state_event(ts, false);
@@ -639,6 +656,8 @@ static int himax_raw_suspend(struct device *dev)
 	himax_lock(ts);
 	ts->power.system_suspended = true;
 	ts->power.controller_initialized = false;
+	hx_raw_startup_cancel(&ts->startup);
+	ts->startup_deadline_ns = 0;
 	hx_raw_retry_reset(&ts->retry);
 	ts->epoch++;
 	himax_state_event(ts, false);
@@ -673,6 +692,8 @@ static void himax_raw_shutdown(struct spi_device *spi)
 	himax_lock(ts);
 	ts->power.shutting_down = true;
 	ts->power.controller_initialized = false;
+	hx_raw_startup_cancel(&ts->startup);
+	ts->startup_deadline_ns = 0;
 	hx_raw_retry_reset(&ts->retry);
 	ts->epoch++;
 	himax_state_event(ts, false);
