@@ -233,3 +233,17 @@ Himax/GPI/SPI/uinput 与磁盘逐字节一致。两份新 initramfs SHA-256 均�
 Image、DTB、BLS entry 的 SHA-256 复核通过，默认启动项和 DKMS mask 不变。
 没有自动重启，新镜像尚未冷启动验收。旧模块与旧 initramfs 保存在
 `deploy-logs/afe-retry-install-fba5d7a/previous-*`，没有删除旧版本文件。
+
+## 2026-10-23：测试启动项更新为无复位 master 补读
+
+同一完整内核的 Image、DTB、SPI/GPI 未改。触摸模块更新到 `be2a406` 普通构建，
+用户态安装 `b317a36`；临时 IDLE 补读试验确认传输/拒绝门控及后续 IRQ 继续出帧，
+也确认补读本身可返回全零，不等于故障恢复。该结果促使修正无效帧累计重试语义。
+完整证据与验证边界见 [SPB 后端审计](../docs/windows-spb-backend-audit.md)。
+
+模块 build ID 为 `f42b16a7318df983e5015083f794b5196f2ea550`；
+两份测试 initramfs SHA-256 为
+`6d883d39af15864cd47a4fc5f67ea5c3147d4baf3e92e0fea671917b794917de`。
+解包的 Himax/GPI/SPI/uinput 与已安装模块一致；默认启动选择及 DKMS mask 保留。
+更新镜像未重新启动验证。旧模块/daemon/initramfs 在
+`deploy-logs/producer-rearm-install-bF7aAyWj/previous-*`，没有删除。

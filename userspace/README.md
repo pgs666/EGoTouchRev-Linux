@@ -1,12 +1,12 @@
 # Linux 用户态触控求解
 
 当前本机部署（2026-10-23）：测试内核 `7.1.8-gaokun3-himax1`，触摸模块已更新为
-`c1a8757` 的异步恢复普通构建（与 `fba5d7a` 普通构建字节相同），用户态 daemon/replay
-来自 `c00844e`。初始化前主动失败/取消/恢复及普通启动已完成首轮实机验证；
+`be2a406` 的无复位补读普通构建，daemon 来自 `b317a36`，replay 仍与 `c00844e`
+字节相同。初始化前主动失败/取消/恢复及普通启动已完成首轮实机验证；
 可选运行中窗口录制默认关闭。下文末尾的增量记录按时间排列，其中早先的
 “尚未安装”是当时状态；最新部署记录见末节，不能据早先记录判断当前版本。
 
-后续开发（尚未部署）：新增 `VIDIOC_HIMAX_REARM` 和用户态无复位停帧恢复预算。
+已部署：新增 `VIDIOC_HIMAX_REARM` 和用户态无复位停帧恢复预算。
 正常模式 200 ms、IDLE 3600 ms 没有生产进展后先补读，不清 baseline 或重建 epoch；
 超过有界重试预算才走 supervisor。`--observe` 不主动补读；新 daemon 遇到旧模块
 ENOTTY 则保留四秒回退。日志 `producer_rearm` 将 `transferred` 与 `valid_after`
@@ -14,6 +14,10 @@ ENOTTY 则保留四秒回退。日志 `producer_rearm` 将 `transferred` 与 `va
 补读交付的普通 HXST 帧，不记录/重放真实硬件 kick；strict replay 不是总线操作复现。
 约束和实机测试缺口见 [SPB 后端审计](../docs/windows-spb-backend-audit.md) 和
 [Offload 文档](../docs/touch-offload.md)。
+实机 IDLE 主动补读返回过全零，后续正常 IRQ 同 epoch 恢复有效数据；这不是故障恢复
+验收。`b317a36` 因此修正了无效帧不能清累计重试次数/沿用旧 IDLE 标志的逻辑。
+安装后进入正常 IDLE，统计 877→887→911 帧、bad=1（启动全零）不增长、stale=0、
+无触摸报告、NRestarts=0。该测试启动项 initramfs 已同步，更新镜像尚未重启验收。
 
 默认数据路径为：
 

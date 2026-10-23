@@ -232,3 +232,27 @@ strict replay 为 `session_frames=672 verified_frames=672 live_output_verified=1
 测试程序能正常编译，但从不由 CTest 自动访问硬件。新版 daemon SHA-256：
 `16eeda6c95b104c0af49acd5b405d0c7871e9ef5e52e7b1e7448c24c2feec9ee`；
 kernel candidate 未改。这里仍没有真实丢 IRQ、故障修复或触控质量证据。
+
+### 随后正式安装到当前测试内核
+
+已将试载的普通模块和 `b317a36` daemon 安装并运行：
+
+- kernel/module：`7.1.8-gaokun3-himax1`，
+  build ID `f42b16a7318df983e5015083f794b5196f2ea550`，
+  SHA-256 `42bd7ea789679ce910e6df0bdbc7e446dcf413b1cd6bc10f0264d2347ebb70e6`；
+- daemon：SHA-256 `16eeda6c95b104c0af49acd5b405d0c7871e9ef5e52e7b1e7448c24c2feec9ee`，
+  PID `1080028`，`/proc/PID/exe` 与已安装文件逐字节相同；
+- 三次统计 877→887→911 帧，bad=1（启动全零）不增长、stale=0，
+  IDLE 帧 3→13→37，epoch=1 不变、NRestarts=0、无实际触摸报告；
+- 没有触发 producer rearm；正常 IDLE 静默间隔被允许。不能用这一结果验证新恢复
+  路径已在故障时成功，临时试载中全零数据的限制仍存在；
+- SPI/GPI 运行 build-ID note 前后相同，没有重载；taint=4096，kernel health 无新增
+  Oops/WARN/坏页。replay、systemd unit、Image、DTB、BLS entry 哈希/比较不变；
+- `/boot` 和 ESP 测试启动项的 initramfs 均更新为
+  `6d883d39af15864cd47a4fc5f67ea5c3147d4baf3e92e0fea671917b794917de`，
+  解包 Himax/GPI/SPI/uinput 与已安装模块逐字节一致；
+- 原模块、daemon 和两份旧 initramfs 保存在
+  `deploy-logs/producer-rearm-install-bF7aAyWj/previous-*`，可回退。
+
+未自动重启/休眠，没有改 Android 分区或默认启动选择；新 initramfs 尚未冷启动验收。
+部署脚本、kernel health、服务统计和镜像核验保存在上述忽略目录。
