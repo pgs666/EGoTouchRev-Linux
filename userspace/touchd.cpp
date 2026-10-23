@@ -46,10 +46,12 @@ int main(int argc, char** argv) {
     bool captureSecondsSet = false;
     std::optional<int> fixedRotation;
     bool observe = false, infoOnly = false;
+    bool experimentalRearm = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--observe") observe = true;
         else if (arg == "--info") infoOnly = true;
+        else if (arg == "--experimental-rearm") experimentalRearm = true;
         else if (arg == "--device" && i + 1 < argc) device = argv[++i];
         else if (arg == "--project" && i + 1 < argc) project = argv[++i];
         else if (arg == "--record" && i + 1 < argc) recording = argv[++i];
@@ -76,6 +78,7 @@ int main(int argc, char** argv) {
             std::cerr << "Usage: himax-touchd [--device /dev/videoN] [--project ID]\n"
                       << "                    [--rotation 0..3|90|180|270] [--rotation-file FILE]\n"
                       << "                    [--observe] [--record FILE.hxst]\n"
+                      << "                    [--experimental-rearm] (unvalidated; default off)\n"
                       << "                    [--live-capture-dir PRIVATE_DIR [--live-capture-seconds 1..120]]\n"
                       << "       himax-touchd [--device /dev/videoN] --info\n";
             return arg == "--help" ? 0 : 2;
@@ -91,7 +94,11 @@ int main(int argc, char** argv) {
         std::cerr << "Live capture requires its own directory and cannot be combined with --record\n";
         return 2;
     }
-    if (infoOnly && (observe || !recording.empty() || !autoProject ||
+    if (experimentalRearm && observe) {
+        std::cerr << "--experimental-rearm cannot be combined with --observe\n";
+        return 2;
+    }
+    if (infoOnly && (observe || experimentalRearm || !recording.empty() || !autoProject ||
                      fixedRotation || !rotationFile.empty() || !captureDirectory.empty())) {
         std::cerr << "--info cannot be combined with solver/capture options\n";
         return 2;
@@ -266,6 +273,8 @@ int main(int argc, char** argv) {
     himax::NotifyService("READY=1");
     std::cerr << (observe ? "Observing " : "Solving ") << capture.Path()
               << " project=" << (autoProject ? "pending-OTP" : project) << '\n';
+    std::cerr << "producer_rearm=" << (experimentalRearm ? "experimental" : "disabled")
+              << " (disabled uses four-second stall deadline)\n";
     while (!stopped) {
         const uint64_t loopNow = NowNs();
         if (liveCapture) liveCapture->Tick(loopNow);
@@ -287,11 +296,8 @@ int main(int argc, char** argv) {
         }
         pollRotation(loopNow);
         if (dumpRequested) { dumpRequested = 0; printStats(); }
-        const auto recovery = observe ?
-            (stream.TimedOut(loopNow) ? himax::ProducerRecovery::Step::Exhausted :
-                                      himax::ProducerRecovery::Step::None) :
-            producerRecovery.Next(stream, loopNow, afeStarted && lastFrameValid &&
-                (solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle));
+        const auto recovery = producerRecovery.Next(stream, loopNow, afeStarted && lastFrameValid &&
+                (solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle), experimentalRearm);
         if (recovery == himax::ProducerRecovery::Step::Exhausted) {
             std::cerr << "AFE producer stall budget exhausted; restarting through supervisor\n";
             exitCode = 1;

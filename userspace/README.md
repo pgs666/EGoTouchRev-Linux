@@ -1,12 +1,18 @@
 # Linux 用户态触控求解
 
 当前本机部署（2026-10-23）：测试内核 `7.1.8-gaokun3-himax1`，触摸模块已更新为
-`be2a406` 的无复位补读普通构建，daemon 来自 `b317a36`，replay 仍与 `c00844e`
-字节相同。初始化前主动失败/取消/恢复及普通启动已完成首轮实机验证；
+`7f6c534` 的 master bus-ready 普通构建。**daemon 已临时回退到 `c00844e` 的四秒
+停帧等待版**，replay 仍与 `c00844e` 字节相同；原因是后续实机遇到连续空补读引发
+reset，尚不能排除自动补读误判。源码保留开发中的新恢复策略，不能把 HEAD 等同于
+已安装 daemon。初始化前主动失败/取消/恢复及普通启动已完成首轮实机验证；
 可选运行中窗口录制默认关闭。下文末尾的增量记录按时间排列，其中早先的
 “尚未安装”是当时状态；最新部署记录见末节，不能据早先记录判断当前版本。
 
-已部署：新增 `VIDIOC_HIMAX_REARM` 和用户态无复位停帧恢复预算。
+开发中：新增 `VIDIOC_HIMAX_REARM` 和用户态无复位停帧恢复预算。
+当前 HEAD 已将自动补读改为 `--experimental-rearm` 显式启用，**默认关闭**，
+默认保留四秒停帧等待；systemd unit 不带该参数。`--observe`/`--info` 拒绝与实验
+选项组合。该开关不代表自动恢复已验收，只是防止从 HEAD 默认构建时重新启用已知
+有现场疑点的策略；当前已安装 daemon 仍是上述回退版本。
 正常模式 200 ms、IDLE 3600 ms 没有生产进展后先补读，不清 baseline 或重建 epoch；
 超过有界重试预算才走 supervisor。`--observe` 不主动补读；新 daemon 遇到旧模块
 ENOTTY 则保留四秒回退。日志 `producer_rearm` 将 `transferred` 与 `valid_after`
@@ -16,8 +22,11 @@ ENOTTY 则保留四秒回退。日志 `producer_rearm` 将 `transferred` 与 `va
 [Offload 文档](../docs/touch-offload.md)。
 实机 IDLE 主动补读返回过全零，后续正常 IRQ 同 epoch 恢复有效数据；这不是故障恢复
 验收。`b317a36` 因此修正了无效帧不能清累计重试次数/沿用旧 IDLE 标志的逻辑。
-安装后进入正常 IDLE，统计 877→887→911 帧、bad=1（启动全零）不增长、stale=0、
-无触摸报告、NRestarts=0。该测试启动项 initramfs 已同步，更新镜像尚未重启验收。
+首轮安装后进入正常 IDLE，统计 877→887→911 帧、bad=1（启动全零）不增长、stale=0、
+无触摸报告、NRestarts=0；后续有触摸报告的运行中出现五帧全零补读并触发 reset，
+所以短期无触摸通过不足以证明该策略适合日常运行。详见审计末节的时序记录。
+回退 daemon 后统计 1534 帧、bad/stale=0、109 次触摸报告、121 个 IDLE 帧、
+同一 epoch、NRestarts=0。该测试启动项 initramfs 已同步，更新镜像尚未重启验收。
 
 默认数据路径为：
 
@@ -93,7 +102,7 @@ native sense-on 由共享 `hx_ahb_sense_on()` 执行：接口唤醒、ISR 清零
 `HIMAX_V4L2=0` 仍走既有 `hx_raw_power_on()`：保留 sorting 读回、A8 检查和 legacy
 runtime 重放。这条旧路径的故障测试继续保留。
 
-后续前置检查（代码已构建，尚未试载/安装）：V4L2 bring-up 在上述完整初始化之前，
+已安装的前置检查：V4L2 bring-up 在上述完整初始化之前，
 先以 `F3 13 00` 读取一个 master bus 字节。与固定上游 `DeviceRuntime::StepBringUp`
 一致，传输成功但读到零时，只调度 500 ms 后再探测，不执行 reset/OTP/AFE，不递增
 初始化失败次数或新建 epoch；读取失败走既有 200→500→1000→1500→2000 ms 退避。

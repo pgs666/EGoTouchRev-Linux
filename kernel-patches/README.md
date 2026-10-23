@@ -247,3 +247,18 @@ Image、DTB、BLS entry 的 SHA-256 复核通过，默认启动项和 DKMS mask 
 解包的 Himax/GPI/SPI/uinput 与已安装模块一致；默认启动选择及 DKMS mask 保留。
 更新镜像未重新启动验证。旧模块/daemon/initramfs 在
 `deploy-logs/producer-rearm-install-bF7aAyWj/previous-*`，没有删除。
+
+## 2026-10-23：master bus-ready 模块已安装，自动 rearm daemon 临时回退
+
+当前模块更新到 `7f6c534` 普通构建，加入初始化前 master `0x13` 非零检查；
+build ID `5b6f1d1cdba49f6729ffa7c3900ba74c92f65cd5`。启动/两次显式 reset、
+owner/限频/STREAMOFF、672 帧 fresh strict replay 通过。
+两份测试 initramfs SHA-256：
+`471ad28949f94598a720930cc15a79720020adcaf3195675187f349f18d443b2`，
+解包模块核对通过；Image、DTB、BLS 和 SPI/GPI 未变，未自动重启。
+
+后续有触摸报告的运行出现五帧全零 rearm，触发一次 AFE reset。故 daemon 回退到
+`c00844e` 的四秒等待版，保留 bus-ready kernel，新自动恢复策略继续开发。
+这不是主控制器内存损坏事故；taint=4096、无新增 kernel fault。详细时序与未获验收
+范围见 [SPB 后端审计末节](../docs/windows-spb-backend-audit.md)。
+旧模块/镜像及回退证据在 `deploy-logs/bus-ready-install-8HLvWGMV/`。

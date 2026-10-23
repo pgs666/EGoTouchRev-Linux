@@ -58,8 +58,17 @@ threaded IRQ 读硬件；四秒超时、混合错误五帧阈值不是 Windows �
 再下一项已补 master bus-ready 前置检查：开始完整 reset/OTP/AFE 之前读 `0x13`，
 零响应只等 500 ms，读取失败退避，不把“尚未供电”直接变成重复初始化。
 生产启动函数与固定上游 `ProbeBus/check_bus` 直接编译对照通过；
-候选普通模块已构建但尚未试载/安装。它只满足 master 非零条件，
+普通模块已通过启动/显式 reset 试载并安装，测试启动项 initramfs 同步。
+它只满足 master 非零条件，
 不等于 Windows 双通道和 handle reopen 语义已全部移植。
+
+后续日常运行发现新的阻塞：连续五次主动补读交付全零，触发一次 raw health reset。
+缺少该时段同步 raw，尚不能判定是真实 producer 故障还是主动补读对静默的误判；
+之前无触摸的短期通过不能推广成恢复策略验收。已保留新 kernel/bus-ready，
+将 daemon 回退到 `c00844e`，不再自动发 kick。下一步需要区分主动空轮询与正常 IRQ
+异常帧，审查 active→IDLE 过渡的等待策略及 strict replay 记录后再重新启用。
+HEAD 同时改为显式 `--experimental-rearm` 才使用新策略，默认构建/服务保持四秒
+等待路径；当前没有以开关替代实现剩余工作，也没有宣称恢复移植完成。
 
 | 范围 | 当前状态 | 尚需证据或实现 |
 |---|---|---|

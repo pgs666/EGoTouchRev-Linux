@@ -20,6 +20,14 @@ int main() {
     Recovery recovery;
     Check(recovery.Next(stream, base, false) == Step::None, "stopped has no timeout");
     stream.State({HX_RAW_ABI_VERSION, 1, 1}, base);
+    Recovery disabled;
+    for (unsigned time : {0u, 200u, 3600u, 4000u})
+        Check(disabled.Next(stream, base + time * ms, false, false) == Step::None,
+              "disabled policy cannot request active/IDLE/startup kicks");
+    Check(disabled.Next(stream, base + 4001 * ms, false, false) == Step::Exhausted,
+          "disabled policy retains four-second supervisor fallback");
+    Check(disabled.Next(stream, base + 200 * ms, false, true) == Step::Rearm,
+          "explicit experimental enable uses separate rearm budget");
     Check(stream.Sequence() == 0, "startup rearm can address sequence zero");
     Check(recovery.Next(stream, base + 199 * ms, false) == Step::None, "wait full active timeout");
     Check(recovery.Next(stream, base + 200 * ms, false) == Step::Rearm, "missing first IRQ can rearm");

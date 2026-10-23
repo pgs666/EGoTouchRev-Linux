@@ -15,6 +15,9 @@ assert "afeStarted && lastFrameValid &&" in daemon
 assert daemon.index("const auto error = himax::ToThpMaster(") < daemon.index("producerRecovery.Frame(lastFrameValid)")
 assert daemon.index("producerRecovery.Frame(lastFrameValid)") < daemon.index("frameHealth.Observe(error)")
 assert "lastFrameValid = error == himax::FrameError::None;" in daemon
+assert "bool experimentalRearm = false;" in daemon
+assert 'arg == "--experimental-rearm"' in daemon
+assert "(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle), experimentalRearm)" in daemon
 with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     root = Path(directory)
     (root / "HimaxChipFrame.cpp").write_bytes(windows)

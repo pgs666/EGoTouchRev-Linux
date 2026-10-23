@@ -290,3 +290,72 @@ Release 50/50、完整 ASan/UBSan 50/50（107.74 秒）通过；kernel checkpatc
 build ID `5b6f1d1cdba49f6729ffa7c3900ba74c92f65cd5`，
 本机产物 `artifacts/bus-ready-himax1/himax-spi.ko`。
 此处仍为未试载/安装状态，不能据 host 的零值注入声称观察到实机未供电或供电恢复。
+
+### bus-ready 试载/部署与新发现：自动空补读触发 reset
+
+`7f6c534` 普通模块随后临时试载：startup 及两次显式 reset 通过，
+transport test 的 epoch 为 1→2→3，387 ms 时跨 epoch reset 被限频拒绝；
+owner、参数、旧 epoch、STREAMOFF 检查通过。六秒 fresh 采集为 672 帧，
+bad/stale=0，strict replay `live_output_verified=1`。该试验没有触摸报告。
+结束恢复了之前模块/daemon，SPI/GPI build-ID notes 一致，taint=4096，无新增 fault。
+证据：`deploy-logs/bus-ready-trial-coge3vFI/`。
+
+随后将该普通模块安装到测试内核，daemon 起初仍为 `b317a36`。
+启动统计 876 帧、bad=1（启动全零）、stale=0；然而继续运行期间出现以下记录：
+
+| 内核启动后时间（秒） | 记录 |
+|---:|---|
+| 13359.850231 | rearm 传输成功，after_sequence=1425 |
+| 13360.055748 | rearm 传输成功，after_sequence=1426 |
+| 13360.260170 | rearm 传输成功，after_sequence=1427 |
+| 13360.464542 | rearm 传输成功，after_sequence=1428 |
+| 13360.670433 | rearm 传输成功，after_sequence=1429 |
+| 13360.670636 | raw master health 请求恢复，原因 all-zero |
+| 13361.088831 | AFE epoch=2 |
+
+之后统计 2311 帧、bad=6（含启动全零）、stale=0、106 次触摸报告；
+`producer_rearm requested=5 transferred=5 valid_after=0`，
+一次 AFE reset。daemon PID 不变、systemd 无自动重启、内核没有新 Oops/WARN/坏页。
+因此“服务没重启”不能代表没有触控恢复/复位。
+
+没有该时段的同步 raw/完整逐帧状态，不能直接断言是主动误读、进入 IDLE 后状态滞后、
+真实 IRQ 停顿或其他硬件故障。只能确认现有主动补读路径制造/观察到五个空包，并
+将其送入正常 IRQ 的混合错误阈值，随后触发 reset。此前主动 IDLE 试验已经证明
+空补读不一定表示 producer 坏了，所以 **当前自动恢复策略的实机适用性未获验收**。
+源码的 50 项测试也没有覆盖这个真实时序，不应以其全绿反驳现场。
+
+已将已安装 daemon 临时回退到原 `c00844e`：
+SHA-256 `72ce2c8d8ef5e515769622172d35263f24ffd060b9e23e7334fbbac3e1a1847d`，
+四秒等待策略，不调用 rearm。保留 `7f6c534` 的 kernel module（bus-ready 与该问题独立），
+build ID `5b6f1d1cdba49f6729ffa7c3900ba74c92f65cd5`。
+回退后 PID `1256329`、epoch=4，统计 1534 帧、bad/stale=0、109 次触摸报告、
+121 个 IDLE 帧、NRestarts=0；只证明这段运行，没有证明根因已消除。
+
+该测试启动项的 `/boot`/ESP initramfs 已同步：
+`471ad28949f94598a720930cc15a79720020adcaf3195675187f349f18d443b2`，
+解包 Himax/GPI/SPI/uinput 与已安装文件一致。Image、DTB、BLS entry、
+SPI/GPI 运行 notes 不变，未自动重启；新镜像未冷启动验收。
+旧模块、两份旧 initramfs、部署/回退日志在
+`deploy-logs/bus-ready-install-8HLvWGMV/`；
+`service-stall-timed.log` 保留上述现场，`service-after-daemon-rollback.log` 为回退后统计。
+
+重新部署新 daemon 前必须补齐：
+
+1. 为主动读取的空包保留可核实来源；不能直接等同正常 IRQ 的错误帧。
+2. 分清元数据包交付和有效固件/自然 IRQ 进展，防止主动空读刷新超时证据。
+3. 检查 active→IDLE 与无手指静默的等待窗口，尤其缺少 Windows slave 通道时的差异；
+   没有实机状态前不把一个新的时间常量称为根因修复。
+4. 为上述分支补上 host regression、会话/strict replay 来源记录和实际过渡采集。
+
+为避免未来默认部署重新打开未验收的路径，HEAD 新增 `--experimental-rearm`，
+默认 false；默认仍四秒等待后由 supervisor 重建流，`--info` 和 `--observe` 禁止
+组合实验开关。生产 `ProducerRecovery::Next` 有明确 disabled 分支；host regression
+验证关闭时不会在 200/3600/4000 ms 申请 kick、超过四秒才耗尽，显式启用才进入新策略。
+CLI 测试检查组合拒绝及 help 默认提示；引用集成检查 daemon 将实际选项传入 policy。
+内核窄接口保留，没有用临时开关宣称移植完成；已安装 daemon 仍是回退版本。
+带此默认门控的源码 Release 50/50、完整 ASan/UBSan 50/50（108.38 秒）通过。
+本机新构建 daemon SHA-256 为
+`0d8344638fc78d523825cd9f1b8715de30d98d039ca2798b431a786f7003e6ba`，
+未替换上述已回退的运行程序；最终核对 service active、PID `1256329`、
+NRestarts=0，运行 exe 与旧版本备份一致，两份新测试 initramfs 相同，kernel health
+没有新增 fault。这些结果没有解除自动 rearm 的现场验收缺口。

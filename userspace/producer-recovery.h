@@ -14,7 +14,9 @@ class ProducerRecovery {
 public:
     enum class Step { None, Rearm, Exhausted };
 
-    Step Next(const StreamState& stream, uint64_t now, bool idle) {
+    Step Next(const StreamState& stream, uint64_t now, bool idle, bool enabled = true) {
+        if (!enabled)
+            return stream.TimedOut(now) ? Step::Exhausted : Step::None;
         if (!stream.Running()) {
             m_epoch = m_progress = m_sequence = m_lastAttempt = 0;
             m_attempts = 0;
