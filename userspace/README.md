@@ -2,12 +2,12 @@
 
 当前本机部署（2026-10-24）：测试内核 `7.1.8-gaokun3-himax1`，已安装支持
 精确 token 异步重建的普通模块、配套 daemon/replay 和 `himaxctl`，保留异步启动清帧、
-两帧队列及边缘首点修正。**常驻服务已开启同进程 AFE 重建；主动补读仍关闭。**
-正常 IDLE 仍允许四秒等待，持续停帧后优先重建 AFE，失败/超预算再退出给
-supervisor。裸运行 daemon 不加选项仍保持原回退行为；service 显式添加
-`--experimental-restart`，没有添加 `--experimental-rearm`。
+两帧队列及边缘首点修正。**常驻服务已开启先无复位补读、耗尽后同进程 AFE 重建。**
+active/IDLE 的等待预算分别按 master-only Windows 适配策略执行；失败/超预算再
+退出给 supervisor。裸运行 daemon 不加选项仍保留四秒等待回退；service 显式添加
+`--experimental-rearm --experimental-restart`。
 可选运行中窗口录制仍默认关闭，不改变 baseline/追踪算法。下文增量记录按时间
-排列，早先“尚未安装/默认关闭重建”是当时状态；当前部署以本节及末节为准。
+排列，早先“尚未安装/默认关闭补读或重建”是当时状态；当前部署以本节及末节为准。
 
 运行中的手动控制：
 
@@ -33,33 +33,17 @@ sudo himaxctl reset --wait
 `valid_epoch/valid_sequence` 与普通 epoch/sequence 分开，避免把初始化完成通知
 或无效包误认成 reset 已恢复数据。IDLE 下校准反馈可能要等下一个慢速帧周期。
 
-开发中：新增 `VIDIOC_HIMAX_REARM_TAGGED` 和用户态无复位停帧恢复预算。
-当前 HEAD 已将自动补读改为 `--experimental-rearm` 显式启用，**默认关闭**，
-默认保留四秒停帧等待；systemd unit 不带该参数。`--observe`/`--info` 拒绝与实验
-选项组合。该开关不代表自动恢复已验收，只是防止从 HEAD 默认构建时重新启用已知
-有现场疑点的策略；当前已安装配套新程序，但普通服务不传主动补读参数。
-最新开发进一步增加 `VIDIOC_HIMAX_REARM_TAGGED` 与 HXST 来源标志，
-区分明确的空轮询和 IRQ 异常包；只豁免“已标记主动读 + 全零”，不豁免 checksum、
-bus filler 或未知大小。来源会保留到 raw/strict session replay；旧模块返回 ENOTTY
-时按保守路径等待，不猜测来源。已配套安装，但仍未默认启用实验策略。
-正常模式 200 ms、IDLE 3600 ms 没有生产进展后先补读，不清 baseline 或重建 epoch；
-超过有界重试预算才走 supervisor。`--observe` 不主动补读；新 daemon 遇到旧模块
-ENOTTY 则保留四秒回退。日志 `producer_rearm` 将 `transferred` 与 `valid_after`
-分开统计，后者只是后续有效帧的观察，不能证明故障一定由 kick 修复。会话回放记录
-补读交付的普通 HXST 帧，不记录/重放真实硬件 kick；strict replay 不是总线操作复现。
-约束和实机测试缺口见 [SPB 后端审计](../docs/windows-spb-backend-audit.md) 和
-[Offload 文档](../docs/touch-offload.md)。
-实机 IDLE 主动补读返回过全零，后续正常 IRQ 同 epoch 恢复有效数据；这不是故障恢复
-验收。`b317a36` 因此修正了无效帧不能清累计重试次数/沿用旧 IDLE 标志的逻辑。
-首轮安装后进入正常 IDLE，统计 877→887→911 帧、bad=1（启动全零）不增长、stale=0、
-无触摸报告、NRestarts=0；后续有触摸报告的运行中出现五帧全零补读并触发 reset，
-所以短期无触摸通过不足以证明该策略适合日常运行。详见审计末节的时序记录。
-回退 daemon 后统计 1534 帧、bad/stale=0、109 次触摸报告、121 个 IDLE 帧、
-同一 epoch、NRestarts=0。该测试启动项 initramfs 已同步，更新镜像尚未重启验收。
-随后安装 `1674f8e` 的保守默认版，日志为 `producer_rearm=disabled`：
-878→917 帧，bad=1（启动全零）不增长、stale=0、epoch=1、NRestarts=0、
-无触摸报告。受控单次主动补读则确认来源标记落盘与后续 IRQ 清除标记，不能据此
-推断自动补读在实际故障下可恢复。最新证据见 SPB 审计末节。
+读帧恢复使用 `VIDIOC_HIMAX_REARM_TAGGED`，普通运行约 200 ms、已允许 IDLE
+长等待时约 3600 ms 没有进展后申请一次无复位补读；重试预算耗尽后才申请 AFE
+重建。来源标记区分主动空轮询与真实 IRQ 异常，只把“标记补读 + 全零”当 no-data，
+不清已有错误或更新 baseline；checksum、bus filler、长度错误继续按异常处理。
+EnterIdle 传输成功立即允许长等待，合法 active 帧才取消，避免过渡期过早补读。
+旧模块不支持 tagged ioctl 时保留四秒回退，观察模式不主动恢复。
+`himaxctl status` 暴露 `producer_rearm`、补读请求/空读/之后有效数据，以及自动
+AFE 重建计数。传输成功和后续有效数据分开，不把后者当作补读修复故障的因果证明。
+严格会话回放保留来源并验证输出，不复现真实硬件操作。历史空补读导致 reset、
+回退、修正及受控试载记录见 [SPB 后端审计](../docs/windows-spb-backend-audit.md)；
+真实故障、手势/PM 和长期运行验收仍有缺口。
 
 默认数据路径为：
 
@@ -1681,3 +1665,16 @@ completion marker 和正常清状态握手，修正了前次仅观察半秒而�
 没有新增测试代码或改变内核/启动镜像；旧程序保存在
 `deploy-logs/operator-feedback-2PoDRond/`。这些结果证明命令/回执闭环，不证明
 任意触控异常都能被校准或重建修复。
+
+### 2026-10-24：常驻服务启用两级读帧恢复
+
+常驻服务、可选 live-capture 配置及 fresh 采集脚本现均启用
+`--experimental-rearm --experimental-restart`：先有界无复位补读，预算耗尽后
+同进程重建 AFE，失败再交给 supervisor。`himaxctl status` 增加两级恢复的
+开关及计数，便于区分正常产帧与自动恢复；正常触控算法未改。
+
+已编译并安装用户态程序及配置，未更换模块或启动镜像，没有新增测试代码。
+安装时屏幕关闭，未触发补读或重建；随后自然亮屏，同一 PID=2818725 收到
+2833 帧，bad/stale=0，两级恢复计数及 NRestarts 均为 0。这只确认当次正常
+产帧，不代表真实停帧恢复或边缘手势已验收。备份与安装记录保存在
+`deploy-logs/read-recovery-install-U19x7ZPG/`。

@@ -506,6 +506,13 @@ int main(int argc, char** argv) {
                         " afe_status=" + std::to_string(solver->LastAfeStatus()) +
                         " valid_epoch=" + std::to_string(lastUsableEpoch) +
                         " valid_sequence=" + std::to_string(lastUsableSequence) +
+                        " producer_rearm=" + std::to_string(experimentalRearm) +
+                        " rearm_requests=" + std::to_string(rearmRequests) +
+                        " rearm_empty=" + std::to_string(emptyRearms) +
+                        " rearm_valid_after=" + std::to_string(rearmValid) +
+                        " afe_restart=" + std::to_string(experimentalRestart) +
+                        " afe_restarts=" + std::to_string(restartScheduled) +
+                        " afe_recovered=" + std::to_string(restartRecovered) +
                         " restart_waiting=" + std::to_string(afeRestart.Waiting()) +
                         " calibration=" + control->CalibrationState() +
                         " calibration_done_frames=" + std::to_string(calibrationFrames));

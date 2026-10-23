@@ -97,11 +97,10 @@ INFO 与每帧的 `payload_size` 表示实际读取长度；新用户态兼容�
 新接口及用户态策略已编译/离线测试，曾在 `7.1.8-gaokun3-himax1` 部署普通模块
 与修正后的 daemon。后续有触摸报告的实机运行出现五个空补读触发 reset，曾将
 daemon 回退到 `c00844e`。随后来源标记/no-data 修正已随 `1674f8e` 配套安装，
-但仍默认关闭自动补读、继续四秒等待。下文新恢复策略仍是实验代码；
-最新时序与风险边界见 SPB 后端审计末节。
-HEAD 现要求显式 `--experimental-rearm` 才自动使用补读；不带该选项时仍采用四秒
-停帧等待，普通 service unit 不添加实验参数。实验模式拒绝与 `--info`/`--observe`
-组合。接口及代码保留，后续在来源区分、空包和过渡时序验证后再评估默认启用。
+当时默认关闭自动补读、保留四秒等待。随后补齐独立 IDLE retry 状态和来源处理，
+再接入同进程 AFE 重建；当前普通 service 已显式启用这两层恢复。
+不带 `--experimental-rearm` 的裸运行仍采用四秒等待，`--info`/`--observe` 不允许
+恢复选项。具体部署与尚未覆盖的时序见 SPB 后端审计及 userspace README 的当前状态。
 
 邮箱协议的生产实现位于 `hx-afe.c`：写入 16 字节包体，再写四字节触发头，最后读回
 16 字节；只有三步均成功才轮转五个槽位，任意失败保留当前槽位供重试。host 测试会
@@ -370,7 +369,7 @@ raw `--hxst` 单独列出 `empty_rearms`，不把它们称为有效帧；没有�
 同进程重建目前需要显式 `--experimental-restart`，独立于 `--experimental-rearm`。
 未开启时仍按四秒 stall deadline 退出给 supervisor；只开 restart 时在四秒耗尽后
 调用 +4；两者都开时在已有 producer kick 预算耗尽后调用 +4。旧模块 ENOTTY 或
-其他致命请求错误仍退出给 supervisor。该选项不是重新启用默认自动 kick。
+其他致命请求错误仍退出给 supervisor。两个选项可以独立选择，当前 service 两者都启用。
 
 重建受理立即停止 solver/input，并在事件队列尚未排空时就 fence 旧 epoch；
 无效新帧/SOS 数据和 running event 均不能记为恢复。新 epoch 的 raw 与 AFE status
@@ -378,7 +377,7 @@ raw `--hxst` 单独列出 `empty_rearms`，不把它们称为有效帧；没有�
 最多连续三次受理；连续三十秒好数据且无过长间隔后才恢复预算。它们是本地边界，
 不是 Windows 原样参数。等待期间不嵌套发 frame-bound reset，不因更多坏帧无限
 重置等待时间；既有 250 ms input-only release 保留。该路径尚未实机故障验收，
-当前默认 unit 显式添加 `--experimental-restart`，仍不添加 `--experimental-rearm`；
+当前默认 unit 显式添加 `--experimental-rearm --experimental-restart`；
 带 live-capture 的可选 drop-in 和 fresh 采集脚本也保留相同恢复行为。
 本机已配套安装模块/daemon，并同步测试内核的 initramfs；真实故障恢复和 PM/
 手势验收仍未完成，受控 IDLE 重建不能代替它们。当前安装状态见 SPB 审计。

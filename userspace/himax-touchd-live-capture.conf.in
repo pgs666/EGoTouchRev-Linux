@@ -5,4 +5,4 @@
 StateDirectory=himax-touchd-captures
 StateDirectoryMode=0700
 ExecStart=
-ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/himax-touchd --experimental-restart --control --live-capture-dir /var/lib/himax-touchd-captures --live-capture-seconds 10
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/himax-touchd --experimental-rearm --experimental-restart --control --live-capture-dir /var/lib/himax-touchd-captures --live-capture-seconds 10
