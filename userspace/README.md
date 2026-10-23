@@ -93,6 +93,15 @@ native sense-on 由共享 `hx_ahb_sense_on()` 执行：接口唤醒、ISR 清零
 `HIMAX_V4L2=0` 仍走既有 `hx_raw_power_on()`：保留 sorting 读回、A8 检查和 legacy
 runtime 重放。这条旧路径的故障测试继续保留。
 
+后续前置检查（代码已构建，尚未试载/安装）：V4L2 bring-up 在上述完整初始化之前，
+先以 `F3 13 00` 读取一个 master bus 字节。与固定上游 `DeviceRuntime::StepBringUp`
+一致，传输成功但读到零时，只调度 500 ms 后再探测，不执行 reset/OTP/AFE，不递增
+初始化失败次数或新建 epoch；读取失败走既有 200→500→1000→1500→2000 ms 退避。
+所有 panel/PM/stream/shutdown 门控在探测前执行，诊断 pre-SPI 失败注入也在探测前。
+这里只移植启用中的 master 通道，不访问 slave，不通过重载父 SPI/GPI 模拟 Windows
+handle reopen。非零（包括 `0xff`）只满足 Windows 的弱前置条件，不代表 IC 身份、
+固件已 ready 或 raw 质量；后续 identity/reload/raw 检查保持不变。
+
 直接源码对照通过
 [`RawPrepareReference.cmake`](cmake/RawPrepareReference.cmake)，提取未经修改的
 `himax_mcu_reload_disable`、`himax_mcu_assign_sorting_mode`、`hx_set_N_frame`、

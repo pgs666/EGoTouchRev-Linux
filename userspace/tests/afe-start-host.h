@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
+typedef uint8_t u8;
 
 #ifdef __cplusplus
 extern "C" {
@@ -30,6 +31,10 @@ struct himax_ts_data {
     uint32_t frame_flags;
     int detect_result, init_result, calibration_result, rate_result, drain_result;
     unsigned detects, otps, inits, drains, calibration, rate, sleeps, irq_changes;
+    unsigned probes;
+    bool probe_value_set;
+    unsigned char probe_value;
+    int probe_result;
     unsigned stopped_events, started_events, scheduled;
     unsigned work_kinds[64], delays[64];
     unsigned lifecycle_locks, mutex_locks, unlocks, returned_buffers, returned_state;
@@ -39,6 +44,8 @@ void hx_start_or_retry(struct himax_ts_data *);
 int hx_stream_on(struct himax_ts_data *);
 void hx_stream_off(struct himax_ts_data *);
 unsigned hx_windows_backoff(int failures);
+bool hx_windows_bus_ready(bool io_ok, unsigned char master, unsigned char slave);
+unsigned hx_windows_bus_poll(void);
 
 static inline void *vb2_get_drv_priv(struct vb2_queue *q) { return q->drv_priv; }
 static inline void himax_lock(struct himax_ts_data *ts) { ++ts->lifecycle_locks; }
@@ -53,6 +60,14 @@ static inline void himax_return_buffers(struct himax_ts_data *ts, enum vb2_buffe
 static inline int hx83121a_chip_detect(struct himax_ts_data *ts) {
     ++ts->detects;
     return ts->detect_result;
+}
+static inline int himax_spi_read(struct himax_ts_data *ts, unsigned command,
+                                unsigned char *data, unsigned length) {
+    ++ts->probes;
+    if (command != 0x13 || length != 1) return -EINVAL;
+    if (ts->probe_result) return ts->probe_result;
+    *data = ts->probe_value_set ? ts->probe_value : 0x31;
+    return 0;
 }
 static inline int himax_get_project_id_otp(struct himax_ts_data *ts, char *id, size_t size) {
     (void)size;
@@ -101,6 +116,7 @@ static inline uint64_t ktime_get_ns(void) { return 1000000000ULL; }
 #define dev_warn(...) ((void)0)
 #define dev_info(...) ((void)0)
 #define dev_warn_ratelimited(...) ((void)0)
+#define dev_dbg_ratelimited(...) ((void)0)
 #ifdef __cplusplus
 }
 #endif

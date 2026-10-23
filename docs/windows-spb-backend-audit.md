@@ -256,3 +256,37 @@ kernel candidate 未改。这里仍没有真实丢 IRQ、故障修复或触控�
 
 未自动重启/休眠，没有改 Android 分区或默认启动选择；新 initramfs 尚未冷启动验收。
 部署脚本、kernel health、服务统计和镜像核验保存在上述忽略目录。
+
+## 后续：初始化前的 master bus-ready 检查
+
+固定上游 `HimaxChip.cpp` 的 `ProbeBus/check_bus` 和 `DeviceRuntime.cpp`
+`StepBringUp` 还包含一层前置条件：先读总线 `0x13`，如果传输成功但返回零，
+只等待 `kBusPollInterval=500 ms` 再探测，不进入 `Chip::Init`，也不累计初始化
+失败。此前 Linux 即使面板 follower 已启用也直接进入 reset/OTP/AFE，缺少这一步。
+
+现已在生产 `himax_start_or_retry()` 接入 master-only 探测：
+
+| 探测结果 | 动作 | epoch / reset / OTP |
+|---|---|---|
+| 当前电源/队列/PM/shutdown 门控关闭 | 不探测、不排重试 | 不变、无硬件访问 |
+| SPI 成功、字节为零 | 500 ms delayed work，保留已有失败次数 | 不变、不初始化 |
+| SPI 返回错误 | 累计一次失败，使用现有有界退避 | 不变、不初始化 |
+| SPI 成功、字节非零 | 进入已有完整初始化 | 由原初始化管理 |
+
+该规则匹配上游的非零检查，包括允许 `0xff`；不是新增强制 `0x31` 常量门槛。
+不能将非零视作可靠供电/IC ready 的独立证明。Linux 只处理 master，Windows
+双通道同时非零及每五次失败重开 HAL handle 的完整语义仍未逐项移植；
+不能为模仿 reopen 而重新绑定父控制器。
+
+`AfeStartReference.cmake` 现在还直接提取固定上游 `BusProbe`、`ProbeBus/check_bus`
+以及 bus poll 常量。host 测试编译生产 startup/retry 本体，比较全部 256 种 master
+字节、SPI 失败退避、持续零响应后转为 ready、全部 64 种电源门控，以及诊断
+pre-SPI 注入仍在探测前。三个引用源文件完整 SHA-256 漂移时拒绝配置。
+
+Release 50/50、完整 ASan/UBSan 50/50（107.74 秒）通过；kernel checkpatch
+0 errors/0 warnings。普通模块在编译服务器的独立 M 目录构建，匹配
+`7.1.8-gaokun3-himax1`。本机源码与服务器 `himax-v4l2.c` 哈希一致。
+候选模块 SHA-256 `0eb279a609f68f9dd9dc3b3db6341a2df2f480f37db8b83410a041cf94411952`，
+build ID `5b6f1d1cdba49f6729ffa7c3900ba74c92f65cd5`，
+本机产物 `artifacts/bus-ready-himax1/himax-spi.ko`。
+此处仍为未试载/安装状态，不能据 host 的零值注入声称观察到实机未供电或供电恢复。

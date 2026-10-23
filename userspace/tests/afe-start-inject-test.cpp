@@ -16,7 +16,7 @@ int main() {
     ts.op_lock = {&ts};
     ts.start_test_failures = 3;
     Check(hx_stream_on(&ts) == 0 && ts.start_test_failures == 2 &&
-          !ts.detects && !ts.inits && !ts.drains && !ts.calibration && !ts.irq_enabled &&
+          !ts.probes && !ts.detects && !ts.inits && !ts.drains && !ts.calibration && !ts.irq_enabled &&
           ts.retry.failures == 1 && ts.delays[0] == 200 && ts.epoch == 1,
           "diagnostic failure is stopped/pending before hardware, not a fabricated SPI error");
     hx_stream_off(&ts);
@@ -28,10 +28,10 @@ int main() {
           "new stream restarts backoff without refreshing the per-device fault budget");
     hx_start_or_retry(&ts);
     Check(ts.start_test_failures == 0 && ts.retry.failures == 2 &&
-          ts.delays[2] == 500 && !ts.detects && !ts.started_events,
+          ts.delays[2] == 500 && !ts.probes && !ts.detects && !ts.started_events,
           "last synthetic failure still cannot run initialization or report ready");
     hx_start_or_retry(&ts);
-    Check(ts.detects == 1 && ts.inits == 1 && ts.drains == 3 && ts.calibration == 1 &&
+    Check(ts.probes == 1 && ts.detects == 1 && ts.inits == 1 && ts.drains == 3 && ts.calibration == 1 &&
           ts.rate == 1 && ts.irq_enabled && ts.started_events == 1 && ts.retry.failures == 0,
           "exhausted diagnostic budget reaches the unchanged real startup path");
     hx_stream_off(&ts);

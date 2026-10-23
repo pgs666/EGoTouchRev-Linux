@@ -49,6 +49,7 @@ int main() {
         if (!expected)
             Check(!f.ts.irq_changes && !f.ts.scheduled && f.ts.epoch == 7,
                   "duplicate work and closed gates leave IRQ, timers and epoch untouched");
+        Check(f.ts.probes == unsigned(expected), "all 64 gates also precede the physical bus probe");
     }
     for (bool detectFailure : {true, false}) {
         Fixture f;
@@ -91,6 +92,58 @@ int main() {
         const auto changes = f.ts.irq_changes;
         hx_start_or_retry(&f.ts);
         Check(f.ts.irq_changes == changes && f.ts.scheduled == 8, "late duplicate retry leaves healthy stream alone");
+    }
+    {
+        for (unsigned value = 0; value < 256; ++value) {
+            Fixture f;
+            f.ts.probe_value_set = true;
+            f.ts.probe_value = value;
+            hx_start_or_retry(&f.ts);
+            Check(f.ts.probes == 1, "one master probe per eligible attempt");
+            const bool ready = hx_windows_bus_ready(true, value, value);
+            Check(bool(f.ts.inits) == ready && bool(f.ts.detects) == ready,
+                  "master readiness matches Windows nonzero predicate for every byte");
+            if (!ready) {
+                Check(f.ts.epoch == 7 && f.ts.sequence == 123 && f.ts.stopped_events == 0 &&
+                      f.ts.retry.failures == 0 && f.ts.scheduled == 1 &&
+                      f.ts.delays[0] == hx_windows_bus_poll() && !f.ts.calibration &&
+                      !f.ts.irq_enabled && !f.ts.sleeps,
+                      "unpowered response only schedules Windows poll, no reset or failed-init epoch");
+            }
+        }
+        Check(!hx_windows_bus_ready(false, 0x31, 0x31) &&
+              !hx_windows_bus_ready(true, 0, 0x31) &&
+              !hx_windows_bus_ready(true, 0x31, 0),
+              "Windows dual-channel predicate is retained in oracle, not claimed enabled in Linux");
+        Fixture f;
+        f.ts.retry.failures = 4;
+        f.ts.probe_value_set = true;
+        for (unsigned i = 0; i < 10; ++i) hx_start_or_retry(&f.ts);
+        Check(f.ts.probes == 10 && !f.ts.detects && !f.ts.otps && f.ts.epoch == 7 &&
+              f.ts.retry.failures == 4 && f.ts.scheduled == 10,
+              "long unpowered wait never accumulates init failures or resets");
+        f.ts.probe_value = 0x31;
+        hx_start_or_retry(&f.ts);
+        Check(f.ts.inits == 1 && f.ts.started_events == 1 && f.ts.retry.failures == 0,
+              "power becoming ready starts the unchanged full initialization");
+    }
+    {
+        Fixture f;
+        f.ts.probe_result = -EIO;
+        for (unsigned i = 1; i < 8; ++i) {
+            hx_start_or_retry(&f.ts);
+            Check(f.ts.probes == i && !f.ts.detects && !f.ts.otps && !f.ts.inits &&
+                  f.ts.retry.failures == i && f.ts.delays[i - 1] == hx_windows_backoff(i) &&
+                  f.ts.epoch == 7 && !f.ts.started_events && !f.ts.stopped_events,
+                  "bus I/O failure backs off without starting reset/OTP/AFE");
+        }
+        f.ts.power.system_suspended = true;
+        hx_start_or_retry(&f.ts);
+        Check(f.ts.probes == 7, "late work cannot probe after suspend");
+        f.ts.power.system_suspended = false;
+        f.ts.probe_result = 0;
+        hx_start_or_retry(&f.ts);
+        Check(f.ts.inits == 1 && f.ts.retry.failures == 0, "transport recovery can initialize");
     }
     {
         Fixture f;

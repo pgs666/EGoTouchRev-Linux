@@ -140,16 +140,38 @@ failed:
 static void himax_start_or_retry(struct himax_ts_data *ts)
 {
 	unsigned int delay;
+	u8 bus_value = 0;
 	int ret;
 
 	if (!hx_raw_can_start(&ts->power))
 		return;
 	himax_int_enable(ts, false);
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
+	/* The bounded synthetic failure must remain before all physical SPI. */
+	if (ts->start_test_failures)
+		goto attempt;
+#endif
+	/* Windows StepBringUp waits for a nonzero 0x13 before Init. Transport
+	 * success alone does not prove panel/AFE power. Probe the finger/master
+	 * channel only; never reset/rebind the parent bus to mimic handle reopen.
+	 */
+	ret = himax_spi_read(ts, 0x13, &bus_value, 1);
+	if (ret)
+		goto failed;
+	if (!bus_value) {
+		dev_dbg_ratelimited(ts->dev, "master bus not powered/ready; waiting 500 ms\n");
+		mod_delayed_work(system_wq, &ts->panel_reinit_work, msecs_to_jiffies(500));
+		return;
+	}
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
+attempt:
+#endif
 	ret = himax_start_afe(ts);
 	if (!ret) {
 		hx_raw_retry_reset(&ts->retry);
 		return;
 	}
+failed:
 	delay = hx_raw_retry_failed(&ts->retry);
 	dev_warn_ratelimited(ts->dev, "AFE attempt %u failed (%d); retry in %u ms\n",
 			     ts->retry.failures, ret, delay);

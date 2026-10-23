@@ -254,6 +254,7 @@ if(BUILD_TESTING)
     add_test(NAME raw-transport-policy COMMAND himax-raw-policy-test)
     include(cmake/AfeStartReference.cmake)
     himax_prepare_afe_start("${UPSTREAM}/EGoTouchService/Device/runtime"
+        "${UPSTREAM}/EGoTouchService/Device/himax"
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms/himax-v4l2.c"
         "${TSACORE_OVERLAY}")
     add_executable(himax-afe-start-test tests/afe-start-test.cpp
@@ -273,6 +274,7 @@ if(BUILD_TESTING)
     add_test(NAME afe-start-reference-integration COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/afe-start-reference-test.py" "${CMAKE_COMMAND}"
         "${UPSTREAM}/EGoTouchService/Device/runtime"
+        "${UPSTREAM}/EGoTouchService/Device/himax"
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms/himax-v4l2.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AfeStartReference.cmake")
     add_executable(himax-raw-init-test ../tests/hx-raw-init-test.c
