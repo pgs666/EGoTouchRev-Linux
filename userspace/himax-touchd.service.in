@@ -6,7 +6,9 @@ StartLimitIntervalSec=0
 [Service]
 Type=notify
 NotifyAccess=main
-ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/himax-touchd --experimental-restart
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/himax-touchd --experimental-restart --control
+RuntimeDirectory=himax-touchd
+RuntimeDirectoryMode=0700
 Restart=on-failure
 RestartSec=2
 WatchdogSec=3

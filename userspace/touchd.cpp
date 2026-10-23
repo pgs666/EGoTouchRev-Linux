@@ -13,6 +13,7 @@
 #include "service-notify.h"
 #include "screen-rotation.h"
 #include "solver-screen.h"
+#include "control.h"
 
 #include <algorithm>
 #include <array>
@@ -50,12 +51,14 @@ int main(int argc, char** argv) {
     bool observe = false, infoOnly = false;
     bool experimentalRearm = false;
     bool experimentalRestart = false;
+    bool controlEnabled = false;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
         if (arg == "--observe") observe = true;
         else if (arg == "--info") infoOnly = true;
         else if (arg == "--experimental-rearm") experimentalRearm = true;
         else if (arg == "--experimental-restart") experimentalRestart = true;
+        else if (arg == "--control") controlEnabled = true;
         else if (arg == "--device" && i + 1 < argc) device = argv[++i];
         else if (arg == "--project" && i + 1 < argc) project = argv[++i];
         else if (arg == "--record" && i + 1 < argc) recording = argv[++i];
@@ -84,6 +87,7 @@ int main(int argc, char** argv) {
                       << "                    [--observe] [--record FILE.hxst]\n"
                       << "                    [--experimental-rearm] (unvalidated; default off)\n"
                       << "                    [--experimental-restart] (in-process AFE; default off)\n"
+                      << "                    [--control] (root-only himaxctl socket)\n"
                       << "                    [--live-capture-dir PRIVATE_DIR [--live-capture-seconds 1..120]]\n"
                       << "       himax-touchd [--device /dev/videoN] --info\n";
             return arg == "--help" ? 0 : 2;
@@ -99,11 +103,12 @@ int main(int argc, char** argv) {
         std::cerr << "Live capture requires its own directory and cannot be combined with --record\n";
         return 2;
     }
-    if ((experimentalRearm || experimentalRestart) && observe) {
-        std::cerr << "Experimental recovery cannot be combined with --observe\n";
+    if ((experimentalRearm || experimentalRestart || controlEnabled) && observe) {
+        std::cerr << "Recovery/control cannot be combined with --observe\n";
         return 2;
     }
-    if (infoOnly && (observe || experimentalRearm || experimentalRestart || !recording.empty() || !autoProject ||
+    if (infoOnly && (observe || experimentalRearm || experimentalRestart || controlEnabled ||
+                     !recording.empty() || !autoProject ||
                      fixedRotation || !rotationFile.empty() || !captureDirectory.empty())) {
         std::cerr << "--info cannot be combined with solver/capture options\n";
         return 2;
@@ -145,6 +150,16 @@ int main(int argc, char** argv) {
     if (!observe && !input.Open(capture.Info().coordinate_flags)) {
         std::cerr << input.Error() << '\n';
         return 1;
+    }
+    std::unique_ptr<himax::Control> control;
+    if (controlEnabled) {
+        control = std::make_unique<himax::Control>();
+        if (!control->Error().empty()) {
+            std::cerr << control->Error() << "; touch continues without operator control\n";
+            control.reset();
+        } else {
+            std::cerr << "Operator control: " << himax::Control::kPath << '\n';
+        }
     }
     std::unique_ptr<himax::SessionRecorder> recorder;
     std::unique_ptr<himax::LiveCapture> liveCapture;
@@ -419,8 +434,10 @@ int main(int argc, char** argv) {
             himax::NotifyService("WATCHDOG=1");
             heartbeat = NowNs();
         }
-        pollfd pending{capture.Fd(), POLLIN | POLLPRI, 0};
-        const int ret = poll(&pending, 1, 50);
+        pollfd descriptors[] = {{capture.Fd(), POLLIN | POLLPRI, 0},
+                               {control ? control->Fd() : -1, POLLIN, 0}};
+        auto& pending = descriptors[0];
+        const int ret = poll(descriptors, control ? 2 : 1, 50);
         if (ret < 0) {
             if (errno == EINTR) continue;
             std::cerr << "poll: " << std::strerror(errno) << '\n';
@@ -470,6 +487,58 @@ int main(int argc, char** argv) {
             std::cerr << capture.Error() << '\n';
             exitCode = 1;
             break;
+        }
+        if (control && (descriptors[1].revents & POLLIN)) {
+            himax::Control::Command command;
+            if (control->Receive(command)) {
+                if (command == himax::Control::Command::Status) {
+                    control->Reply("OK running=" + std::to_string(stream.Running()) +
+                        " epoch=" + std::to_string(stream.Epoch()) +
+                        " sequence=" + std::to_string(stream.Sequence()) +
+                        " frames=" + std::to_string(frames) + " bad=" + std::to_string(bad) +
+                        " stale=" + std::to_string(stale) +
+                        " contacts=" + std::to_string(solver->GetCachedContactCount()) +
+                        " afe_status=" + std::to_string(solver->LastAfeStatus()) +
+                        " restart_waiting=" + std::to_string(afeRestart.Waiting()));
+                } else if (command == himax::Control::Command::Invalid) {
+                    control->Reply("ERR invalid command");
+                } else if (!stream.Running() || afeRestart.Waiting()) {
+                    control->Reply("ERR AFE is stopped or reconstruction is pending");
+                } else {
+                    const bool reset = command == himax::Control::Command::Reset;
+                    const bool ok = reset && !stream.Sequence() ?
+                        capture.Restart(stream.Epoch(), 0) :
+                        capture.Command(stream.Epoch(), stream.Sequence(),
+                                        reset ? HX_RAW_RESET : HX_RAW_CALIBRATE, 0);
+                    const int error = ok ? 0 : errno;
+                    std::cerr << "Operator " << (reset ? "reset" : "calibrate")
+                              << " epoch=" << stream.Epoch() << " sequence=" << stream.Sequence()
+                              << " transport=" << error << '\n';
+                    if (!ok) {
+                        control->Reply(std::string("ERR ") + std::strerror(error));
+                    } else {
+                        control->Reply(reset ? "OK reset scheduled; confirm a new running epoch with status" :
+                            "OK calibration command sent; firmware completion is pending");
+                        if (reset) {
+                            // Fence old completed buffers while the real stopped
+                            // event waits in V4L2's separate event queue.
+                            stream.State({HX_RAW_ABI_VERSION, 0, stream.Epoch()}, NowNs());
+                            readMode.Reset();
+                            rearmPending = false;
+                            if (!input.Release()) return 1;
+                            if (recordingActive()) {
+                                himax::SessionEvent event;
+                                event.kind = himax::SessionKind::Release;
+                                event.hostTimeNs = NowNs();
+                                recordEvent(event);
+                            }
+                            // Process the actual lifecycle event before any
+                            // more buffered data; the new epoch carries SOS.
+                            continue;
+                        }
+                    }
+                }
+            }
         }
         if (!(pending.revents & POLLIN) || !capture.Frame(*packet)) {
             if (!capture.Error().empty()) {

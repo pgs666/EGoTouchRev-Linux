@@ -59,12 +59,13 @@ target_include_directories(himax-replay PRIVATE "${TSACORE}/src")
 target_link_libraries(himax-replay PRIVATE himax-tsacore)
 target_compile_options(himax-replay PRIVATE -Wall -Wextra -Werror)
 
-add_executable(himax-touchd touchd.cpp live-capture.cpp v4l2-capture.cpp input.cpp screen-rotation.cpp)
+add_executable(himax-touchd touchd.cpp live-capture.cpp v4l2-capture.cpp input.cpp screen-rotation.cpp control.cpp)
 target_include_directories(himax-touchd PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
 target_link_libraries(himax-touchd PRIVATE himax-tsacore PkgConfig::SYSTEMD)
 target_compile_options(himax-touchd PRIVATE -Wall -Wextra -Werror)
 install(TARGETS himax-touchd himax-replay RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(PROGRAMS himaxctl.py DESTINATION ${CMAKE_INSTALL_BINDIR} RENAME himaxctl)
 configure_file(himax-touchd.service.in himax-touchd.service @ONLY)
 configure_file(himax-touchd-live-capture.conf.in himax-touchd-live-capture.conf @ONLY)
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/himax-touchd-live-capture.conf"
@@ -190,7 +191,7 @@ if(BUILD_TESTING)
     target_link_libraries(himax-touchd-test-main PRIVATE himax-tsacore)
     target_compile_definitions(himax-touchd-test-main PRIVATE main=himax_touchd_main)
     target_compile_options(himax-touchd-test-main PRIVATE -Wall -Wextra -Werror)
-    add_executable(himax-daemon-restart-test tests/daemon-restart-test.cpp live-capture.cpp
+    add_executable(himax-daemon-restart-test tests/daemon-restart-test.cpp live-capture.cpp control.cpp
         touch-trace.cpp $<TARGET_OBJECTS:himax-touchd-test-main>)
     target_link_libraries(himax-daemon-restart-test PRIVATE himax-tsacore)
     target_include_directories(himax-daemon-restart-test PRIVATE "${TSACORE}/src")

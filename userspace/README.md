@@ -1,13 +1,29 @@
 # Linux 用户态触控求解
 
 当前本机部署（2026-10-24）：测试内核 `7.1.8-gaokun3-himax1`，已安装支持
-精确 token 异步重建的普通模块和 `b1fc40b` daemon/replay，保留异步启动清帧、
+精确 token 异步重建的普通模块、配套 daemon/replay 和 `himaxctl`，保留异步启动清帧、
 两帧队列及边缘首点修正。**常驻服务已开启同进程 AFE 重建；主动补读仍关闭。**
 正常 IDLE 仍允许四秒等待，持续停帧后优先重建 AFE，失败/超预算再退出给
 supervisor。裸运行 daemon 不加选项仍保持原回退行为；service 显式添加
 `--experimental-restart`，没有添加 `--experimental-rearm`。
 可选运行中窗口录制仍默认关闭，不改变 baseline/追踪算法。下文增量记录按时间
 排列，早先“尚未安装/默认关闭重建”是当时状态；当前部署以本节及末节为准。
+
+运行中的手动控制：
+
+```sh
+sudo himaxctl status
+sudo himaxctl calibrate
+sudo himaxctl reset
+```
+
+`status` 查询产帧状态、epoch/sequence、错误与当前触点数量。`calibrate` 发送 AFE
+校准请求，返回成功只表示传输完成；固件完成仍以随后 calibration-done 为准。
+`reset` 调度客户端 AFE 重新初始化，不卸载模块、不退出 daemon；随后用 `status`
+确认 epoch 增加、running=1 且 sequence 继续增长。它不承诺消除所有触控异常。
+服务默认使用 `--control`，由 systemd 创建 root 专用的 `/run/himax-touchd`。
+操作复用 daemon 的 V4L2 队列所有权，在求解线程串行执行，关屏或自动重建中会
+拒绝硬件命令。操作日志可用 `journalctl -u himax-touchd` 查看。
 
 开发中：新增 `VIDIOC_HIMAX_REARM_TAGGED` 和用户态无复位停帧恢复预算。
 当前 HEAD 已将自动补读改为 `--experimental-rearm` 显式启用，**默认关闭**，
@@ -1644,3 +1660,9 @@ fresh 采集脚本与可选 live-capture drop-in 使用相同重建设置。普�
 解包的 Himax/GPI/SPI/uinput 与磁盘一致。未改 Image、DTB、默认启动选择或 Android，
 没有自动重启；新镜像冷启动及真实触点/PM/故障恢复仍待验收。
 旧模块、程序、unit 和启动镜像备份在 `deploy-logs/restart-install-UV120Lpk/`。
+
+随后已安装上述 `himaxctl` 入口。实机 reset 前后保持 PID=2688416，
+epoch 3→4，重建后 sequence=91 并继续产帧，bad/stale=0、无服务重启。
+手动 calibration 的传输已确认，短观察窗口没有新的完成标记，未将它记作校准完成。
+本轮只更新用户态和 unit，内核模块、SPI/GPI 运行 notes 及启动镜像保持一致；
+旧程序和配置备份在 `deploy-logs/operator-install-B393RjMh/`。
