@@ -43,6 +43,12 @@ Linux 有两处宿主方向适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys
 源定义以 [`hx-v4l2-uapi.h`](../touchscreen-hx83121a-dkms/hx-v4l2-uapi.h) 为准。
 所有结构使用固定宽度字段、显式版本/长度和零保留字段，64 位字段显式对齐。
 
+可选用户态运行窗口采集不新增内核 ioctl，不另开 V4L2 consumer，也不 reset AFE。
+默认无录制管理线程/队列；显式配置后由 SIGUSR2 触发限时窗口。其 HXRC raw 格式
+不变，但侧车标注 `HXSE 2 live-no-checkpoint`，严格 session replay 拒绝中途状态；
+fresh 录制仍为 HXSE 1。配置、文件和验证边界见
+[运行中窗口录制](../userspace/README.md#不重置当前触控的运行中窗口录制)。
+
 | 接口 | 内容 |
 |---|---|
 | `V4L2_BUF_TYPE_META_CAPTURE` / `HXST` | 一个 buffer 对应一个 5184 字节 `hx_raw_frame` |

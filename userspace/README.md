@@ -543,6 +543,57 @@ suffix 中的 `0xbb` 是校准完成状态，通过 ClearStatus(8) 确认，不�
 行为变化：如果原版跳过过 checksum 合法的非固定头帧，新版会处理它，严格回放将
 明确不匹配，不会伪造当时输出。raw 回放仍可用于比较。
 
+## 不重置当前触控的运行中窗口录制
+
+代码提供可选 `--live-capture-dir PRIVATE_DIR` 和 `--live-capture-seconds 1..120`
+（默认 10 秒）。未配置时不创建录制管理线程/队列，不逐帧复制或计算诊断摘要。
+配置后不主动录制，收到 SIGUSR2 才开始，再发一次提前停止；每次结束由后台线程
+排空/关闭，上一窗口尚未关闭时拒绝新请求。主触摸线程不创建文件、不等待落盘。
+
+此能力目前仅构建和 host 验证，**尚未安装到当前正在运行的服务**。旧 daemon 的
+SIGUSR2 可能是终止信号，不能直接对旧版本发送。辅助脚本读取运行进程参数，未配置
+该选项、服务停止或 PID 改变时不发信号，也不会自动停止/重启服务。
+
+部署新版用户态后，可选择启用一次（这次服务重启会重建 AFE/solver；后续窗口不会）：
+
+```sh
+# 示例 drop-in 随 cmake --install 安装在 share/doc/himax-touchd 下，不会自动启用。
+sudo install -Dm644 /usr/local/share/doc/himax-touchd/himax-touchd-live-capture.conf \
+  /etc/systemd/system/himax-touchd.service.d/live-capture.conf
+sudo systemctl daemon-reload
+sudo systemctl restart himax-touchd.service
+
+# 之后发现异常时：不停止服务、不抢占 V4L2 队列、不校准、不重建 baseline。
+bash scripts/capture-v4l2-live.sh
+journalctl -u himax-touchd.service -b -n 40
+```
+
+systemd 的 `StateDirectory=himax-touchd-captures` 提供
+`/var/lib/himax-touchd-captures` 的私有写入目录，模式 0700；兼容现有
+`ProtectSystem=strict`，无须放宽整个文件系统权限。手动启动时须预先提供由进程
+用户拥有、group/other 不可写的目录；最终路径为 symlink 时拒绝。每个窗口使用
+独立 `live-XXXXXXXX/capture.hxst`，已有证据不覆盖。10 秒/120 Hz 原始帧约 6.2 MB，
+没有自动清理旧证据，磁盘不足时窗口失败但触控继续。
+
+保存内容包括当时的 raw、epoch/sequence/时间戳、面板身份与坐标标志，以及旁文件
+中的方向、生命周期、输出 digest/status/ctrl 和实际 AFE 命令/结果。它从已有
+算法状态中途开始，文件头明确为 **`HXSE 2 live-no-checkpoint`**，即使正常收尾
+也不是“完整可重现的 solver 会话”。`himax-replay --session` 会明确拒绝，不能因为
+平坦 raw 恰好给出相同空输出就声称现场已严格复现。可用普通 raw 回放研究矩阵：
+
+```sh
+sudo /usr/local/bin/himax-replay --hxst \
+  /var/lib/himax-touchd-captures/live-XXXXXXXX/capture.hxst > /tmp/raw-replay.csv
+```
+
+该命令从新的算法状态求解，输出不是现场触点的精确重建；真实输出摘要/动作保存在
+`.events`。需要严格逐帧验收时仍使用 `--record` 的 fresh 会话。运行窗口无历史预录，
+也没有实现 checkpoint；暂停/重启正在故障的驱动来录制会丢现场，不是替代方案。
+
+只有后台日志中的 `window saved` 表示窗口正常收尾；辅助脚本的“已发送请求”
+不是采集成功证明。无帧、目录/写入失败、队列溢出或未正常停止都不能报告成功。
+诊断开启时仍有复制、摘要和线程唤醒开销，未做实机时延基准，不能宣称零性能成本。
+
 ## 恢复旧内核算法
 
 旧内核算法为单独构建选项，不与用户态求解同时运行：
@@ -1159,3 +1210,29 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
 - 部署版服务 17:56:52 CST 累计 5256 帧、touch_reports=1409、bad/stale=0，
   solver 平均 219 µs，仍运行此前 `44e6917` 程序。短期正常不替代睡眠、切频或
   真实手势质量验收。
+
+2026-10-23 可选运行中采集实现：
+
+- 新增 `LiveCapture`：管理线程接收有界 SPSC 事件流，在线程内创建独立私有目录、
+  打开 `SessionRecorder`、排空并关闭窗口。触摸线程只提交事件/非阻塞唤醒；
+  窗口关闭不能与新窗口交叉。未配置时不创建该管理线程/队列；配置但未触发时
+  不逐帧复制证据。SIGUSR2 只置请求标志，不在 signal handler 中进行 I/O；
+- 不调用 AFE reset/calibration、停止服务或重新申请队列。窗口 raw 仍是 HXRC，
+  侧车显式区分 live-no-checkpoint 与 fresh；保留实际输出 digest、状态/方向、
+  AFE 动作及结果，但不假装已序列化 baseline/TSACore 内部状态。严格回放拒绝
+  live 文件，普通 raw 回放仅是从新状态重新求解；
+- 目录错误、真实文件大小限制引发的后台写入失败、无帧窗口、非法事件和进程退出
+  均有错误路径。上游队列丢失计数会传入 recorder 的 END footer，不会仅在日志
+  中报告掉帧、文件却标零丢失成功。正常截止、提前结束和独立多次抓取均有测试；
+- 新辅助脚本对运行进程读取参数，未配置/停止/检查期间更换 PID 时不发信号；
+  本机原服务上实际执行该拒绝路径，PID 112080、NRestarts=0、已安装 daemon
+  SHA-256 保持不变，没有发送 SIGUSR2。新版可选 systemd drop-in 只安装为文档
+  示例，不默认启用；已在独立 DESTDIR 中模拟安装，并通过 systemd unit/drop-in
+  静态验证，staging 为 `artifacts/live-capture-stage-gFVd9qX5/`；
+- 尚未安装该用户态功能、未进行当前硬件在线录制试验，也没有验证慢盘长时间阻塞、
+  真实 120 Hz 队列溢出、休眠期间的抓取或活动录制的时延影响。没有启用 TSan。
+  完整 checkpoint、故障前预录、Android 集成仍未实现，切频未验收项不变。
+- 最终代码的 44 项 Release CTest 和完整 44 项 ASan/UBSan 全部通过，新增的
+  live/CLI 与既有 fresh 会话测试同时通过；另在设置测试超时后重跑相关测试通过。
+  `bash -n`、`git diff --check` 通过。内核代码和 UAPI 未改，没有新的模块构建
+  或 initramfs 更新；当前安装/运行版本保持 `44e6917`。

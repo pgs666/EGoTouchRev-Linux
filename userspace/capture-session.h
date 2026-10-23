@@ -10,7 +10,8 @@
 
 namespace himax {
 
-enum class SessionKind { Begin, Frame, State, Release };
+enum class SessionKind { Begin, Frame, State, Release, EndWindow };
+enum class SessionOrigin { Fresh, Live };
 
 struct RecordedAction {
     uint32_t action = 0;
@@ -57,10 +58,10 @@ private:
 // Overflow/write failure disables recording, preserving input operation.
 class SessionRecorder {
 public:
-    explicit SessionRecorder(const std::string& path);
+    explicit SessionRecorder(const std::string& path, SessionOrigin origin = SessionOrigin::Fresh);
     ~SessionRecorder();
     bool Submit(const SessionEvent& event);
-    bool Close(bool complete);
+    bool Close(bool complete, uint64_t upstreamDropped = 0);
     int Error() const;
     uint64_t Dropped() const;
 

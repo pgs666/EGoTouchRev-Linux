@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "native-frame.h"
 #include "capture-session.h"
+#include "live-capture.h"
 #include "afe-action.h"
 #include "TsaCoreSolver.h"
 #include "input.h"
@@ -13,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <cerrno>
+#include <charconv>
 #include <cmath>
 #include <csignal>
 #include <cstring>
@@ -26,8 +28,10 @@
 namespace {
 volatile std::sig_atomic_t stopped = 0;
 volatile std::sig_atomic_t dumpRequested = 0;
+volatile std::sig_atomic_t captureRequested = 0;
 void Stop(int) { stopped = 1; }
 void Dump(int) { dumpRequested = 1; }
+void CaptureWindow(int) { captureRequested = 1; }
 uint64_t NowNs() {
     timespec now{};
     clock_gettime(CLOCK_MONOTONIC, &now);
@@ -36,7 +40,9 @@ uint64_t NowNs() {
 }  // namespace
 
 int main(int argc, char** argv) {
-    std::string device, project, recording, rotationFile;
+    std::string device, project, recording, rotationFile, captureDirectory;
+    unsigned captureSeconds = 10;
+    bool captureSecondsSet = false;
     std::optional<int> fixedRotation;
     bool observe = false, infoOnly = false;
     for (int i = 1; i < argc; ++i) {
@@ -46,6 +52,17 @@ int main(int argc, char** argv) {
         else if (arg == "--device" && i + 1 < argc) device = argv[++i];
         else if (arg == "--project" && i + 1 < argc) project = argv[++i];
         else if (arg == "--record" && i + 1 < argc) recording = argv[++i];
+        else if (arg == "--live-capture-dir" && i + 1 < argc) captureDirectory = argv[++i];
+        else if (arg == "--live-capture-seconds" && i + 1 < argc) {
+            const std::string_view value = argv[++i];
+            const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), captureSeconds);
+            if (error != std::errc{} || end != value.data() + value.size() ||
+                !captureSeconds || captureSeconds > 120) {
+                std::cerr << "Live capture duration must be 1..120 seconds\n";
+                return 2;
+            }
+            captureSecondsSet = true;
+        }
         else if (arg == "--rotation" && i + 1 < argc) {
             fixedRotation = himax::ParseScreenRotation(argv[++i]);
             if (!fixedRotation) {
@@ -58,6 +75,7 @@ int main(int argc, char** argv) {
             std::cerr << "Usage: himax-touchd [--device /dev/videoN] [--project ID]\n"
                       << "                    [--rotation 0..3|90|180|270] [--rotation-file FILE]\n"
                       << "                    [--observe] [--record FILE.hxst]\n"
+                      << "                    [--live-capture-dir PRIVATE_DIR [--live-capture-seconds 1..120]]\n"
                       << "       himax-touchd [--device /dev/videoN] --info\n";
             return arg == "--help" ? 0 : 2;
         }
@@ -67,8 +85,13 @@ int main(int argc, char** argv) {
         return 2;
     }
     const bool autoProject = project.empty();
+    if ((!captureDirectory.empty() && !recording.empty()) ||
+        (captureSecondsSet && captureDirectory.empty())) {
+        std::cerr << "Live capture requires its own directory and cannot be combined with --record\n";
+        return 2;
+    }
     if (infoOnly && (observe || !recording.empty() || !autoProject ||
-                     fixedRotation || !rotationFile.empty())) {
+                     fixedRotation || !rotationFile.empty() || !captureDirectory.empty())) {
         std::cerr << "--info cannot be combined with solver/capture options\n";
         return 2;
     }
@@ -79,6 +102,8 @@ int main(int argc, char** argv) {
     sigaction(SIGTERM, &action, nullptr);
     action.sa_handler = Dump;
     sigaction(SIGUSR1, &action, nullptr);
+    action.sa_handler = CaptureWindow;
+    sigaction(SIGUSR2, &action, nullptr);
 
     himax::Capture capture;
     himax::Input input;
@@ -90,6 +115,7 @@ int main(int argc, char** argv) {
         const auto& info = capture.Info();
         std::cout << "device=" << capture.Path() << "\nabi=" << info.version
                   << "\nrows=" << info.rows << "\ncols=" << info.cols
+                  << "\npayload_size=" << info.payload_size
                   << "\nproject_id=" << info.project_id
                   << "\ncoordinate_flags=" << info.coordinate_flags << '\n';
         return 0;
@@ -108,10 +134,22 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::unique_ptr<himax::SessionRecorder> recorder;
+    std::unique_ptr<himax::LiveCapture> liveCapture;
     std::unique_ptr<himax::SessionEvent> recordedFrame;
+    if (!captureDirectory.empty()) {
+        liveCapture = std::make_unique<himax::LiveCapture>(captureDirectory, captureSeconds);
+        if (liveCapture->Error()) {
+            std::cerr << "Live capture unavailable; touch continues: "
+                      << std::strerror(liveCapture->Error()) << '\n';
+            liveCapture.reset();
+        } else {
+            std::cerr << "Live capture configured: " << captureDirectory << " duration=" << captureSeconds
+                      << "s; SIGUSR2 starts/stops a window without reset\n";
+        }
+    }
+    if (!recording.empty() || liveCapture) recordedFrame = std::make_unique<himax::SessionEvent>();
     if (!recording.empty()) {
         recorder = std::make_unique<himax::SessionRecorder>(recording);
-        recordedFrame = std::make_unique<himax::SessionEvent>();
         if (recorder->Error()) {
             std::cerr << "Cannot create recording: " << std::strerror(recorder->Error()) << '\n';
             return 1;
@@ -125,12 +163,14 @@ int main(int argc, char** argv) {
         ~ReleaseOnExit() { if (!observe) input.Release(); }
     } releaseOnExit{input, observe};
     bool recordingFailed = false;
+    const auto recordingActive = [&] { return recorder || (liveCapture && liveCapture->Recording()); };
     const auto recordEvent = [&](const himax::SessionEvent& event) {
         if (recorder && !recorder->Submit(event) && !recordingFailed) {
             recordingFailed = true;
             std::cerr << "Recording incomplete; touch continues: "
                       << std::strerror(recorder->Error()) << '\n';
         }
+        if (liveCapture && liveCapture->Recording()) liveCapture->Submit(event);
     };
     auto solver = std::make_unique<Solvers::Tsa::TsaCoreSolver>();
     himax::SolverScreenState solverScreen;
@@ -144,6 +184,7 @@ int main(int argc, char** argv) {
     bool afeStarted = false;
     bool profileSelected = false;
     bool recordingHeaderWritten = false;
+    bool liveCapturePending = false;
     himax::MasterFrameHealth frameHealth;
     std::array<uint64_t, static_cast<size_t>(himax::FrameError::Count)> frameErrors{};
     uint64_t solved = 0, solveTotal = 0, solveMax = 0, deliveryMax = 0;
@@ -198,6 +239,9 @@ int main(int argc, char** argv) {
         if (recorder)
             std::cerr << "recording_error=" << recorder->Error()
                       << " dropped=" << recorder->Dropped() << '\n';
+        if (liveCapture)
+            std::cerr << "live_capture recording=" << liveCapture->Recording()
+                      << " busy=" << liveCapture->Busy() << " error=" << liveCapture->Error() << '\n';
     };
     const auto pollRotation = [&](uint64_t now) {
         if (now < nextRotationPoll) return;
@@ -213,6 +257,23 @@ int main(int argc, char** argv) {
               << " project=" << (autoProject ? "pending-OTP" : project) << '\n';
     while (!stopped) {
         const uint64_t loopNow = NowNs();
+        if (liveCapture) liveCapture->Tick(loopNow);
+        if (captureRequested) {
+            captureRequested = 0;
+            if (!liveCapture) std::cerr << "Live capture is disabled; configure --live-capture-dir first\n";
+            else if (liveCapture->Recording()) liveCapture->Stop();
+            else if (liveCapture->Busy()) std::cerr << "Live capture is still closing; try again later\n";
+            else liveCapturePending = !liveCapturePending;
+        }
+        if (liveCapturePending && profileSelected) {
+            himax::SessionEvent begin;
+            begin.kind = himax::SessionKind::Begin;
+            std::copy(project.begin(), project.end(), begin.project.begin());
+            begin.coordinateFlags = capture.Info().coordinate_flags;
+            begin.observe = observe;
+            if (!liveCapture->Start(begin, loopNow)) std::cerr << "Live capture could not start\n";
+            liveCapturePending = false;
+        }
         pollRotation(loopNow);
         if (dumpRequested) { dumpRequested = 0; printStats(); }
         if (stream.TimedOut(NowNs())) {
@@ -234,7 +295,7 @@ int main(int argc, char** argv) {
         }
         if (!observe && input.Active() && NowNs() - lastNs > 250000000) {
             if (!input.Release()) { exitCode = 1; break; }
-            if (recorder) {
+            if (recordingActive()) {
                 himax::SessionEvent event;
                 event.kind = himax::SessionKind::Release;
                 event.hostTimeNs = NowNs();
@@ -252,7 +313,7 @@ int main(int argc, char** argv) {
             hx_raw_state state{};
             while (capture.Event(state)) {
                 if (!stream.State(state, NowNs())) continue;
-                if (recorder) {
+                if (recordingActive()) {
                     himax::SessionEvent event;
                     event.kind = himax::SessionKind::State;
                     event.hostTimeNs = NowNs();
@@ -322,7 +383,7 @@ int main(int argc, char** argv) {
             std::cerr << "AFE epoch=" << epoch << " project=" << project << '\n';
         }
         solver->SetChargerPlugged(packet->flags & HX_RAW_FRAME_CHARGER);
-        if (recorder) {
+        if (recordingActive()) {
             *recordedFrame = {};
             recordedFrame->packet = *packet;
             recordedFrame->hostTimeNs = now; // Exact time used by StreamState::Accept.
@@ -354,7 +415,7 @@ int main(int argc, char** argv) {
                 std::cerr << "TSACore initialization failed\n";
                 return 1;
             }
-            if (recorder) {
+            if (recordingActive()) {
                 recordedFrame->report = report;
                 recordedFrame->status = solver->LastAfeStatus();
                 recordedFrame->ctrl = solver->LastCtrlFlags();
@@ -394,7 +455,7 @@ int main(int argc, char** argv) {
                     }
                     const bool ok = !observe && capture.Command(epoch, packet->sequence, actionType, request.param);
                     const int commandError = ok ? 0 : errno;
-                    if (recorder)
+                    if (recordingActive())
                         recordedFrame->actions[recordedFrame->actionCount++] = {
                             actionType, request.param, observe ? -1 : commandError};
                     if (!observe) {
@@ -412,7 +473,7 @@ int main(int argc, char** argv) {
             ++resetRequests;
             const bool ok = capture.Command(epoch, packet->sequence, HX_RAW_RESET, 0);
             const int commandError = ok ? 0 : errno;
-            if (recorder)
+            if (recordingActive())
                 recordedFrame->actions[recordedFrame->actionCount++] = {
                     HX_RAW_RESET, 0, commandError};
             if (ok) {
@@ -422,7 +483,7 @@ int main(int argc, char** argv) {
                 exitCode = 1;
             }
         }
-        if (recorder) recordEvent(*recordedFrame);
+        if (recordingActive()) recordEvent(*recordedFrame);
         if (exitCode) break;
     }
     if (!observe) {
@@ -432,6 +493,10 @@ int main(int argc, char** argv) {
     if (recorder && !recorder->Close(exitCode == 0)) {
         std::cerr << "Recording incomplete: " << std::strerror(recorder->Error()) << '\n';
         exitCode = 1;
+    }
+    if (liveCapture && exitCode == 0) {
+        liveCapture->Stop();
+        liveCapture->Tick(NowNs());
     }
     printStats();
     return exitCode;

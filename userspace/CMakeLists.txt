@@ -59,13 +59,16 @@ target_include_directories(himax-replay PRIVATE "${TSACORE}/src")
 target_link_libraries(himax-replay PRIVATE himax-tsacore)
 target_compile_options(himax-replay PRIVATE -Wall -Wextra -Werror)
 
-add_executable(himax-touchd touchd.cpp v4l2-capture.cpp input.cpp screen-rotation.cpp)
+add_executable(himax-touchd touchd.cpp live-capture.cpp v4l2-capture.cpp input.cpp screen-rotation.cpp)
 target_include_directories(himax-touchd PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
 target_link_libraries(himax-touchd PRIVATE himax-tsacore PkgConfig::SYSTEMD)
 target_compile_options(himax-touchd PRIVATE -Wall -Wextra -Werror)
 install(TARGETS himax-touchd himax-replay RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 configure_file(himax-touchd.service.in himax-touchd.service @ONLY)
+configure_file(himax-touchd-live-capture.conf.in himax-touchd-live-capture.conf @ONLY)
+install(FILES "${CMAKE_CURRENT_BINARY_DIR}/himax-touchd-live-capture.conf"
+    DESTINATION "${CMAKE_INSTALL_DATADIR}/doc/himax-touchd")
 install(FILES "${CMAKE_CURRENT_BINARY_DIR}/himax-touchd.service"
     DESTINATION lib/systemd/system)
 install(FILES 70-himax-raw.rules DESTINATION lib/udev/rules.d)
@@ -116,7 +119,15 @@ if(BUILD_TESTING)
     target_link_libraries(himax-session-test PRIVATE himax-tsacore)
     target_compile_options(himax-session-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME normal-session-recording COMMAND himax-session-test $<TARGET_FILE:himax-replay>)
-    set_tests_properties(normal-session-recording PROPERTIES TIMEOUT 30)
+    add_executable(himax-live-capture-test tests/live-capture-test.cpp live-capture.cpp touch-trace.cpp)
+    target_include_directories(himax-live-capture-test PRIVATE "${TSACORE}/src")
+    target_link_libraries(himax-live-capture-test PRIVATE himax-tsacore)
+    target_compile_options(himax-live-capture-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME live-capture COMMAND himax-live-capture-test)
+    add_test(NAME live-capture-cli COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/live-capture-cli-test.py" $<TARGET_FILE:himax-touchd>
+        "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/capture-v4l2-live.sh")
+    set_tests_properties(normal-session-recording live-capture live-capture-cli PROPERTIES TIMEOUT 30)
     add_executable(himax-otp-test ../tests/hx-otp-test.c
         ../touchscreen-hx83121a-dkms/hx-otp.c)
     target_include_directories(himax-otp-test PRIVATE

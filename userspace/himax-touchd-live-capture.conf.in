@@ -1,0 +1,8 @@
+# Optional diagnostic drop-in, not enabled by installation.
+# Copy to /etc/systemd/system/himax-touchd.service.d/live-capture.conf,
+# daemon-reload, then restart once to configure. Later USR2 captures do not reset.
+[Service]
+StateDirectory=himax-touchd-captures
+StateDirectoryMode=0700
+ExecStart=
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/himax-touchd --live-capture-dir /var/lib/himax-touchd-captures --live-capture-seconds 10

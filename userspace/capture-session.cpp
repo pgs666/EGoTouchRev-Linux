@@ -59,6 +59,7 @@ struct SessionRecorder::Impl {
     std::thread writer;
     int wake = -1;
     bool begun = false;
+    SessionOrigin origin = SessionOrigin::Fresh;
     uint64_t frames = 0;
 
     void Wake() const {
@@ -103,11 +104,14 @@ struct SessionRecorder::Impl {
         case SessionKind::Release:
             events << "R " << e.hostTimeNs << '\n';
             break;
+        case SessionKind::EndWindow:
+            Fail(EINVAL); // LiveCapture consumes this control item, not a disk record.
+            return;
         }
         if (!raw || !events) Fail(EIO);
     }
     void Run() {
-        events << "HXSE 1\n";
+        events << (origin == SessionOrigin::Fresh ? "HXSE 1\n" : "HXSE 2 live-no-checkpoint\n");
         for (;;) {
             SessionEvent event;
             while (queue.TryPop(event)) Write(event);
@@ -137,8 +141,10 @@ struct SessionRecorder::Impl {
     }
 };
 
-SessionRecorder::SessionRecorder(const std::string& path) : m_impl(std::make_unique<Impl>()) {
+SessionRecorder::SessionRecorder(const std::string& path, SessionOrigin origin)
+    : m_impl(std::make_unique<Impl>()) {
     auto& s = *m_impl;
+    s.origin = origin;
     s.raw.open(path, std::ios::binary | std::ios::out | std::ios::noreplace);
     if (!s.raw) { s.Fail(errno ? errno : EIO); return; }
     s.events.open(path + ".events", std::ios::out | std::ios::noreplace);
@@ -169,9 +175,13 @@ bool SessionRecorder::Submit(const SessionEvent& event) {
     return true;
 }
 
-bool SessionRecorder::Close(bool complete) {
+bool SessionRecorder::Close(bool complete, uint64_t upstreamDropped) {
     auto& s = *m_impl;
     if (s.writer.joinable()) {
+        if (upstreamDropped) {
+            s.dropped.fetch_add(upstreamDropped);
+            s.Fail(EOVERFLOW);
+        }
         if (!complete) s.Fail(ECANCELED);
         s.stopping.store(true, std::memory_order_release);
         s.Wake();
@@ -188,9 +198,14 @@ SessionReader::SessionReader(const char* path)
     if (!m_raw.Error().empty()) m_error = m_raw.Error();
     else if (m_raw.ProjectId().empty()) m_error = "Session requires HXRC panel header";
     std::array<char, 32> line{};
-    if (m_error.empty() && (!m_events.getline(line.data(), line.size()) ||
-                           std::string_view(line.data()) != "HXSE 1"))
-        m_error = "Unsupported or missing HXSE sidecar";
+    if (m_error.empty()) {
+        if (!m_events.getline(line.data(), line.size()))
+            m_error = "Unsupported or missing HXSE sidecar";
+        else if (std::string_view(line.data()) == "HXSE 2 live-no-checkpoint")
+            m_error = "Live capture has no solver checkpoint; use raw --hxst replay, not --session";
+        else if (std::string_view(line.data()) != "HXSE 1")
+            m_error = "Unsupported or missing HXSE sidecar";
+    }
 }
 
 bool SessionReader::Next(SessionEvent& e) {
