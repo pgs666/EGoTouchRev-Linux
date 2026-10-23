@@ -185,4 +185,13 @@ bool Capture::Rearm(uint64_t epoch, uint64_t sequence) {
     return ioctl(m_fd, VIDIOC_HIMAX_REARM_TAGGED, &request) == 0;
 }
 
+bool Capture::Restart(uint64_t epoch, uint64_t sequence) {
+    hx_raw_restart request{};
+    request.size = sizeof(request);
+    request.version = HX_RAW_ABI_VERSION;
+    request.epoch = epoch;
+    request.sequence = sequence;
+    return ioctl(m_fd, VIDIOC_HIMAX_RESTART, &request) == 0;
+}
+
 }  // namespace himax

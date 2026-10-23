@@ -1554,3 +1554,38 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
   备份与证据在 `deploy-logs/read-mode-install-2OwoOVHt/`；
 - 没有真实触点、真实 lost-IRQ 或系统 suspend/resume 验收，不能将短期正常 IDLE
   通过称为历史断触根因已解决，也没有因此默认启用实验恢复。
+
+### 2026-10-24：无首帧时的 AFE 重建接口（尚未接入 daemon）
+
+固定上游 `DeviceRuntime::OnStreaming()` 在 `GetFrame()` 返回 SOS 后调用
+`OnAfeSos()`、`BeginBringUp()`，保留同一个 solver/core 及进程；退出 streaming
+时 `OnAfeStopped()` 并释放输入，重建成功才 `OnAfeStarted()`。当前 Linux 的
+producer 超时耗尽仍退出 daemon，由 supervisor 重启，尚不是这条同进程流程。
+
+新增 additive ABI v2 `VIDIOC_HIMAX_RESTART`（private +4）及
+`Capture::Restart(epoch, sequence)`，只作为后续恢复闭环的基础：
+
+- `hx_raw_restart` 为 32 字节，size/version/reserved 严格校验；原有 ioctl、HXST
+  帧布局、flags 和 ABI version 不变，旧模块返回 `ENOTTY`；
+- 仅队列所有者、已开始 streaming、所有 panel/system/shutdown 门控允许、AFE
+  ready 且不在 startup cleanup 中才能申请。epoch 必须非零且精确相同，sequence
+  也必须精确相同，但允许 0，覆盖“初始化后始终没有第一帧”的情况；
+- 最近一次成功采集和成功主动读的完成时间都需至少静默 200 ms。与旧 frame-bound
+  `HX_RAW_RESET` 共用一秒限频，开始新 epoch 不重置预算；
+- owner/状态过期返回 `EBUSY`/`ESTALE`，尚未足够静默或触及限频返回 `EAGAIN`，
+  shutdown 返回 `ENODEV`。不要求有空闲 buffer，不丢弃或重标已完成的旧帧；
+- 校验和 IRQ 在同一 `op_lock` 下。IRQ 抢先产生新帧会使旧请求失效；重建请求先
+  获准则关闭 IRQ/read gate、置 SOS、发 stopped event，并调度既有异步 AFE work。
+  ioctl 自身不执行 SPI/reset GPIO，更不卸载或重绑定父 SPI/GPI；worker 才在重查
+  电源门控后进行客户端硬件初始化；
+- 返回成功只表示 **scheduled**，不是 recovered。旧 epoch 的 completed buffer
+  仍保留原序号和时间，调用者必须处理生命周期及旧数据，而非当作新流求解。
+
+当前常驻 daemon 没有调用此接口，四秒 supervisor fallback、默认关闭的实验 rearm、
+250 ms 无新帧输入释放策略均未改变。新接口不添加正常帧采集/算法开销，也没有
+以它替代尚未完成的 Windows 同进程恢复移植。
+
+下一步接入必须同时完成：无帧触发请求的会话记录/严格回放、SOS/stop/start 调用
+顺序、有界等待新 epoch 与第一份有效数据、`ESTALE/EAGAIN` 竞态处理和旧模块
+fallback。先保留显式试验入口，再做实机正常 IDLE、故障恢复及手势回归，不把
+调度成功或一份合法帧等同于触控质量恢复。

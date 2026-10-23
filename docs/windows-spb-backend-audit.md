@@ -661,3 +661,63 @@ bootctl 输出前后相同，没有自动重启或改 Android。
 `deploy-logs/two-buffer-install-jVfctxCC/`。新模块当前已运行，新 initramfs 尚未
 冷启动验收；真实有触点/过载释放、系统 PM/DPMS、长时性能和实验自动 rearm
 验收仍未完成，不能将本次部署称为完整 Windows 驱动移植完成。
+
+## 无首帧时的客户端重建：接口先行，恢复循环尚未接入
+
+重新核对固定上游 `DeviceRuntime.cpp` 的 `OnStreaming()`、`BeginBringUp()`、
+`LeaveStreaming()` 和 solver 的生命周期方法：
+
+- `GetFrame()==NoData` 只增加计数，不改变 solver/output；
+- 返回 SOS 后先 `OnAfeSos()` 置一次性 reset 控制位，再 `BeginBringUp(recover)`；
+  离开 streaming 调用 `OnAfeStopped()` 和 `FlushAllUp()`，同一进程重新执行 Init，
+  成功后 `OnAfeStarted()` 重置 adapter/control/mapper，但不重建 core 对象；
+- Linux `ProducerRecovery::Exhausted` 当前仍退出 daemon，经 supervisor 重启整个
+  solver。250 ms 无新帧输入释放是 Linux 额外安全策略，不是 Windows 的 NoData
+  分支；本项不改变或删除它。
+
+现有 frame-bound `HX_RAW_RESET` 要求 sequence 非零且与 producer 相差不超过 8，
+不能处理初始化后一直没有首帧的情况，也不应把这个宽松窗口直接用于超时重建。
+新增独立 additive `VIDIOC_HIMAX_RESTART`（private +4），请求
+`hx_raw_restart` 32 字节；允许 sequence=0，但必须非零 epoch、精确 epoch 和精确
+producer sequence，且只供分配队列的 owner 使用。ABI 版本和原有命令/帧布局不变。
+
+校验在 `op_lock` 下：全部运行/电源门控允许、controller ready、非 startup，
+最近成功 acquisition 和成功 poll completion 都至少静默 200 ms。新请求与旧
+RESET 共用 `last_command_ns[HX_RAW_RESET]` 一秒跨 epoch 限频；生产旧 RESET
+分支和新接口调用同一个 `himax_schedule_restart()`，其余命令仍为 20 ms 限频。
+拒绝不消耗预算、不发 SPI、不关 IRQ、不排 work。IRQ 抢先产生新帧使旧 token
+失效；请求抢先则关闭 read gate，使等待中的 IRQ 不再读硬件。
+
+接受请求只置 SOS、发 stopped、调度既有异步 AFE 工作；ioctl 本身没有物理 reset
+或 SPI 事务，worker 继续重查门控。它不需要空闲 buffer，也不清掉或重标已完成
+的旧 epoch 记录。**返回 0 只证明调度成功，不证明 Init/校准完成或触控已恢复。**
+新 Capture wrapper 保留 errno，旧模块 `ENOTTY`，没有隐藏的 retry 或 STREAMON。
+
+直接编译生产 validation/schedule/publication/IRQ 的 host 测试覆盖请求布局、owner、
+所有电源门控、未到首帧、前后错序 token、静默纳秒边界、跨 epoch 共享限频、
+completed buffer 证据保留及真实 pthread mutex 下 IRQ/请求/停流/休眠抢锁次序。
+旧 RESET 到共享 helper 的真实 ioctl 调用关系、启动时 limiter 不被清除由源码
+integration guard 检查；这部分不是对整个 V4L2 ioctl 栈的动态模拟。实际 Capture
+源码的 link-wrap 测试另检查请求字节、errno（含 ENOTTY）和不隐式重试。
+
+最终源码与测试版本的 Release 54/54、完整 ASan/UBSan 54/54（107.66 秒）、
+`make -C tests clean test` 和 `git diff --check` 均通过。测试不访问真实硬件，
+不把 pthread 门控模拟当成实际系统 suspend 或 V4L2 栈的故障注入验收。
+
+服务器独立 `restart-api-3weudANI` 目录按匹配配置构建普通模块成功，源码清单全部
+与本地一致，没有 warning/error；checkpatch 为 0 error/warning/check。产物及日志
+在 `artifacts/restart-api-himax1/`：
+
+- module SHA-256：`b4edb31d971ea36d074738c1f0f3014d3c4e4a73bbc7c8b041ffa44173ef38e0`；
+- build ID：`a74a57ee65c444d38a481f14ae48213e8f31b1a0`；
+- vermagic：`7.1.8-gaokun3-himax1 SMP preempt mod_unload aarch64`。
+
+这是接口检查点，**尚未在 daemon 的超时循环中调用，也没有加载/安装此候选**。
+磁盘 module/daemon 哈希仍为前节 `efa7362d…`/`f1725ef1…`，常驻 PID=2275950、
+NRestarts=0；启动镜像、SPI/GPI 父设备和 Android 未修改。现有默认四秒 fallback、
+实验 rearm 默认关闭及 baseline/跟踪均保持原样。
+
+下一步必须一起补完无帧重建请求的 session 记录/strict replay、solver SOS/stop/start
+顺序、有界等待 running/new epoch/首份有效帧、旧缓冲拒绝和 `ESTALE/EAGAIN/ENOTTY`
+退路，再受控试载。正常启动重置测试不能证明真实 producer stall 已恢复；也不能
+把本接口的代码/离线门控通过写成同进程恢复移植已完成。

@@ -125,6 +125,15 @@ sequence 1/2、下一有效包为 16，13 个丢新包有序号证据；另有 8
 Image、DTB、boot entry/default、SPI/GPI 未改，旧版备份完整；没有自动重启或
 部署 Android。镜像冷启动及有触点/PM/过载释放仍待验收，自动 rearm 继续默认关闭。
 
+同进程恢复仍有一个已确认的差异：Windows 在读帧耗尽/SOS 后保留 solver/core，
+经过 `OnAfeSos → OnAfeStopped/FlushAllUp → Init → OnAfeStarted` 重建 AFE；
+Linux producer 超时耗尽仍退出整个 daemon。新增严格 owner/epoch/精确 sequence、
+200 ms 静默和共享跨 epoch 限频的 `VIDIOC_HIMAX_RESTART`（允许 sequence=0），
+仅补齐没有首帧时申请客户端异步重建的接口，不再依赖旧 frame-bound RESET。
+当前不在 daemon 中调用、未加载新模块，不声称同进程恢复已经完成。下一步需将
+无帧请求的诊断/strict replay 与有界恢复状态机一起接入，再做真实故障及 PM 验收；
+详细接口与证据见 SPB 审计和 userspace README。
+
 | 范围 | 当前状态 | 尚需证据或实现 |
 |---|---|---|
 | 手指求解 | 直接编译固定版本上游的所有实际源码模块、adapter、solver、参数表和 mapper | 不等于恢复了上游自身裁去的原厂私有功能；仍需真实多指、边缘、快速滑动验收 |

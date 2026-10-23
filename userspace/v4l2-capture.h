@@ -21,6 +21,8 @@ public:
     bool Event(hx_raw_state& state);
     bool Command(uint64_t epoch, uint64_t sequence, hx_raw_action action, uint32_t param);
     bool Rearm(uint64_t epoch, uint64_t sequence);
+    // Success only schedules AFE reconstruction; preserve errno on failure.
+    bool Restart(uint64_t epoch, uint64_t sequence);
     int Fd() const { return m_fd; }
     const hx_raw_info& Info() const { return m_info; }
     const std::string& Error() const { return m_error; }

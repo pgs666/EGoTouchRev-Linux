@@ -281,6 +281,50 @@ static int himax_rearm(struct himax_ts_data *ts, struct file *file,
 	return ret;
 }
 
+/* op_lock held. Both legacy RESET and exact-token stalled restart use this
+ * limiter and the same client-only reconstruction. The worker rechecks power
+ * gates before doing SPI. Never reset or rebind the parent SPI/DMA devices.
+ */
+static int himax_schedule_restart(struct himax_ts_data *ts, u64 now)
+{
+	if (now - ts->last_command_ns[HX_RAW_RESET] < NSEC_PER_SEC)
+		return -EAGAIN;
+	ts->last_command_ns[HX_RAW_RESET] = now;
+	himax_int_enable(ts, false);
+	ts->power.controller_initialized = false;
+	ts->frame_flags = HX_RAW_FRAME_SOS;
+	himax_state_event(ts, false);
+	mod_delayed_work(system_wq, &ts->panel_reinit_work, 0);
+	return 0;
+}
+
+/* Unlike frame-bound RESET, no preceding frame is necessary. IRQ publication
+ * and request validation share op_lock, so an IRQ that wins makes this token
+ * stale. An accepted restart closes the read gate before releasing the lock.
+ */
+static int himax_restart(struct himax_ts_data *ts, struct file *file,
+			 const struct hx_raw_restart *request)
+{
+	u64 now;
+
+	if (request->size != sizeof(*request) ||
+	    request->version != HX_RAW_ABI_VERSION ||
+	    request->reserved[0] || request->reserved[1])
+		return -EINVAL;
+	if (ts->power.shutting_down)
+		return -ENODEV;
+	if (!vb2_is_busy(&ts->queue) || ts->queue.owner != file->private_data)
+		return -EBUSY;
+	if (!hx_raw_can_read(&ts->power) || ts->startup.active || !request->epoch ||
+	    request->epoch != ts->epoch || request->sequence != ts->sequence)
+		return -ESTALE;
+	now = ktime_get_ns();
+	if (now - ts->last_frame_ns < 200 * NSEC_PER_MSEC ||
+	    now - ts->last_poll_done_ns < 200 * NSEC_PER_MSEC)
+		return -EAGAIN;
+	return himax_schedule_restart(ts, now);
+}
+
 static irqreturn_t himax_raw_irq(int irq, void *data)
 {
 	struct himax_ts_data *ts = data;
@@ -465,6 +509,10 @@ static long himax_private_ioctl(struct file *file, void *priv,
 		ret = himax_rearm(ts, file, arg, cmd == VIDIOC_HIMAX_REARM_TAGGED);
 		goto out;
 	}
+	if (cmd == VIDIOC_HIMAX_RESTART) {
+		ret = himax_restart(ts, file, arg);
+		goto out;
+	}
 	if (cmd != VIDIOC_HIMAX_COMMAND) {
 		ret = -ENOTTY;
 		goto out;
@@ -487,21 +535,16 @@ static long himax_private_ioctl(struct file *file, void *priv,
 		goto out;
 	}
 	now = ktime_get_ns();
-	if (now - ts->last_command_ns[c->action] <
-	    (c->action == HX_RAW_RESET ? NSEC_PER_SEC : 20 * NSEC_PER_MSEC)) {
+	if (c->action == HX_RAW_RESET) {
+		ret = himax_schedule_restart(ts, now);
+		goto out;
+	}
+	if (now - ts->last_command_ns[c->action] < 20 * NSEC_PER_MSEC) {
 		ret = -EAGAIN;
 		goto out;
 	}
 	ts->last_command_ns[c->action] = now;
-	if (c->action == HX_RAW_RESET) {
-		himax_int_enable(ts, false);
-		ts->power.controller_initialized = false;
-		ts->frame_flags = HX_RAW_FRAME_SOS;
-		himax_state_event(ts, false);
-		mod_delayed_work(system_wq, &ts->panel_reinit_work, 0);
-	} else {
-		ret = himax_afe_command(ts, c->action, c->parameter);
-	}
+	ret = himax_afe_command(ts, c->action, c->parameter);
 out:
 	mutex_unlock(&ts->op_lock);
 	return ret;

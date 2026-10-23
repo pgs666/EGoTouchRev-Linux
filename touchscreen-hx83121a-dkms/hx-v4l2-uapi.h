@@ -84,6 +84,22 @@ struct hx_raw_rearm {
 	__u32 reserved[2];
 };
 
+/* Reconstruct a stalled AFE using the existing asynchronous startup path.
+ * Requires this queue's owner, a running/ready producer, exact epoch/sequence,
+ * and at least 200 ms without a successful acquisition or poll completion.
+ * sequence=0 is allowed; this does not require a previously delivered frame
+ * or a free capture buffer. Shares RESET's one-second cross-epoch rate limit.
+ * Success means scheduled, NOT initialized or recovered. Consume lifecycle
+ * events and validate fresh frames in the new epoch before resuming a solver.
+ */
+struct hx_raw_restart {
+	__u32 size;
+	__u32 version;
+	__aligned_u64 epoch;
+	__aligned_u64 sequence;
+	__u32 reserved[2];
+};
+
 /* Lifecycle events release userspace contacts immediately even if no frames
  * arrive while the panel is off. Event u.data begins with this structure.
  */
@@ -101,5 +117,6 @@ struct hx_raw_state {
  * this request so new hosts can retain the conservative timeout fallback.
  */
 #define VIDIOC_HIMAX_REARM_TAGGED _IOW('V', BASE_VIDIOC_PRIVATE + 3, struct hx_raw_rearm)
+#define VIDIOC_HIMAX_RESTART _IOW('V', BASE_VIDIOC_PRIVATE + 4, struct hx_raw_restart)
 
 #endif

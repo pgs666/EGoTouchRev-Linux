@@ -30,6 +30,9 @@ assert 'arg == "--experimental-rearm"' in daemon
 assert "lastFrameValid" not in daemon
 capture_source = (Path(native).parent.parent / "userspace" / "v4l2-capture.cpp").read_text()
 assert "return ioctl(m_fd, VIDIOC_HIMAX_REARM_TAGGED, &request) == 0;" in capture_source
+assert "return ioctl(m_fd, VIDIOC_HIMAX_RESTART, &request) == 0;" in capture_source
+# Interface-only checkpoint: do not silently enable a new runtime policy.
+assert "capture.Restart(" not in daemon
 assert "const bool fromRearm = packet->flags & HX_RAW_FRAME_REARM;" in daemon
 with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     root = Path(directory)
@@ -62,6 +65,18 @@ with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     assert "ret = himax_rearm(ts, file, arg, cmd == VIDIOC_HIMAX_REARM_TAGGED);" in ioctl
     assert ioctl.index("cmd == VIDIOC_HIMAX_REARM") < ioctl.index("cmd != VIDIOC_HIMAX_COMMAND")
     assert ioctl.index("himax_rearm(ts, file, arg,") < ioctl.index("mutex_unlock(&ts->op_lock)")
+    assert ioctl.index("mutex_lock(&ts->op_lock)") < ioctl.index("cmd == VIDIOC_HIMAX_RESTART")
+    assert ioctl.index("cmd == VIDIOC_HIMAX_RESTART") < ioctl.index("cmd != VIDIOC_HIMAX_COMMAND")
+    assert "ret = himax_restart(ts, file, arg);" in ioctl
+    assert ioctl.index("himax_restart(ts, file, arg)") < ioctl.index("mutex_unlock(&ts->op_lock)")
+    reset = ioctl[ioctl.index("now = ktime_get_ns();"):]
+    assert reset.startswith("now = ktime_get_ns();\n\tif (c->action == HX_RAW_RESET) {\n"
+                            "\t\tret = himax_schedule_restart(ts, now);\n\t\tgoto out;\n\t}")
+    assert "ts->last_command_ns[c->action] < 20 * NSEC_PER_MSEC" in reset
+    startup_afe = text[text.index("static int himax_start_afe("):
+                       text.index("static void himax_start_or_retry(")]
+    assert "HX_RAW_RESET * sizeof(ts->last_command_ns[0])" in startup_afe
+    assert "HX_RAW_RESET + 1" not in startup_afe  # New epoch must not clear RESET's limiter.
     startup = text[text.index("static void himax_start_or_retry("):
                    text.index("static void himax_return_buffers(")]
     assert "if (himax_startup_timeout(ts))\n\t\t\thimax_publish_frame(ts, ts->last_frame_ns, false);" in startup
@@ -88,6 +103,10 @@ with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     assert prepare().returncode == 0 and "renamed_rearm(" in (root / "native-out.c").read_text()
     source.write_bytes(production.replace(b"static int himax_capture_frame(", b"static int renamed_capture("))
     assert prepare().returncode == 0 and "renamed_capture(" in (root / "native-out.c").read_text()
+    source.write_bytes(production.replace(b"static int himax_restart(", b"static int renamed_restart("))
+    assert prepare().returncode == 0 and "renamed_restart(" in (root / "native-out.c").read_text()
+    source.write_bytes(production.replace(b"static int himax_schedule_restart(", b"static int renamed_schedule("))
+    assert prepare().returncode == 0 and "renamed_schedule(" in (root / "native-out.c").read_text()
     source.write_bytes(production.replace(b"static void himax_publish_frame(", b"static void renamed_publish("))
     assert prepare().returncode != 0
     source.write_bytes(production)

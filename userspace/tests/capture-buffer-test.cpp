@@ -18,6 +18,9 @@ struct Device {
     unsigned returned = 2, requests = 0, queries = 0, queues = 0;
     unsigned unmapped = 0, closed = 0, stopped = 0;
     unsigned failedMap = 99;
+    unsigned restarts = 0;
+    int restartError = 0;
+    hx_raw_restart restart{};
     std::array<hx_raw_frame*, 2> mappings{};
     std::deque<unsigned> completed;
 } device;
@@ -120,6 +123,11 @@ extern "C" int __wrap_ioctl(int fd, unsigned long operation, ...) {
     }
     case VIDIOC_STREAMON: return 0;
     case VIDIOC_STREAMOFF: ++device.stopped; return 0;
+    case VIDIOC_HIMAX_RESTART:
+        ++device.restarts;
+        device.restart = *static_cast<hx_raw_restart*>(data);
+        if (device.restartError) { errno = device.restartError; return -1; }
+        return 0;
     default: Check(false, "unexpected capture ioctl"); return -1;
     }
 }
@@ -153,6 +161,19 @@ int main() {
         Check(capture.Open("/test-himax") && capture.Start(), "two-buffer stream starts");
         Check(device.requests == 1 && device.queries == 2 && device.queues == 2,
               "both buffers mapped and queued exactly once at startup");
+        for (uint64_t sequence : {uint64_t(0), uint64_t(123)}) {
+            Check(capture.Restart(7, sequence) && device.restart.size == sizeof(hx_raw_restart) &&
+                  device.restart.version == HX_RAW_ABI_VERSION && device.restart.epoch == 7 &&
+                  device.restart.sequence == sequence && !device.restart.reserved[0] &&
+                  !device.restart.reserved[1], "restart wrapper sends exact token and zero reserved fields");
+        }
+        for (int error : {ENOTTY, ESTALE, EAGAIN, EBUSY, ENODEV, EIO}) {
+            device.restartError = error;
+            Check(!capture.Restart(7, 0) && errno == error && capture.Error().empty(),
+                  "restart failure preserves errno including unsupported old module, not fatal capture error");
+        }
+        Check(device.restarts == 8 && device.stopped == 0 && device.queues == 2,
+              "wrapper never silently retries, restarts STREAMON or mutates queue");
         *device.mappings[0] = Packet(1);
         *device.mappings[1] = Packet(2);
         device.completed = {0, 1};

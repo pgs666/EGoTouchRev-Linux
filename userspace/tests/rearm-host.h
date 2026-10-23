@@ -16,6 +16,7 @@ typedef uint64_t u64;
 typedef int irqreturn_t;
 #define IRQ_HANDLED 1
 #define NSEC_PER_MSEC 1000000ULL
+#define NSEC_PER_SEC 1000000000ULL
 #define V4L2_FIELD_NONE 0
 #define VB2_BUF_STATE_DONE 1
 #define system_wq ((void *)0)
@@ -42,11 +43,13 @@ struct himax_ts_data {
     struct list_head buffers;
     int buffer_lock;
     u64 epoch, sequence, last_frame_ns, last_rearm_ns, last_poll_done_ns;
+    u64 last_command_ns[HX_RAW_RESET + 1];
     u64 read_duration_ns;
     unsigned read_errors, frame_flags;
     unsigned char event_buf[HX_RAW_PAYLOAD_SIZE];
     int spi_error;
     unsigned reads, schedules, state_events, irq_changes;
+    bool irq_enabled, last_state_running;
     struct delayed_work panel_reinit_work, charger_work;
     void *dev;
     unsigned char afe_command_slot;
@@ -78,8 +81,8 @@ static inline void vb2_set_plane_payload(struct vb2_buffer *buf, unsigned plane,
 }
 static inline void vb2_buffer_done(struct vb2_buffer *buf, unsigned state) { buf->done = state; }
 static inline bool vb2_is_busy(struct vb2_queue *q) { return q->busy; }
-static inline void himax_int_enable(struct himax_ts_data *ts, bool on) { (void)on; ++ts->irq_changes; }
-static inline void himax_state_event(struct himax_ts_data *ts, bool on) { (void)on; ++ts->state_events; }
+static inline void himax_int_enable(struct himax_ts_data *ts, bool on) { ts->irq_enabled = on; ++ts->irq_changes; }
+static inline void himax_state_event(struct himax_ts_data *ts, bool on) { ts->last_state_running = on; ++ts->state_events; }
 static inline int himax_afe_command(struct himax_ts_data *ts, unsigned action, unsigned parameter) {
     if (parameter) return -EINVAL;
     if (action == HX_RAW_CALIBRATE) { ++ts->calibration; return 0; }
@@ -97,6 +100,8 @@ static inline bool mod_delayed_work(void *wq, struct delayed_work *work, unsigne
 #define dev_info(...) ((void)0)
 int hx_rearm(struct himax_ts_data *, struct file *, const struct hx_raw_rearm *);
 int hx_rearm_legacy(struct himax_ts_data *, struct file *, const struct hx_raw_rearm *);
+int hx_restart(struct himax_ts_data *, struct file *, const struct hx_raw_restart *);
+int hx_schedule_restart(struct himax_ts_data *);
 int hx_irq(struct himax_ts_data *);
 int hx_queue_setup(unsigned *, unsigned *, unsigned sizes[]);
 void hx_startup_tick(struct himax_ts_data *);

@@ -156,6 +156,13 @@ if(BUILD_TESTING)
     target_link_libraries(himax-rearm-test PRIVATE Threads::Threads)
     add_test(NAME native-producer-rearm COMMAND himax-rearm-test)
     set_tests_properties(native-producer-rearm PROPERTIES TIMEOUT 10)
+    add_executable(himax-restart-test tests/restart-test.cpp "${TSACORE_OVERLAY}/rearm-native.c")
+    target_include_directories(himax-restart-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_options(himax-restart-test PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
+    target_link_libraries(himax-restart-test PRIVATE Threads::Threads)
+    add_test(NAME native-stalled-restart COMMAND himax-restart-test)
+    set_tests_properties(native-stalled-restart PROPERTIES TIMEOUT 10)
     add_test(NAME rearm-reference-integration COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/rearm-reference-test.py" "${CMAKE_COMMAND}"
         "${UPSTREAM}/EGoTouchService/Device/himax"

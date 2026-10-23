@@ -30,6 +30,18 @@ int hx_rearm_legacy(struct himax_ts_data *ts, struct file *file, const struct hx
     mutex_unlock(&ts->op_lock);
     return result;
 }
+int hx_restart(struct himax_ts_data *ts, struct file *file, const struct hx_raw_restart *request) {
+    mutex_lock(&ts->op_lock);
+    int result = himax_restart(ts, file, request);
+    mutex_unlock(&ts->op_lock);
+    return result;
+}
+int hx_schedule_restart(struct himax_ts_data *ts) {
+    mutex_lock(&ts->op_lock);
+    int result = himax_schedule_restart(ts, ktime_get_ns());
+    mutex_unlock(&ts->op_lock);
+    return result;
+}
 int hx_irq(struct himax_ts_data *ts) { return himax_raw_irq(0, ts); }
 void hx_startup_tick(struct himax_ts_data *ts) {
     mutex_lock(&ts->op_lock);
