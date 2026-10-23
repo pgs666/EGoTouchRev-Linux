@@ -74,10 +74,40 @@ resource list：
 `0x140006fa8` 使用 GPIO connection ID 打开另一 Resource Hub target 来执行 reset。
 这两者是不同类型的资源，不应将 GPIO connection 直接当成 SPI CS。
 
-**尚未取得 Windows 实机两个 devnode 的 `_CRS`/translated resources。**
-INF 中同一行出现两个 ID，不足以证明 Windows 枚举了两个实例；也没有从该 `.sys`
-读出 SPI 控制器物理地址或 chip select。Linux DT 当前只有 `spi0.0`，不能据此
-声称 slave 不存在，也不能凭两个用户态 handle 直接增加 `spi0.1`。
+下节补充了离线注册表中的两个设备实例及 BootConfig。仍未取得 `_CRS` 的原始
+SPI/GPIO 描述符和实时 WDF translated resources，不能从 `.sys` 或 Resource Hub
+连接 ID 推出控制器物理地址、chip select 或 Linux GPIO。Linux DT 当前只有
+`spi0.0`，不能据此声称 slave 不存在，也不能直接增加 `spi0.1`。
+
+### 2026-10-24：本机离线设备资源证据
+
+只读挂载 Windows 分区后，读取 SYSTEM 的 `Select\Current=1`、
+`ControlSet001\Enum\ACPI\HIMX0001` 和 `HIMX0002`。两者各有一个持久化实例，
+`Service=SpbThpTool`、`FirmwareIdentified=1`、`ConfigFlags=0`。这证明该 Windows
+安装曾枚举两个固件设备，而不只是 INF 声明两个可匹配 ID；它不证明当前 Windows
+会话中两个设备都已启动，也不是一次实时资源查询。
+
+SYSTEM SHA-256：
+`2c875ebc0e3c89da1750e1ddeb4e3f61e3a4f4d2bdd7c377ee21f60ab03e6280`。
+磁盘 `SpbThpTool.sys` 的哈希与本文审计输入相同，仍为 `203bbf7d…`。
+提取结果及原始 BootConfig 字节保存在被忽略的
+`artifacts/windows-spb-resources-20261024/resources.json`，未复制完整注册表 hive。
+
+| 设备 | 依照已审计驱动资源分支推定的通道 | SPI 连接 ID | GPIO I/O 连接 ID | BootConfig 中断 vector |
+|---|---|---|---|---|
+| `HIMX0001` | master：存在 GPIO I/O 连接 | `0x25` | `0x22` | `0x8017`、`0x8018` |
+| `HIMX0002` | slave：没有该 GPIO I/O 连接 | `0x27` | 无 | `0x8019` |
+
+Connection 描述符的 class/type 分别为 SPI `2/2`、GPIO I/O `1/2`，与
+`0x1400024c0` 实际检查及 context 字段赋值一致。表中的连接 ID 属于该注册表快照，
+不是片选或引脚编号；中断 vector 也不能直接减去某个基址就当作 TLMM GPIO。
+当前 Linux 节点实际是 `spi@998000/touchscreen@0`、CS 0、IRQ GPIO 175、
+reset GPIO 99；尚无证据能把另一连接安全映射到 Linux。
+
+后续需要 Windows 导出的 DSDT/SSDT 中 `SpiSerialBus`、`GpioInt`、`GpioIo`
+描述符及控制器路径，必要时再补实时资源列表。Linux EFI 仍暴露 ACPI20 指针，
+但本机内核拒绝通过 `/dev/mem` 读取；没有绕过限制、改内核或探测新 SPI 通道。
+本次 Windows 挂载全程只读，提取后已卸载。
 
 ## 事件栈生产、队列与用户态消费
 
