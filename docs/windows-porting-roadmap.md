@@ -44,6 +44,13 @@ IRQ/清帧仍有平台边界：Windows 消费 THP 缓存并重开中断通道，
 threaded IRQ 读硬件；四秒超时、混合错误五帧阈值不是 Windows 双通道恢复的
 逐项等价实现，需继续审计和故障验证。
 
+后续已直接静态审计本机 Windows `SpbThpTool.sys`，详见
+[SPB 后端证据与移植边界](windows-spb-backend-audit.md)：确认 ACPI/Resource Hub
+绑定、两帧 FIFO、IRQ 生产者，以及 `IntOpen` 的无复位补读行为。两个固定名称不能
+证明两个物理片选；旧逆向文档中的“无 ACPI、DT 应建双节点”不再作为依据。
+下一项应补齐 master-only 无复位 producer kick 的门控/竞态与恢复证据，而不是
+用重启 daemon 或热重载父 SPI/GPI 模拟 `IntOpen`；该接口尚未实现。
+
 | 范围 | 当前状态 | 尚需证据或实现 |
 |---|---|---|
 | 手指求解 | 直接编译固定版本上游的所有实际源码模块、adapter、solver、参数表和 mapper | 不等于恢复了上游自身裁去的原厂私有功能；仍需真实多指、边缘、快速滑动验收 |
