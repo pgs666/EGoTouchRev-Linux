@@ -171,7 +171,7 @@ int main(int argc, char** argv) {
     }
     std::array<hx_raw_frame, 6> packets;
     packets.fill(packet);
-    for (auto& bad : packets) bad.payload[0] = 0;
+    for (auto& bad : packets) bad.payload[2] ^= 1;
     file.Write(packets.data(), 4 * sizeof(packet));
     Check(Replay(argv[1], file.path, true) == 1, "all-invalid capture fails even with grace");
     packets[4] = packet;
@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
     Check(Replay(argv[1], file.path, true) == 0, "four startup transients followed by good frame allowed");
     file.Write(packets.data(), sizeof(packets));
     Check(Replay(argv[1], file.path, true) == 1, "post-start corruption is never waived");
-    packets[4].payload[0] = 0;
+    packets[4].payload[2] ^= 1;
     packets[5] = packet;
     file.Write(packets.data(), sizeof(packets));
     Check(Replay(argv[1], file.path, true) == 1, "five startup errors exceed recovery threshold");

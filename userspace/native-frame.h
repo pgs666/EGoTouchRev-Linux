@@ -18,7 +18,7 @@ inline constexpr size_t kNativeTransportSize = 5132;
 enum class FrameError {
     None,
     Size,
-    Sync,
+    Sync, // Historical diagnostic value; no fixed-header gate in the Windows path.
     Checksum,
     AllZero,
     BusFiller,
@@ -26,7 +26,8 @@ enum class FrameError {
 };
 
 // HimaxChipFrame.cpp treats an unresponsive bus filled with 0xEC as immediate
-// SOS. Other invalid master frames retain the five-frame recovery threshold.
+// SOS. The finger-only Linux host uses five consecutive invalid masters for
+// other errors; this is not the Windows dual-channel mixed-counter policy.
 // Shared by the live host and strict replay; never runs in the kernel.
 class MasterFrameHealth {
 public:
@@ -51,7 +52,8 @@ private:
 
 // The THP API returns three transport bytes before the native event-stack.
 // Preserve the native checksum, matrix and suffix byte-for-byte. Do not invent
-// a checksum or require a latched calibration marker to classify a valid frame.
+// a checksum or require a fixed header/latched calibration marker to classify a
+// valid frame. Length remains checked before the fixed-size Windows checksum.
 FrameError ToThpMaster(std::span<const uint8_t> native,
                       std::array<uint8_t, Frame::kMasterFrameSize>& thp) noexcept;
 const char* FrameErrorName(FrameError error) noexcept;

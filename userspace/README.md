@@ -537,6 +537,11 @@ native master 只前补三个运输字节，不改变原始矩阵、suffix 和 c
 新格式尾部非零时拒绝。旧 daemon 不接受新模块，更新时先安装新版用户态；
 结构/ioctl 保持 ABI v2，不代表新模块能被旧 daemon 使用。
 suffix 中的 `0xbb` 是校准完成状态，通过 ClearStatus(8) 确认，不能作为每帧固定 magic。
+帧有效性按固定 Windows `CheckFrame`/adapter 的 checksum body 判定，不额外要求
+前两个 native 字节为 `5a a5`。长度先检查，全零与 `0xec` 填充仍拒绝；旧版日志中的
+`sync` 是历史额外检查，新版不再产生该分类。旧 session 的跨版本严格回放仍须留意
+行为变化：如果原版跳过过 checksum 合法的非固定头帧，新版会处理它，严格回放将
+明确不匹配，不会伪造当时输出。raw 回放仍可用于比较。
 
 ## 恢复旧内核算法
 
@@ -1100,3 +1105,29 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
 - 部署、交接、更新启动镜像后的健康门控均通过，没有新 Oops/WARN/坏页。
   没有自动重启，更新后的 initramfs 仍待下次开机验证；默认启动项保持原旧内核，
   要重启试用本版本仍选 **Fedora Linux 44 (Himax SPI/GPI test)**。
+
+2026-10-23 取帧有效性对照（代码已修改，未更新运行中的 daemon）：
+
+- 直接读取固定 Windows `HimaxChipFrame.cpp` 的 `CheckFrame` 和
+  `HimaxAfeAdapter::ValidateMasterChecksum`：两者都只对 THP `[5, 5063)` 的
+  小端 16 位字求和，要求总和非零且低 16 位为零；不要求 THP 字节 3/4 固定。
+  Linux 原来额外要求 native `[0, 2)` 为 `5a a5`，已经移除该非等价拦截；
+- 新 `frame-check-reference` 编译经完整 SHA-256 校验的 Windows 函数原文，
+  对比全部 65536 种头字、5058 个 body 字节的单 bit 损坏、全零/填充、512 组
+  随机网格及修复后 checksum、旧记录尾部。先在旧实现得到分类不一致失败，再
+  修正实现。提取测试另检查完整函数/常量、源漂移/缺失拒绝以及稳定生成；
+- 历史六份 HXST 共 3214 帧中，6 帧非固定头也都没有合法 checksum，因此新旧
+  接受/拒绝集合相同；**没有证据证明这次修改能解释或修复历史断触**。最新部署
+  smoke 的 514 帧严格 session 回放通过，513 帧 solver 输出/动作验证一致；
+- 同轮 IRQ/恢复审计确认：Windows `IntOpen/GetFrame` 操作 THP 中断通道/缓存；
+  Linux 直接 threaded IRQ 读硬件，启动时三次间隔读不等价于消费 THP 旧队列。
+  Windows 活跃/IDLE 的 200 ms 读取、重开次数与预算，也不等价于 Linux 四秒
+  producer timeout。不能在 Linux 直接照搬 `IntOpen` 为无条件 IRQ disable/enable；
+- Linux 异步初始化失败会调用 `vb2_queue_error`，daemon 的 POLLERR 路径退出，
+  由 supervisor 重启；不是单凭 running=false 就永久卡在等待。普通错误的
+  五帧恢复是本地 finger-only 策略，Windows 另有双通道不同计数和汇合条件，
+  校验函数等价不代表整个故障恢复状态机已等价。后续仍需系统睡眠/失败注入验证。
+- 验证：40 项 Release CTest 全通过；native/四面板、新 oracle/提取门控、录制
+  与会话相关共 8 项 ASan/UBSan 通过，本轮没有重跑完整 sanitizer 套件。
+  无内核代码变更，不需要新的模块构建。该用户态修正未安装，当前仍运行
+  `44e6917` 的模块与 daemon，避免改变用户正在验证的版本。

@@ -157,7 +157,8 @@ int main(int argc, char** argv) {
             packet.payload[4804 + 6] =
                 i < 20 || (i >= 125 && i < 145) || (i >= 161 && i < 165) ? 0xbb : 0;
             Checksum(packet);
-            if (i >= 120 && i < 125) packet.payload[0] = 0;
+            if (i >= 120 && i < 125) packet.payload[2] ^= 1;
+            if (i == 180) packet.payload[0] = 0; // Valid non-magic frame still runs the solver.
             if (i == 160) std::fill(packet.payload, packet.payload + packet.payload_size, 0xec);
             event.rotation = i / 80;
             screen.SetRotation(event.rotation);

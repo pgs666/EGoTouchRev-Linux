@@ -66,8 +66,8 @@ int main(int argc, char** argv) {
     Check(thp == lastGood, "failed conversion preserves previous complete THP buffer");
     native[40] ^= 1;
     native[0] ^= 1;
-    Check(himax::ToThpMaster(native, thp) == himax::FrameError::Sync,
-          "otherwise-valid body still requires SPI sync");
+    Check(himax::ToThpMaster(native, thp) == himax::FrameError::None,
+          "checksum-valid body does not require a fixed header, matching Windows");
     native[0] ^= 1;
 
     himax::MasterFrameHealth health;

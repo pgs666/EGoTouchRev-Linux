@@ -83,6 +83,18 @@ if(BUILD_TESTING)
     target_link_libraries(himax-native-test PRIVATE himax-tsacore)
     target_compile_options(himax-native-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME native-frame COMMAND himax-native-test)
+    include(cmake/FrameCheckReference.cmake)
+    himax_prepare_frame_check("${UPSTREAM}/EGoTouchService/Device/himax"
+        "${TSACORE_OVERLAY}/frame-check-reference.cpp")
+    add_executable(himax-frame-check-test tests/frame-check-test.cpp
+        "${TSACORE_OVERLAY}/frame-check-reference.cpp")
+    target_link_libraries(himax-frame-check-test PRIVATE himax-tsacore)
+    target_compile_options(himax-frame-check-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME frame-check-reference COMMAND himax-frame-check-test)
+    add_test(NAME frame-check-reference-integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/frame-check-reference-test.py" "${CMAKE_COMMAND}"
+        "${UPSTREAM}/EGoTouchService/Device/himax"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/FrameCheckReference.cmake")
     add_test(NAME panel-boe-1300 COMMAND himax-native-test W273AS1300 W273AS1300)
     add_test(NAME panel-boe-1310 COMMAND himax-native-test W273AS1310 W273AS1310)
     add_test(NAME panel-csot-2710 COMMAND himax-native-test W273AS2710 DFLT000000)

@@ -27,8 +27,9 @@ FrameError ToThpMaster(std::span<const uint8_t> native,
         sum += static_cast<uint16_t>(native[i] | (native[i + 1] << 8));
     if (sum == 0)
         return FrameError::AllZero;
-    if (native[0] != 0x5a || native[1] != 0xa5)
-        return FrameError::Sync;
+    // Match Windows CheckFrame and HimaxAfeAdapter::ValidateMasterChecksum:
+    // the first two native bytes are outside the checksum, not a mandatory
+    // sync marker. Framing/length is supplied by the complete SPI transaction.
     if ((sum & 0xffffu) != 0)
         return FrameError::Checksum;
 
