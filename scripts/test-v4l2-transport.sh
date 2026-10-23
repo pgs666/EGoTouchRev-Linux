@@ -11,6 +11,7 @@ flock -n 9 || { echo "Another V4L2 hardware operation is running" >&2; exit 1; }
 exec > >(tee -a "$state_dir/test.log") 2>&1
 echo "checkpoint=$state_dir"
 since=$(date --iso-8601=seconds)
+cmake -S "$repo_dir/userspace" -B "$repo_dir/userspace/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 cmake --build "$repo_dir/userspace/build" --target himax-transport-test -j4
 cmp "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko" "$(modinfo -n himax_spi)"
 finish() {

@@ -359,11 +359,14 @@ userspace/build/himax-replay --session --touch-trace /tmp/himax-candidates.csv \
 
 ```sh
 git submodule update --init third_party/EGoTouchRev
-cmake -S userspace -B userspace/build -DCMAKE_BUILD_TYPE=Release
+cmake -S userspace -B userspace/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
 cmake --build userspace/build -j4
-ctest --test-dir userspace/build --output-on-failure
 make -C touchscreen-hx83121a-dkms HIMAX_V4L2=1
 ```
+
+普通构建只生成运行程序，不执行测试；也可直接运行 `make userspace`。
+需要回归时显式使用 `make userspace-test`，或配置 `-DBUILD_TESTING=ON` 后构建
+所需检查目标。模块在编译服务器构建时，无需在本机执行最后一行。
 
 内核需要 `VIDEO_DEV`、`VIDEOBUF2_V4L2`、`VIDEOBUF2_VMALLOC`、`INPUT_UINPUT` 和
 DRM panel follower 支持。若本机内核没有 uinput，但 build tree 含匹配的完整源码，
@@ -390,6 +393,8 @@ HIMAX_TRIAL_SECONDS=20 bash scripts/deploy-v4l2-local.sh --trial
 
 ```sh
 bash scripts/deploy-v4l2-local.sh
+# 使用服务器产出的匹配模块，不依赖本机 headers，也不运行 DKMS：
+bash scripts/deploy-v4l2-local.sh --module /path/to/himax-spi.ko
 systemctl status himax-touchd
 journalctl -u himax-touchd -b
 ```
@@ -403,8 +408,10 @@ journalctl -u himax-touchd -b
 脚本要求有现存、可恢复的未压缩模块；备份和日志保留在
 `deploy-logs/v4l2-时间戳/`。`--trial` 不替换启动时使用的模块或启用常驻服务，
 但会按需加载 uinput/videobuf2 依赖。
-常驻安装会强制重建 DKMS 缓存，并核对仓库产物、缓存、磁盘模块和运行中 build ID；
-失败时恢复原模块、DKMS 源码/注册状态和原服务状态。
+默认本机构建安装会强制重建 DKMS 缓存，并核对产物、缓存、磁盘模块和运行中 build ID。
+`--module` 则验证模块名称和目标内核版本，保存候选副本，直接安装当前内核的模块，
+保留原有 DKMS 源码与其他内核注册状态；不更新 initramfs，启动镜像须另行同步。
+两种方式都保留模块、程序和服务的回退备份，日常部署不运行整套 host 回归。
 安装后可另跑 `bash scripts/test-v4l2-transport.sh`，用真实 ioctl 验证队列 owner、
 非法参数、过期 epoch、跨 AFE 重建的一秒 reset 限频，以及 STREAMOFF 后拒绝命令。
 测试会暂停服务并执行两次硬件 reset，退出后恢复原服务状态；它不进入普通 CTest。

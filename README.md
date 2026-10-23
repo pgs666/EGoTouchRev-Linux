@@ -47,9 +47,9 @@ APK、内核模块、采集日志和本机部署记录是构建/运行产物，�
 
 ## 构建
 
-要求当前内核 headers/build tree、C++23 编译器、CMake、pkg-config、libsystemd 开发文件
-和测试所需的 Python 3、patch（控制器补丁回归）。默认同时构建 V4L2 内核模块、
-用户态程序并执行回归测试：
+要求 C++23 编译器、CMake、pkg-config 和 libsystemd 开发文件。本机构建模块另需
+匹配目标内核的 headers/build tree；使用编译服务器的模块时，本机只需构建用户态。
+默认构建 V4L2 内核模块和运行程序，不构建或执行测试：
 
 ```sh
 git submodule update --init third_party/EGoTouchRev
@@ -59,9 +59,11 @@ make
 分开执行：
 
 ```sh
-make test
-make driver
-make check       # clean host tests + clean module build + diff whitespace
+make userspace       # 只构建 daemon/replay，配合服务器编译的模块
+make driver          # 在有匹配 build tree 的主机上构建模块
+make test            # 显式运行 legacy 算法回归
+make userspace-test  # 显式构建并运行用户态回归，需要 Python 3
+make check           # 显式执行完整检查
 ```
 
 模块位于 `touchscreen-hx83121a-dkms/himax-spi.ko`，用户态程序位于 `userspace/build/`。
@@ -108,9 +110,13 @@ sudo make -C touchscreen-hx83121a-dkms dkmsremove
 ```sh
 bash scripts/deploy-v4l2-local.sh --trial  # 短时验证后恢复原模块
 bash scripts/deploy-v4l2-local.sh          # 安装 V4L2 + 用户态服务
+# 使用服务器编译、匹配当前运行内核的未压缩模块，无需本机 headers：
+bash scripts/deploy-v4l2-local.sh --module /path/to/himax-spi.ko
 ```
 
-部署脚本会构建并测试、保存当前模块、验证实际采集和 uinput，并在失败时恢复旧模块。
+部署脚本只构建运行程序，保存当前模块，确认实际采集和 uinput，并在失败时恢复旧模块。
+`--module` 不执行本机模块编译，也不修改 DKMS 源码/注册状态，只安装当前内核的
+预编译模块；启动 initramfs 需要单独同步，更新内核后也需要重新提供匹配模块。
 日志和备份写入被忽略的 `deploy-logs/`。该命令会
 重载当前系统的触控模块；它不会构建 Android 内核、写入磁盘槽位或重启设备。
 
@@ -154,14 +160,15 @@ Android 工程不提交 Gradle wrapper、SDK、缓存或预编译 APK。默认 A
 
 ## 验证要求
 
-代码提交的最低门槛是：
+根据改动范围验证：先确认相关目标能编译，再运行能覆盖本次风险的既有检查或实机
+观察。不要求每次修改都增加测试、运行全套回归或重载驱动。需要完整检查时执行：
 
 ```sh
 make check
 ```
 
-算法变更必须增加 fixture，并至少覆盖相关的存在性判断、slot 生命周期和异常帧行为。
-硬件恢复变更还需要诊断版实机验证以下场景：冷启动、连续亮灭屏、亮屏时手已按下、
-充电/未充电、快速边缘手势和多指交叉。一次正常唤醒不能证明恢复路径已经稳定。
+内存安全、slot 生命周期或明确易复发的算法问题可补充最小回归；普通功能以实现和
+实机表现为主。硬件恢复需要区分正常启动与真实故障，未做的冷启动、休眠、多指或
+边缘手势观察应明确记录，不能从短期正常产帧推断全部通过。
 
 开发规范和提交边界见 [CONTRIBUTING.md](CONTRIBUTING.md)。

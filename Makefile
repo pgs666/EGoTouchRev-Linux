@@ -18,12 +18,16 @@ DRIVER_STYLE_SOURCES := $(DRIVER_DIR)/himax-spi-core.c \
 	$(DRIVER_DIR)/himax-v4l2-startup.h \
 	$(DRIVER_DIR)/hx-v4l2-uapi.h $(DRIVER_DIR)/hx-raw-policy.h
 
-.PHONY: all clean driver test userspace check checkpatch
+.PHONY: all clean driver test userspace userspace-test check checkpatch
 
-all: test driver userspace
+all: driver userspace
 
 userspace:
-	cmake -S userspace -B userspace/build -DCMAKE_BUILD_TYPE=Release
+	cmake -S userspace -B userspace/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+	cmake --build userspace/build --target himax-touchd himax-replay -j4
+
+userspace-test:
+	cmake -S userspace -B userspace/build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
 	cmake --build userspace/build -j4
 	ctest --test-dir userspace/build --output-on-failure
 
@@ -36,7 +40,7 @@ test:
 check: checkpatch
 	$(MAKE) -C $(TEST_DIR) clean test
 	$(MAKE) -C $(DRIVER_DIR) clean all
-	$(MAKE) userspace
+	$(MAKE) userspace-test
 	git diff HEAD --check
 
 checkpatch:
