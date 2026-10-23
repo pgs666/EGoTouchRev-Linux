@@ -191,6 +191,23 @@ if(BUILD_TESTING)
     target_compile_definitions(himax-afe-test PRIVATE HX_AFE_UPSTREAM_REFERENCE=1)
     target_compile_options(himax-afe-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME afe-protocol COMMAND himax-afe-test)
+    include(cmake/AfeDispatchReference.cmake)
+    himax_prepare_afe_dispatch("${UPSTREAM}/EGoTouchService/Device/himax"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms/himax-spi-hw.c"
+        "${TSACORE_OVERLAY}")
+    add_executable(himax-afe-dispatch-test tests/afe-dispatch-test.cpp
+        ../touchscreen-hx83121a-dkms/hx-afe.c
+        "${TSACORE_OVERLAY}/afe-dispatch-windows.cpp"
+        "${TSACORE_OVERLAY}/afe-dispatch-native.c")
+    target_include_directories(himax-afe-dispatch-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_link_libraries(himax-afe-dispatch-test PRIVATE himax-tsacore)
+    target_compile_options(himax-afe-dispatch-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME afe-dispatch-reference COMMAND himax-afe-dispatch-test)
+    add_test(NAME afe-dispatch-reference-integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/afe-dispatch-reference-test.py" "${CMAKE_COMMAND}"
+        "${UPSTREAM}/EGoTouchService/Device/himax"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms/himax-spi-hw.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AfeDispatchReference.cmake")
     add_test(NAME afe-reference-integration COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/afe-reference-test.py" "${CMAKE_COMMAND}"
         "${UPSTREAM}/EGoTouchService/Device/himax/HimaxProtocol.cpp"

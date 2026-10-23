@@ -56,6 +56,12 @@ threaded IRQ 读硬件；四秒超时、混合错误五帧阈值不是 Windows �
 | 主动笔 | 按用户要求保持关闭，不注册 pen input device | 独立项目，不能通过手指移植顺带启用 |
 | Android | 现有 Android 构建/工具保留旧架构 | 新 daemon 的交叉编译、init/SELinux、uinput/显示桥接与诊断 APK 集成 |
 
+AFE 分发审计补充：新增直接编译 Windows AfeController 公共方法和实际 native
+dispatcher 的测试，验证 `HardwareAction → command/value → mailbox` 在支持参数、
+五槽及每步传输故障上的一致性；生产 dispatcher 的参数白名单保持不变。42 项
+Release 与相关 4 项 ASan/UBSan 通过，没有发现切频命令号/参数映射错误。
+这不是固件完成证据，也没有解除表格中的跳频实机验收缺口；默认运行代码未改。
+
 接下来优先验证默认链路的行为等价与故障边界：先记录真实手势、屏幕方向和 AFE
 动作/完成状态，再做实际睡眠唤醒、充电、多指和长期性能回归。对比对象是固定版本的
 上游 Windows 重写实现；掌压亮屏问题不能仅凭“导入上游代码”宣称修好。

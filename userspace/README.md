@@ -1131,3 +1131,31 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
   与会话相关共 8 项 ASan/UBSan 通过，本轮没有重跑完整 sanitizer 套件。
   无内核代码变更，不需要新的模块构建。该用户态修正未安装，当前仍运行
   `44e6917` 的模块与 daemon，避免改变用户正在验证的版本。
+
+2026-10-23 AFE 动作分发边界审计：
+
+- 原 `afe-protocol` 证明邮箱包体与事务正确，但不覆盖从 solver action 到固件
+  command 的映射。新增 `afe-dispatch-reference`：编译未经改写的生产
+  `himax_afe_command()` 和经 SHA-256 固定的 Windows `AfeController` 方法；
+  前者直接使用实际 `HardwareAction()`，后者使用原方法选择的命令号/参数。
+  两端 register callback 均接生产 `hx_afe_send()`；这是分发层对照，不是独立
+  Windows send_command/THP IOCTL/物理 SPI 的完整模拟；包体 oracle 仍由原测试提供；
+- ClearStatus→0x06、ForceToFreqPoint→0x0c、ForceToScanRate→0x0e、
+  EnterIdle→0x0a、StartCalibration→0x01 一致。遍历五个动作、256 个参数、
+  五个槽位、三步事务失败及成功，确认支持参数的命令字节、顺序、slot 提交一致，
+  native 保留 errno；Windows 只有成功 EnterIdle 后才 arm idle retry；
+- native 接口有意比 Windows 公共方法窄：仅 ClearStatus(4/8)、frequency(0/1)、
+  rate/idle/calibration(0)，无效/宽参数、reset 或未知 action 不产生邮箱 I/O。
+  固定上游 InitCore 的 caps 只有一档扫描率，当前启用算法不需要其他 rate 索引。
+  Windows 连接状态检查与 Linux queue owner/epoch/电源门控不属于本测试的同一
+  层，测试并未声称已验证完整 ioctl 权限/生命周期；
+- 提取门控覆盖原文完整性、Windows 漂移/缺失拒绝、native 变更自动刷新和稳定
+  生成。42 项 Release CTest 全过，AFE 相关 4 项 ASan/UBSan 全过；本轮没有修改
+  生产驱动或算法，也没有安装程序、重载模块、发送实机校准/切频命令；
+- 没有发现足以解释手动跳频未完成的分发错误。frequency_done=0 不能单独证明
+  当前运行故障，因为默认算法没有请求手动跳频；之前显式测试的传输成功但无
+  suffix 完成仍是未验收项，不能改记为通过。需要 Windows 相同命令/固件状态
+  的实际对照或新的协议证据，不重复同样失败试验；
+- 部署版服务 17:56:52 CST 累计 5256 帧、touch_reports=1409、bad/stale=0，
+  solver 平均 219 µs，仍运行此前 `44e6917` 程序。短期正常不替代睡眠、切频或
+  真实手势质量验收。
