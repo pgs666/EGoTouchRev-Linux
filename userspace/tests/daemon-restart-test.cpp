@@ -25,7 +25,7 @@ extern "C" int __real_clock_gettime(clockid_t, timespec*);
 
 namespace {
 enum class Scenario { Healthy, Accepted, NoFirst, Races, FirstBad, KickExhausted,
-                      Unsupported, NeverReady, Invalid, Default };
+                      Unsupported, NeverReady, Invalid, Default, FirmwareSos };
 Scenario scenario;
 pthread_t mainThread;
 bool virtualClock = false, active = false;
@@ -138,6 +138,8 @@ bool Capture::Frame(hx_raw_frame& packet) {
         packet.payload[5 + 2 * node] = value >> 8;
     }
     packet.payload[4804 + 6] = index < 5 ? 0xbb : 0;
+    if (scenario == Scenario::FirmwareSos && !accepted && index == 99)
+        packet.payload[4804 + 12] = 1;
     uint32_t sum = 0;
     for (size_t j = 4; j < HX_RAW_MASTER_SIZE; j += 2)
         sum += packet.payload[j] | packet.payload[j + 1] << 8;
@@ -150,7 +152,19 @@ bool Capture::Frame(hx_raw_frame& packet) {
 }
 bool Capture::Command(uint64_t requestEpoch, uint64_t requestSequence, hx_raw_action action, uint32_t) {
     Check(requestEpoch == epoch && requestSequence == sequence, "frame command uses current producer token");
-    if (action == HX_RAW_RESET) ++resets;
+    if (action == HX_RAW_RESET) {
+        ++resets;
+        if (scenario == Scenario::FirmwareSos) {
+            ++accepted;
+            oldEpoch = epoch;
+            oldSequence = sequence + 1;
+            oldBuffered = true;
+            states.push_back({HX_RAW_ABI_VERSION, 0, epoch});
+            ++epoch;
+            sequence = 0;
+            states.push_back({HX_RAW_ABI_VERSION, 1, epoch});
+        }
+    }
     return true;
 }
 bool Capture::Rearm(uint64_t, uint64_t) {
@@ -208,7 +222,8 @@ static void Run(Scenario test, const std::string& path) {
     unsetenv("NOTIFY_SOCKET");
     const bool enabled = test != Scenario::Default;
     const bool record = test == Scenario::Accepted || test == Scenario::NoFirst ||
-                        test == Scenario::Races || test == Scenario::FirstBad || test == Scenario::KickExhausted;
+                        test == Scenario::Races || test == Scenario::FirstBad || test == Scenario::KickExhausted ||
+                        test == Scenario::FirmwareSos;
     std::vector<std::string> args{"himax-touchd", "--device", "/offline-himax"};
     if (enabled) args.emplace_back("--experimental-restart");
     if (test == Scenario::KickExhausted) args.emplace_back("--experimental-rearm");
@@ -222,12 +237,14 @@ static void Run(Scenario test, const std::string& path) {
     const bool failed = test == Scenario::Unsupported || test == Scenario::NeverReady ||
                         test == Scenario::Invalid || test == Scenario::Default;
     Check(result == int(failed), "actual daemon exit code matches recovery outcome");
-    Check(opens == 1 && starts == 1 && resets == 0,
+    Check(opens == 1 && starts == 1 && resets == (test == Scenario::FirmwareSos ? 1u : 0u),
           "same Capture/stream throughout; no supervisor emulation or legacy reset during reconstruction");
     Check(!active, "input always released before daemon exit");
     Check(kicks == (test == Scenario::KickExhausted ? 7u : 0u),
           "both experimental options exhaust seven no-reset attempts before in-process reconstruction");
-    if (test == Scenario::Healthy || test == Scenario::Default)
+    if (test == Scenario::FirmwareSos)
+        Check(!requests && accepted == 1, "firmware SOS uses one frame-bound reset, not stall reconstruction");
+    else if (test == Scenario::Healthy || test == Scenario::Default)
         Check(!requests && !accepted, "healthy and default modes issue no new restart ioctl");
     else if (test == Scenario::Unsupported)
         Check(requests == 1 && !accepted, "old module falls back once without reset loop");
@@ -249,7 +266,8 @@ int main() {
     Check(mkdtemp(temporary), "private test directory");
     for (auto test : {Scenario::Healthy, Scenario::Accepted, Scenario::NoFirst, Scenario::Races,
                       Scenario::FirstBad, Scenario::KickExhausted,
-                      Scenario::Unsupported, Scenario::NeverReady, Scenario::Invalid, Scenario::Default}) {
+                      Scenario::Unsupported, Scenario::NeverReady, Scenario::Invalid, Scenario::Default,
+                      Scenario::FirmwareSos}) {
         const auto child = fork();
         Check(child >= 0, "independent daemon signal and core state");
         if (!child) {

@@ -53,6 +53,11 @@ EnterIdle 的 producer token 与传输 errno（0 成功、初值 ENODATA 表示�
 不取消超时。`status` 的 `stop_flags` 和 `afe_interrupted` 可用于观察，旧模块缺少
 原因时沿用原行为。常规帧路径不增加 ioctl 或确认帧。
 
+固件 SOS、坏帧恢复和手动 reset 的请求被内核接受后，daemon 立即停止旧流求解、
+清除旧输入记账并设置 SOS reset 控制位，不等异步生命周期通知才停。采集侧车
+按“故障帧/命令 → 本地 stopped → 实际内核生命周期”顺序记录；新 epoch 仍需
+完整校验后才能上报。拒绝的 reset 不伪造一次已经执行的硬件重建。
+
 默认数据路径为：
 
 ```text

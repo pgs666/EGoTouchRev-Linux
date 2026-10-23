@@ -363,6 +363,27 @@ int main(int argc, char** argv) {
         }
         return capture.Error().empty();
     };
+    const auto stopAcceptedReset = [&](uint64_t resetEpoch) {
+        const uint64_t stoppedNs = NowNs();
+        const hx_raw_state state{HX_RAW_ABI_VERSION, 0, resetEpoch};
+        // COMMAND and lifecycle events use separate queues. Once accepted,
+        // the old stream must stop locally before another buffered packet.
+        stream.State(state, stoppedNs);
+        solver->OnAfeSos();
+        solver->OnAfeStopped();
+        afeStarted = false;
+        readMode.Reset();
+        rearmPending = false;
+        if (control) control->CalibrationStopped();
+        if (recordingActive()) {
+            himax::SessionEvent event;
+            event.kind = himax::SessionKind::State;
+            event.hostTimeNs = stoppedNs;
+            event.state = state;
+            event.stateFlags = HX_RAW_STOP_KNOWN; // Reconstruction, not power off.
+            recordEvent(event);
+        }
+    };
     himax::NotifyService("READY=1");
     std::cerr << (observe ? "Observing " : "Solving ") << capture.Path()
               << " project=" << (autoProject ? "pending-OTP" : project) << '\n';
@@ -579,12 +600,7 @@ int main(int argc, char** argv) {
                         control->Reply(reset ? "OK reset scheduled; confirm a new running epoch with status" :
                             "OK calibration command sent; firmware completion is pending");
                         if (reset) {
-                            control->CalibrationStopped();
-                            // Fence old completed buffers while the real stopped
-                            // event waits in V4L2's separate event queue.
-                            stream.State({HX_RAW_ABI_VERSION, 0, stream.Epoch()}, NowNs());
-                            readMode.Reset();
-                            rearmPending = false;
+                            stopAcceptedReset(stream.Epoch());
                             if (!input.Release()) return 1;
                             if (recordingActive()) {
                                 himax::SessionEvent event;
@@ -756,6 +772,7 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        bool resetAccepted = false;
         if (requestReset && !observe && !afeRestart.Waiting()) {
             if (!input.Release()) return 1;
             ++resetRequests;
@@ -766,12 +783,15 @@ int main(int argc, char** argv) {
                     HX_RAW_RESET, 0, commandError};
             if (ok) {
                 ++resetSuccess;
+                resetAccepted = true;
             } else if (commandError != ESTALE && commandError != EAGAIN) {
                 std::cerr << "AFE reset request failed: " << std::strerror(commandError) << '\n';
                 exitCode = 1;
             }
         }
         if (recordingActive()) recordEvent(*recordedFrame);
+        // Preserve evidence order: fault frame/action first, local stop next.
+        if (resetAccepted) stopAcceptedReset(epoch);
         if (exitCode) break;
     }
     if (!observe) {
