@@ -289,6 +289,15 @@ userspace/build/himax-solver-edge-reference 3 3 3 0
 Release 与完整 ASan/UBSan 各 52/52 通过。修改后的程序严格回放旧输出会如预期在
 frame 1225 拒绝，不把算法 A/B 当作旧输出一致性通过；实机改善仍需重新滑动验收。
 
+修正已作为 `04f904d` 部署到当前 Linux，仅更新 daemon/replay。安装后 fresh smoke
+553 帧全部有效且 strict replay 一致；常驻服务 PID=1789170、NRestarts=0，
+877 帧时 bad/stale=0，无真实触点报告。daemon SHA-256 为
+`d05908688bfa218805cb43b999fdd508900074c23efe561184b79697ed482d39`，
+replay 为 `4a03b8719c7fabfb3612a146c2bf55d52d6e3598f6a1199bb62f46562bb3eb26`。
+内核/模块、启动镜像、unit 和 SPI/GPI 运行 notes 核对不变，健康门控无新故障；
+自动补读保持默认关闭。备份/验证在 `deploy-logs/edge-plateau-install-Y66EmoWj/`。
+没有改写原采集文件；原版程序仍可复核 2091 帧记录时的输出，新的滑动效果待用户验收。
+
 可从现有同步采集离线导出尚未上报的候选轨迹：
 
 ```sh
