@@ -435,3 +435,41 @@ SPI/GPI 运行 notes 和 systemd unit 不变；没有自动重启或改 Android 
 
 此轮解除了来源缺失和空包错误计数的具体问题；自动策略仍需过渡/真实故障验收，
 更新镜像仍待冷启动。默认不产生 kick，不能用默认运行统计代替实验模式验收。
+
+## EnterIdle 命令与读等待许可
+
+继续核对固定上游的 `HimaxAfe.cpp::AfeController::EnterIdle()`：
+`send_command(master, 0x0a, ...)` 成功后立即调用 `ArmIdleRetry()`，并未等待下一帧
+报告 IDLE。`HimaxChipFrame.cpp` 随后依据合法 master 的 idle word 更新这个许可：
+1 置位、0 清除、其他值保留；这与 `afe_mode` 的 1=Idle、其余=Normal 不完全相同。
+Linux 原先用 `lastFrameValid && LastAfeStatus().kIdle` 决定等待长度，因此漏掉了命令
+成功但确认帧尚未到达的窗口，也漏掉了非 0/1 的保留语义。
+
+当前用户态新增 `FrameReadMode`：
+
+- 命令传输成功且为 EnterIdle 才设置读等待许可；失败保留先前许可，其他命令不改；
+- 只在 `ToThpMaster()` 完整验证成功后读取帧尾两个字节，合法 active 立即清除；
+- 普通无效帧和实际非空补读错误清除许可，不读取转换失败后保留下来的旧 THP；
+- 带来源的全零补读是 Linux 明确的 no-data 例外，保留许可；
+- AFE 停止、新 epoch 或重新开始时清除。没有读取 slave，也没有启用手写笔；
+- 恢复预算只使用该独立许可，不改 solver 的 AFE status、baseline 或 IRQ 数据路径。
+  默认仍关闭自动补读；统计增加 `read_idle_retry`，不能把它当成固件完成确认。
+
+验证使用实际 Windows `EnterIdle()` 分发及原样提取的 suffix 更新语句，源码 SHA-256
+门控保持有效。覆盖五槽及每步事务失败、两种初始许可、全部 65536 个 suffix word、
+转换失败留下旧 THP、空轮询、迟到确认和停止/新 epoch；其中模拟确认一直未到时
+200 ms 不申请 kick，3600 ms 才进入原有有界恢复。合法 active 帧到来后恢复
+200 ms 等待。Release 50/50 与完整 ASan/UBSan 50/50（107.29 秒）通过。
+
+先前正常实机记录 `deploy-logs/session-WepbEdEp/` 为 878 帧、epoch=3，
+无手指帧、bad/stale=0。sequence 871 下发 EnterIdle 成功，但本帧尚未报告 IDLE；
+sequence 873 首次报告 IDLE，相对命令行的 `hostTimeNs` 约 13.4 ms。
+该时间戳在命令执行前，不是精确的命令完成时间。之后五个 IDLE IRQ 间隔约
+3050.008、3015.912、3016.701、3017.345、3016.670 ms。
+
+新 helper/policy 对这份记录做离线时序检查，得到一次“命令先于确认”的许可设置、
+六次 IDLE 等待、最大约 3050 ms、没有预测 rearm/exhaustion；新 replay 严格验证
+878/878 帧输出一致。工具源码/结果保留在
+`deploy-logs/read-mode-shadow-hY6AbfwS/`，检查的是记录的交付时刻，不模拟每次
+50 ms live poll、调度及 SPI 完成时刻。正常确认约 13.4 ms 的这份记录不解释此前
+连续空读现场，也不证明实机丢 IRQ 已恢复。

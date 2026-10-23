@@ -8,6 +8,7 @@
 #include "v4l2-capture.h"
 #include "stream-state.h"
 #include "producer-recovery.h"
+#include "frame-read-mode.h"
 #include "service-notify.h"
 #include "screen-rotation.h"
 #include "solver-screen.h"
@@ -190,11 +191,11 @@ int main(int argc, char** argv) {
     uint64_t frames = 0, stale = 0, bad = 0;
     himax::StreamState stream;
     himax::ProducerRecovery producerRecovery;
+    himax::FrameReadMode readMode;
     uint64_t rearmRequests = 0, rearmTransfers = 0, rearmRaces = 0, rearmFailed = 0;
     uint64_t rearmUnsupported = 0, rearmValid = 0, rearmEpoch = 0, rearmSequence = 0;
     uint64_t emptyRearms = 0;
     bool rearmPending = false;
-    bool lastFrameValid = false;
     bool afeStarted = false;
     bool profileSelected = false;
     bool recordingHeaderWritten = false;
@@ -211,6 +212,7 @@ int main(int argc, char** argv) {
     uint64_t heartbeat = NowNs();
     const auto printStats = [&] {
         std::cerr << "frames=" << frames << " bad=" << bad << " stale=" << stale << '\n';
+        std::cerr << "read_idle_retry=" << readMode.IdleRetry() << '\n';
         for (size_t i = 1; i < frameErrors.size(); ++i)
             if (frameErrors[i])
                 std::cerr << "frame_error "
@@ -297,8 +299,8 @@ int main(int argc, char** argv) {
         }
         pollRotation(loopNow);
         if (dumpRequested) { dumpRequested = 0; printStats(); }
-        const auto recovery = producerRecovery.Next(stream, loopNow, afeStarted && lastFrameValid &&
-                (solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle), experimentalRearm);
+        const auto recovery = producerRecovery.Next(stream, loopNow,
+                afeStarted && readMode.IdleRetry(), experimentalRearm);
         if (recovery == himax::ProducerRecovery::Step::Exhausted) {
             std::cerr << "AFE producer stall budget exhausted; restarting through supervisor\n";
             exitCode = 1;
@@ -367,7 +369,7 @@ int main(int argc, char** argv) {
                 }
                 if (!state.running || state.epoch != epoch) {
                     rearmPending = false;
-                    lastFrameValid = false;
+                    readMode.Reset();
                     if (!observe && !input.Release()) return 1;
                     solver->OnAfeStopped();
                     afeStarted = false;
@@ -428,6 +430,7 @@ int main(int argc, char** argv) {
             epoch = packet->epoch;
             afeStarted = true;
             frameHealth.Reset();
+            readMode.Reset();
             std::cerr << "AFE epoch=" << epoch << " project=" << project << '\n';
         }
         solver->SetChargerPlugged(packet->flags & HX_RAW_FRAME_CHARGER);
@@ -441,7 +444,7 @@ int main(int argc, char** argv) {
         const bool fromRearm = packet->flags & HX_RAW_FRAME_REARM;
         const bool emptyRearm = himax::IsEmptyRearm(error, fromRearm);
         if (emptyRearm) producerRecovery.EmptyRearm(stream);
-        else lastFrameValid = error == himax::FrameError::None;
+        readMode.Observe(error, thp, fromRearm);
         producerRecovery.Frame(error == himax::FrameError::None);
         const bool wasResetRequested = frameHealth.ResetRequested();
         bool requestReset = frameHealth.Observe(error, fromRearm);
@@ -526,6 +529,7 @@ int main(int argc, char** argv) {
                         ++actionRequests[actionType];
                         actionSuccess[actionType] += ok;
                     }
+                    readMode.Action(actionType, ok);
                     solver->OnAfeActionExecuted(request, ok);
                     if (!observe && !ok && commandError != ESTALE && commandError != EAGAIN)
                         std::cerr << "AFE action failed: " << std::strerror(commandError) << '\n';

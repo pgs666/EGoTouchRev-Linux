@@ -114,10 +114,14 @@ if(BUILD_TESTING)
     include(cmake/RearmReference.cmake)
     himax_prepare_rearm_policy("${UPSTREAM}/EGoTouchService/Device/himax"
         "${TSACORE_OVERLAY}/rearm-policy-windows.cpp")
+    himax_prepare_read_mode("${UPSTREAM}/EGoTouchService/Device/himax"
+        "${TSACORE_OVERLAY}/rearm-read-mode-windows.cpp")
     add_executable(himax-producer-recovery-test tests/producer-recovery-test.cpp
-        "${TSACORE_OVERLAY}/rearm-policy-windows.cpp")
+        "${TSACORE_OVERLAY}/rearm-policy-windows.cpp"
+        "${TSACORE_OVERLAY}/rearm-read-mode-windows.cpp")
     target_include_directories(himax-producer-recovery-test PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+        "${UPSTREAM}/Common/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-producer-recovery-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME producer-recovery COMMAND himax-producer-recovery-test)

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "afe-dispatch-host.h"
 #include "afe-action.h"
+#include "frame-read-mode.h"
 
 #include <algorithm>
 #include <array>
@@ -52,15 +53,21 @@ int main() {
         for (unsigned value = 0; value < 256; ++value) {
             const bool allowed = v.host == HX_RAW_CLEAR_STATUS ? value == 4 || value == 8 :
                                  v.host == HX_RAW_FORCE_FREQ ? value < 2 : value == 0;
-            for (u8 slot = 0; slot < 5; ++slot) for (unsigned fail = 0; fail < 4; ++fail) {
+            for (u8 slot = 0; slot < 5; ++slot) for (unsigned fail = 0; fail < 4; ++fail)
+            for (bool priorIdle : {false, true}) {
                 Bus native, windows;
                 native.failAt = windows.failAt = fail;
                 auto n = native.Device(slot), w = windows.Device(slot);
+                w.idle_retry = priorIdle;
+                himax::FrameReadMode readMode;
+                readMode.Action(HX_RAW_ENTER_IDLE, priorIdle);
                 const int nr = hx_dispatch_native(&n, himax::HardwareAction(v.solver), value);
                 const int wr = hx_dispatch_windows(&w, v.host, value);
+                readMode.Action(v.host, nr == 0);
                 if (!allowed) {
                     Check(nr == -EINVAL && native.operations.empty() && n.slot == slot,
                           "unsupported native parameters cause no I/O or slot mutation");
+                    Check(readMode.IdleRetry() == priorIdle, "rejected command preserves read mode");
                     if (v.host == HX_RAW_FORCE_FREQ)
                         Check(wr != 0 && windows.operations.empty(), "Windows also rejects unsupported frequency");
                     continue;
@@ -73,8 +80,8 @@ int main() {
                       native.operations[0].bytes[4] == value, "expected command/value reach mailbox body");
                 Check(nr == (fail ? -EREMOTEIO : 0), "native transport errno preserved");
                 Check(n.slot == (fail ? slot : (slot + 1) % 5), "slot commit only after full transport");
-                Check(w.idle_retry == (v.host == HX_RAW_ENTER_IDLE && !fail),
-                      "Windows arms IDLE retry only after a successful send");
+                Check(readMode.IdleRetry() == bool(w.idle_retry),
+                      "native transport result updates host read mode like actual Windows dispatch");
                 Bus disconnected;
                 auto d = disconnected.Device(slot);
                 d.connected = 0;

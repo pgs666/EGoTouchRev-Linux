@@ -11,14 +11,23 @@ cmake, upstream, native, module = sys.argv[1:]
 windows = (Path(upstream) / "HimaxChipFrame.cpp").read_bytes()
 production = Path(native).read_bytes()
 daemon = (Path(native).parent.parent / "userspace" / "touchd.cpp").read_text()
-assert "afeStarted && lastFrameValid &&" in daemon
+assert "afeStarted && readMode.IdleRetry(), experimentalRearm)" in daemon
 assert daemon.index("const auto error = himax::ToThpMaster(") < daemon.index("producerRecovery.Frame(error ==")
 assert daemon.index("producerRecovery.Frame(error ==") < daemon.index("frameHealth.Observe(error, fromRearm)")
-assert "else lastFrameValid = error == himax::FrameError::None;" in daemon
+assert daemon.index("const auto error = himax::ToThpMaster(") < daemon.index("readMode.Observe(error, thp, fromRearm);")
+assert daemon.index("readMode.Observe(error, thp, fromRearm);") < daemon.index("frameHealth.Observe(error, fromRearm)")
+assert daemon.index("const bool ok = !observe && capture.Command(") < daemon.index("readMode.Action(actionType, ok);")
+assert daemon.index("readMode.Action(actionType, ok);") < daemon.index("solver->OnAfeActionExecuted(request, ok);")
+state_reset = daemon[daemon.index("if (!state.running || state.epoch != epoch)"):
+                     daemon.index("if (!capture.Error().empty())")]
+assert "readMode.Reset();" in state_reset
+epoch_reset = daemon[daemon.index("if (packet->epoch != epoch || !afeStarted)"):
+                     daemon.index("solver->SetChargerPlugged(")]
+assert "readMode.Reset();" in epoch_reset
 assert "if (emptyRearm) producerRecovery.EmptyRearm(stream);" in daemon
 assert "bool experimentalRearm = false;" in daemon
 assert 'arg == "--experimental-rearm"' in daemon
-assert "(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle), experimentalRearm)" in daemon
+assert "lastFrameValid" not in daemon
 capture_source = (Path(native).parent.parent / "userspace" / "v4l2-capture.cpp").read_text()
 assert "return ioctl(m_fd, VIDIOC_HIMAX_REARM_TAGGED, &request) == 0;" in capture_source
 assert "const bool fromRearm = packet->flags & HX_RAW_FRAME_REARM;" in daemon
@@ -30,7 +39,8 @@ with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     script = root / "prepare.cmake"
     script.write_text(f'include("{Path(module).as_posix()}")\n'
                       f'himax_prepare_rearm("{source.as_posix()}" "{root}/native-out.c")\n'
-                      f'himax_prepare_rearm_policy("{root}" "{root}/windows-out.cpp")\n')
+                      f'himax_prepare_rearm_policy("{root}" "{root}/windows-out.cpp")\n'
+                      f'himax_prepare_read_mode("{root}" "{root}/read-mode-out.cpp")\n')
 
     def prepare():
         return subprocess.run([cmake, "-P", str(script)], capture_output=True,
@@ -52,11 +62,14 @@ with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     exact = expected[expected.index("    enum class Read :"):expected.index("    // ── slave（笔）──")]
     exact = exact.replace("std::this_thread::sleep_for", "TestSleep")
     assert (root / "windows-out.cpp").read_text().count(exact) == 1
-    for path in (root / "native-out.c", root / "windows-out.cpp"):
+    exact_mode = expected[expected.index("        const uint16_t idleFlag = suffix.idleFlag();"):
+                          expected.index("        const THP_AFE_MODE mode =")]
+    assert (root / "read-mode-out.cpp").read_text().count(exact_mode) == 1
+    for path in (root / "native-out.c", root / "windows-out.cpp", root / "read-mode-out.cpp"):
         os.utime(path, ns=(1_000_000_000, 1_000_000_000))
     assert prepare().returncode == 0
     assert all((root / name).stat().st_mtime_ns == 1_000_000_000
-               for name in ("native-out.c", "windows-out.cpp"))
+               for name in ("native-out.c", "windows-out.cpp", "read-mode-out.cpp"))
     source.write_bytes(production.replace(b"now <= ts->last_frame_ns", b"now < ts->last_frame_ns"))
     assert prepare().returncode == 0 and (root / "native-out.c").read_text() != generated
     source.write_bytes(production.replace(b"static int himax_rearm(", b"static int renamed_rearm("))

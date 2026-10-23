@@ -79,6 +79,17 @@ IRQ 错误及非全零的主动读错误保持原规则；宽限从 ioctl 完成
 随后配套模块/daemon/replay 已安装，常驻服务保持 `producer_rearm=disabled`。
 更新后的测试 initramfs 尚未重启验收。
 
+接着审查 active→IDLE 过渡，确认 Windows `EnterIdle()` 在命令传输成功后直接
+`ArmIdleRetry()`；该读等待许可独立于帧尾确认的 AFE mode。Linux 新增独立的
+`FrameReadMode`，成功命令立即允许 IDLE 长等待，合法 active 帧取消，普通坏帧/
+新 epoch 清除，带来源的空轮询保留许可；没有伪造 solver 的 IDLE 状态。
+全部 65536 个 idle word 与两种前置状态直接对照固定 Windows 帧尾代码；
+实际 native/Windows 命令分发另覆盖五槽、事务失败和已有许可。
+Release 与完整 ASan/UBSan 均 50/50 通过。已有正常 878 帧实机记录的离线时序检查
+显示一次命令先于帧尾确认、最大 IDLE 交付间隔约 3050 ms，新策略未预测补读，
+strict replay 878/878 一致。这不是历史异常根因或真实 lost-IRQ 恢复证明，
+自动补读仍必须显式启用；详情见 SPB 审计的读等待分节。
+
 | 范围 | 当前状态 | 尚需证据或实现 |
 |---|---|---|
 | 手指求解 | 直接编译固定版本上游的所有实际源码模块、adapter、solver、参数表和 mapper | 不等于恢复了上游自身裁去的原厂私有功能；仍需真实多指、边缘、快速滑动验收 |

@@ -42,6 +42,33 @@ unsigned long hx_buffer_size(void) { return sizeof(struct himax_video_buffer); }
     endif()
 endfunction()
 
+# The exact master suffix retry update, restricted to the finger-only path.
+# Frame validity/reset and the Linux tagged-empty exception are tested apart.
+function(himax_prepare_read_mode upstream output)
+    himax_raw_reference_source("${upstream}" HimaxChipFrame.cpp
+        ed7e83db454993c726c0595c0775f84e7ad8d07809a4aec5f22360b37c96d54d source)
+    himax_raw_reference_extract("${source}" "        const uint16_t idleFlag = suffix.idleFlag();"
+        "        const THP_AFE_MODE mode =" policy)
+    set(generated "#include \"FrameLayout.h\"
+extern \"C\" bool hx_windows_idle_retry(const uint8_t* thp, bool previous) {
+    Frame::MasterSuffixView suffix;
+    suffix.LoadFromBytes(thp + Frame::kMasterSuffixOffset);
+    bool m_idleRetry = previous;
+    const bool stylusNow = false;
+    const auto IsStylusConnected = [] { return false; };
+${policy}
+    return m_idleRetry;
+}
+")
+    set(previous "")
+    if(EXISTS "${output}")
+        file(READ "${output}" previous)
+    endif()
+    if(NOT previous STREQUAL generated)
+        file(WRITE "${output}" "${generated}")
+    endif()
+endfunction()
+
 function(himax_prepare_rearm_policy upstream output)
     himax_raw_reference_source("${upstream}" HimaxChipFrame.cpp
         ed7e83db454993c726c0595c0775f84e7ad8d07809a4aec5f22360b37c96d54d source)
