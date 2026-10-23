@@ -41,6 +41,9 @@ EnterIdle 传输成功立即允许长等待，合法 active 帧才取消，避�
 旧模块不支持 tagged ioctl 时保留四秒回退，观察模式不主动恢复。
 `himaxctl status` 暴露 `producer_rearm`、补读请求/空读/之后有效数据，以及自动
 AFE 重建计数。传输成功和后续有效数据分开，不把后者当作补读修复故障的因果证明。
+`read_idle_retry` 是当前等待许可，`last_idle_epoch/sequence/result` 标识最近一次
+EnterIdle 的 producer token 与传输 errno（0 成功、初值 ENODATA 表示尚未请求）。
+补读日志同时记录这些字段和距离上一有效帧的毫秒数，正常帧不增加日志。
 严格会话回放保留来源并验证输出，不复现真实硬件操作。历史空补读导致 reset、
 回退、修正及受控试载记录见 [SPB 后端审计](../docs/windows-spb-backend-audit.md)；
 真实故障、手势/PM 和长期运行验收仍有缺口。

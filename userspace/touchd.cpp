@@ -217,6 +217,8 @@ int main(int argc, char** argv) {
     uint64_t rearmUnsupported = 0, rearmValid = 0, rearmEpoch = 0, rearmSequence = 0;
     uint64_t emptyRearms = 0;
     uint64_t restartRequests = 0, restartScheduled = 0, restartRecovered = 0, restartInterrupted = 0;
+    uint64_t idleRequestEpoch = 0, idleRequestSequence = 0;
+    int idleRequestResult = ENODATA;
     uint32_t stopFlags = 0;
     bool rearmPending = false;
     bool afeStarted = false;
@@ -466,7 +468,13 @@ int main(int argc, char** argv) {
                 rearmEpoch = stream.Epoch();
                 rearmSequence = stream.Sequence();
                 std::cerr << "No-reset producer rearm transferred a frame; epoch=" << rearmEpoch
-                          << " after_sequence=" << rearmSequence << '\n';
+                          << " after_sequence=" << rearmSequence
+                          << " since_valid_ms=" << (loopNow - lastNs) / 1000000
+                          << " read_idle_retry=" << readMode.IdleRetry()
+                          << " afe_status=" << solver->LastAfeStatus()
+                          << " last_idle_epoch=" << idleRequestEpoch
+                          << " last_idle_sequence=" << idleRequestSequence
+                          << " last_idle_result=" << idleRequestResult << '\n';
             } else if (error == ESTALE || error == EAGAIN || error == ENOBUFS) {
                 ++rearmRaces;
             } else if (error == ENOTTY) {
@@ -538,6 +546,10 @@ int main(int argc, char** argv) {
                         " afe_recovered=" + std::to_string(restartRecovered) +
                         " afe_interrupted=" + std::to_string(restartInterrupted) +
                         " stop_flags=" + std::to_string(stopFlags) +
+                        " read_idle_retry=" + std::to_string(readMode.IdleRetry()) +
+                        " last_idle_epoch=" + std::to_string(idleRequestEpoch) +
+                        " last_idle_sequence=" + std::to_string(idleRequestSequence) +
+                        " last_idle_result=" + std::to_string(idleRequestResult) +
                         " restart_waiting=" + std::to_string(afeRestart.Waiting()) +
                         " calibration=" + control->CalibrationState() +
                         " calibration_done_frames=" + std::to_string(calibrationFrames));
@@ -731,6 +743,11 @@ int main(int argc, char** argv) {
                     if (!observe) {
                         ++actionRequests[actionType];
                         actionSuccess[actionType] += ok;
+                        if (actionType == HX_RAW_ENTER_IDLE) {
+                            idleRequestEpoch = epoch;
+                            idleRequestSequence = packet->sequence;
+                            idleRequestResult = commandError;
+                        }
                     }
                     readMode.Action(actionType, ok);
                     solver->OnAfeActionExecuted(request, ok);
