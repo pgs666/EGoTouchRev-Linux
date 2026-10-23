@@ -21,6 +21,13 @@
 
 #include "himax-spi.h"
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
+static unsigned int himax_afe_start_failures;
+module_param_named(afe_start_failures, himax_afe_start_failures, uint, 0400);
+MODULE_PARM_DESC(afe_start_failures,
+		"Diagnostic only: fail the first 0..8 AFE attempts before SPI, per device");
+#endif
+
 struct himax_video_buffer {
 	struct vb2_v4l2_buffer vb;
 	struct list_head link;
@@ -71,6 +78,15 @@ static int himax_start_afe(struct himax_ts_data *ts)
 	       HX_RAW_RESET * sizeof(ts->last_command_ns[0]));
 	himax_state_event(ts, false);
 	ts->charger.applied_valid = false;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
+	if (ts->start_test_failures) {
+		ts->start_test_failures--;
+		dev_info(ts->dev, "diagnostic AFE init failure before SPI; remaining=%u\n",
+			 ts->start_test_failures);
+		ret = -EAGAIN;
+		goto failed;
+	}
+#endif
 	ret = hx83121a_chip_detect(ts);
 	if (ret)
 		goto failed;
@@ -603,11 +619,19 @@ static int himax_raw_probe(struct spi_device *spi)
 	struct vb2_queue *q;
 	int ret;
 
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
+	if (himax_afe_start_failures > 8)
+		return dev_err_probe(&spi->dev, -EINVAL,
+				     "diagnostic afe_start_failures must be 0..8\n");
+#endif
 	ts = kzalloc_obj(*ts, GFP_KERNEL);
 	if (!ts)
 		return -ENOMEM;
 	ts->dev = &spi->dev;
 	ts->spi = spi;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
+	ts->start_test_failures = himax_afe_start_failures;
+#endif
 	if (device_property_read_bool(ts->dev, "touchscreen-inverted-x"))
 		ts->coordinate_flags |= HX_RAW_INVERT_X;
 	if (device_property_read_bool(ts->dev, "touchscreen-inverted-y"))

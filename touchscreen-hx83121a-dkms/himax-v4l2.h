@@ -44,6 +44,9 @@ struct himax_ts_data {
 	bool irq_enabled;
 	struct hx_raw_power_state power;
 	struct hx_raw_retry_state retry;
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS
+	unsigned int start_test_failures;
+#endif
 	struct hx_raw_charger_state charger;
 	bool otp_tried;
 	u8 afe_command_slot;

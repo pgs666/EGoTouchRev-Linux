@@ -570,6 +570,13 @@ Windows 的 master/slave 0x13 bus-ready 前置探测、每五次失败重开 THP
 冒充为 Linux 等价操作。没有新增 slave/笔读取，也绝不因此卸载或重绑 SPI/GPI 控制器。
 OTP、三帧 best-effort drain、calibration/rate best-effort、硬件单次初始化事务保持原策略。
 
+诊断构建（`HIMAX_AFE_DIAGNOSTICS=1`）另提供仅模块加载时配置的
+`afe_start_failures=0..8`（默认 0、只读参数）。probe 将预算复制到每个设备；每次
+AFE 尝试在 IC 检测/SPI 之前消耗一次并返回 EAGAIN，用于检验真实 workqueue 的
+退避与取消。STREAMOFF/后续 STREAMON 不重新填满预算，普通构建无参数、计数和
+分支。这不是 SPI 返回值故障注入，也不证明真实控制器错误恢复；不要在日常使用
+或已故障的现场临时加载它，加载/卸载模块会丢失原现场。
+
 ## 不重置当前触控的运行中窗口录制
 
 代码提供可选 `--live-capture-dir PRIVATE_DIR` 和 `--live-capture-seconds 1..120`
@@ -1324,3 +1331,19 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
   不因此启用笔或重绑控制器。未做真实 SPI 失败注入、工作队列取消竞态、睡眠唤醒或
   长期坏硬件退避验收；正常帧流、baseline、检测/跟踪算法没有改动，也未宣称本次
   修复已解释历史断触。下一步应受控试载、验证 healthy path，再验证初始化失败恢复。
+
+2026-10-23 初始化退避实机测试准备：
+
+- 增加上述诊断专用 pre-SPI 失败预算，最多八次，每设备一次性消耗，只在初始化
+  路径执行。默认普通模块完全排除；重新构建的普通模块与前一节 `c1a8757` 候选
+  逐字节相同（SHA-256 仍为 `1de7e614...b67da5`），不存在新增正常路径开销；
+- host 测试覆盖注入先于所有 SPI/初始化调用、stopped epoch/IRQ、STREAMOFF 阻止
+  迟到任务、新流重置退避但不重置故障预算，以及耗尽后恢复实际初始化路径；
+- 47 项 Release 与 startup/stream 相关四项 ASan/UBSan 通过，checkpatch/diff
+  通过；本次没有重跑完整 47 项 sanitizer。前一节完整 46 项结果属于当时版本；
+- 编译服务器独立 `afe-inject-noqPJu/{normal,diagnostic}` 构建成功，两份产物取回
+  `artifacts/afe-inject-himax1/`，vermagic 均匹配当前测试内核；普通模块不含注入/
+  邮箱日志字符串或参数。诊断模块 SHA-256：
+  `6597ef72d41e5916fb81bcb325da820937802ef9df9d785e619b698e976f6e46`，
+  build ID：`ca062ef44a58952e499e9c57faf1d24bad33b661`。
+  这些是试载前验证，不能冒充实机取消/恢复测试通过。

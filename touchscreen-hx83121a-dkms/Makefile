@@ -8,8 +8,8 @@ MODVER = 0.1
 HIMAX_STYLUS ?= 0
 HIMAX_V4L2 ?= 1
 
-# Sparse mailbox transaction logging only. No raw-frame capture, additional
-# hardware reads or per-frame work. Runtime logging still defaults to off.
+# Sparse mailbox logging and bounded pre-SPI startup-failure injection only.
+# No extra hardware reads or per-frame work. Both default to off at runtime.
 HIMAX_AFE_DIAGNOSTICS ?= 0
 ifeq ($(HIMAX_AFE_DIAGNOSTICS),1)
 ccflags-y += -DCONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS=1

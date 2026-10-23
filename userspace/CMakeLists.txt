@@ -238,6 +238,14 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-afe-start-test PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
     add_test(NAME afe-start-retry-reference COMMAND himax-afe-start-test)
+    add_executable(himax-afe-start-inject-test tests/afe-start-inject-test.cpp
+        "${TSACORE_OVERLAY}/afe-start-native.c")
+    target_include_directories(himax-afe-start-inject-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_definitions(himax-afe-start-inject-test PRIVATE
+        CONFIG_TOUCHSCREEN_HIMAX_HX83121A_AFE_DIAGNOSTICS=1)
+    target_compile_options(himax-afe-start-inject-test PRIVATE -Wall -Wextra -Werror -Wno-unused-parameter)
+    add_test(NAME afe-start-injection COMMAND himax-afe-start-inject-test)
     add_test(NAME afe-start-reference-integration COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/afe-start-reference-test.py" "${CMAKE_COMMAND}"
         "${UPSTREAM}/EGoTouchService/Device/runtime"

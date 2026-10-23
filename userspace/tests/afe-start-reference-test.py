@@ -34,6 +34,10 @@ with tempfile.TemporaryDirectory(prefix="himax-start-reference-") as directory:
     assert reference.count(text[text.index("std::chrono::milliseconds BringUpBackoff("):
                                 text.index("const char *StandbyReason(")]) == 1
     text = native_bytes.decode()
+    assert "module_param_named(afe_start_failures, himax_afe_start_failures, uint, 0400)" in text
+    probe = text[text.index("static int himax_raw_probe("):text.index("static void himax_raw_remove(")]
+    assert probe.index("himax_afe_start_failures > 8") < probe.index("kzalloc_obj")
+    assert "ts->start_test_failures = himax_afe_start_failures" in probe
     for first, last in (("static int himax_start_afe(", "static void himax_return_buffers("),
                         ("static int himax_stream_start(", "static const struct vb2_ops")):
         assert generated.count(text[text.index(first):text.index(last)]) == 1

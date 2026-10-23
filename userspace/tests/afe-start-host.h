@@ -18,6 +18,7 @@ struct himax_ts_data {
     void *dev;
     struct hx_raw_power_state power;
     struct hx_raw_retry_state retry;
+    unsigned start_test_failures;
     struct hx_raw_charger_state charger;
     uint64_t epoch, sequence, last_command_ns[HX_RAW_RESET + 1];
     char project_id[16];
@@ -96,6 +97,7 @@ static inline bool mod_delayed_work(void *queue, struct delayed_work *work, unsi
 #define usleep_range(low, high) (++ts->sleeps)
 #define dev_err(...) ((void)0)
 #define dev_warn(...) ((void)0)
+#define dev_info(...) ((void)0)
 #define dev_warn_ratelimited(...) ((void)0)
 #ifdef __cplusplus
 }
