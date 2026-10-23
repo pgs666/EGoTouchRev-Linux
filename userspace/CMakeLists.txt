@@ -150,6 +150,14 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/geni-completion-test.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/geni-gsi-completion.c"
         "${CMAKE_CURRENT_SOURCE_DIR}/../kernel-patches/0001-spi-geni-qcom-preserve-in-progress-on-gsi-success.patch")
+    add_test(NAME gpi-channel-lifetime COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/gpi-lifetime-test.py" "${CMAKE_C_COMPILER}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/gpi-lifetime-test.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/gpi-lifetime.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../kernel-patches/0002-dmaengine-qcom-gpi-clear-freed-peripheral-config.patch")
+    add_test(NAME deployment-kernel-health COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/kernel-health-test.py"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../scripts/lib/kernel-health.sh")
     include(cmake/AfeReference.cmake)
     himax_prepare_afe_reference(
         "${UPSTREAM}/EGoTouchService/Device/himax/HimaxProtocol.cpp"

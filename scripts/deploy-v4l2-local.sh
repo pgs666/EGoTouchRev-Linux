@@ -3,6 +3,7 @@
 # restores the previous module. Default installs the tested V4L2 stack.
 set -Eeuo pipefail
 repo_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+source "$repo_dir/scripts/lib/kernel-health.sh"
 trial=0
 trial_seconds=${HIMAX_TRIAL_SECONDS:-5}
 trial_afe=${HIMAX_TRIAL_AFE:-none}
@@ -39,6 +40,9 @@ changed=0
 persistent=0
 module_unloaded=0
 runtime_mask_added=0
+kernel_unhealthy=0
+kernel_checkpoint_ready=0
+success_message=
 old_service_active=0
 old_service_enabled=0
 systemctl is-active --quiet himax-touchd.service && old_service_active=1
@@ -152,20 +156,45 @@ restore() {
 finish() {
 	local status=$?
 	trap - EXIT
+	if (( kernel_checkpoint_ready )); then
+		if ! himax_kernel_health_check "$state_dir" finish; then
+			kernel_unhealthy=1
+			status=1
+		fi
+	fi
+	if (( kernel_unhealthy )); then
+		echo "Kernel health failed; no further live rollback/reload will be attempted." >&2
+		echo "A module rollback cannot repair corrupted kernel memory. Checkpoint=$state_dir" >&2
+		exit 1
+	fi
 	if (( changed )); then
 		restore || { echo "ROLLBACK FAILED; backup=$state_dir" >&2; exit 1; }
+		himax_kernel_health_check "$state_dir" restored || exit 1
+	fi
+	if (( status == 0 )) && [[ -n "$success_message" ]]; then
+		printf '%s\n' "$success_message"
 	fi
 	exit "$status"
 }
 trap finish EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+himax_kernel_health_start "$state_dir"
+kernel_checkpoint_ready=1
+
+check_kernel() {
+	if ! himax_kernel_health_check "$state_dir" "$1"; then
+		kernel_unhealthy=1
+		return 1
+	fi
+}
 
 cmake -S "$repo_dir/userspace" -B "$repo_dir/userspace/build" \
 	-DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_BUILD_TYPE=Release
 make -C "$repo_dir" userspace test
 make -C "$repo_dir/touchscreen-hx83121a-dkms" -j4 HIMAX_V4L2=1 \
 	HIMAX_AFE_DIAGNOSTICS="$afe_diagnostics"
+check_kernel before-hardware
 if [[ -e /dev/uinput ]]; then
 	:
 elif ! modinfo uinput >/dev/null 2>&1; then
@@ -219,6 +248,7 @@ fi
 sudo insmod "$repo_dir/touchscreen-hx83121a-dkms/himax-spi.ko" "${module_options[@]}"
 udevadm settle --timeout=10
 [[ "$(basename "$(readlink -f /sys/bus/spi/devices/spi0.0/driver)")" == himax-spi ]]
+check_kernel loaded
 echo "Capturing five seconds of HXST metadata"
 result=0
 sudo timeout --signal=TERM --kill-after=3 5 \
@@ -294,11 +324,14 @@ if (( trial )); then
 		--no-pager > "$state_dir/lifecycle.log"
 fi
 if (( trial )); then
-	echo "Trial passed; restoring previous module"
+	check_kernel trial
+	echo "Trial checks finished; restoring previous module"
+	success_message="Trial passed and previous module restored; checkpoint=$state_dir"
 	exit 0
 fi
 
 # Persist only after live metadata, solver and uinput registration succeeded.
+check_kernel before-install
 while IFS= read -r -d '' path; do
 	sudo install -Dpm644 "$path" "$state_dir/modules$path"
 done < <(module_paths)
@@ -356,5 +389,6 @@ running_build_id=$(od -An -tx1 -v /sys/module/himax_spi/notes/.note.gnu.build-id
 [[ -L /dev/himax-raw ]]
 awk '/^N: Name="Himax Capacitive TouchScreen"$/{n++} END{exit n != 1}' /proc/bus/input/devices
 echo "installed_module=$installed_module build_id=$running_build_id"
+check_kernel installed
 changed=0
-echo "Installed V4L2 transport and himax-touchd; rollback backup=$state_dir"
+success_message="Installed V4L2 transport and himax-touchd; rollback backup=$state_dir"

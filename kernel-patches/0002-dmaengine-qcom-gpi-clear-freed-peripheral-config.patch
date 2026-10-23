@@ -1,0 +1,26 @@
+From: EGoTouchRev Linux maintainers
+Subject: [PATCH] dmaengine: qcom: gpi: clear peripheral configuration after freeing
+
+gpi_free_chan_resources() frees the per-channel configuration but leaves the
+pointer populated. A subsequent user of the same DMA channel passes that
+freed pointer to krealloc() in gpi_peripheral_config(). This is invalid even
+when both clients request the same configuration size and may overwrite an
+unrelated object that has since acquired the allocation.
+
+Clear the pointer after freeing it so that a new channel user receives a
+new configuration allocation.
+
+Observed while unloading/reloading the Gaokun GENI SPI controller. The first
+eight bytes of its SPI configuration, 01 00 01 01 01 04 00 00, subsequently
+appeared as corrupted pointers in DRM and memcg Oops reports.
+
+--- a/drivers/dma/qcom/gpi.c
++++ b/drivers/dma/qcom/gpi.c
+@@ -2011,6 +2011,7 @@ static void gpi_free_chan_resources(struct dma_chan *chan)
+ 	gpi_free_ring(&gchan->ch_ring, gpii);
+ 	vchan_free_chan_resources(&gchan->vc);
+ 	kfree(gchan->config);
++	gchan->config = NULL;
+ 
+ 	write_lock_irq(&gpii->pm_lock);
+ 	gchan->pm_state = DISABLE_STATE;

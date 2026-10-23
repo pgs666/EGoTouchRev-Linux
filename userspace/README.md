@@ -137,6 +137,12 @@ reset/sense-on 对照逐笔验证 reload 清零、GPIO 两次切换、burst、IS
 
 ### 原生 SPI 封包与短传输
 
+**部署状态修正（2026-10-23）：当前严格长度检查版本尚未完成安全实机部署。**
+先前单独替换 GENI 控制器的试验触发 GPI DMA 配置的释放后使用，已经出现 Oops；
+不得将下文中的采集成功当作整体验证通过。运行中仍为原控制器与 `f27e70e` 触摸模块。
+后续需要 [两项宿主修复](../kernel-patches/README.md) 一起集成到内核并重启验证，
+不再热替换控制器。
+
 默认 V4L2 路径的读取使用与 Windows `HalDevice::Ioctl()` 相同的最多十次尝试，
 legacy 保留三次；成功但长度不足的读取在 OS 事务返回之后直接失败，不额外重试。
 native 检查 `spi_message.actual_length` 必须等于整笔长度，完整读回后才复制给
@@ -984,7 +990,37 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
 - 控制器补丁在 `kernel-patches/`，未改其他内核/buildbot 仓库或已安装 headers。
   用匹配 headers 独立编译修正的控制器模块，先核对本机只有一个 SPI 控制器和
   一个 Himax 从设备，再进行临时替换；记录 `deploy-logs/geni-completion-U5LrqQG6/`；
-- 依赖补丁的普通试载 `deploy-logs/v4l2-20261023-060921/` 通过：515 个 smoke 帧，
+- 依赖补丁的普通试载 `deploy-logs/v4l2-20261023-060921/` **安全通过结论撤回**：
+  脚本返回 0，515 个 smoke 帧，
   首个全零由既有启动容错接纳，其后 514 帧有效，stale/dropped/recording_error=0。
-  solver/watchdog/MMAP 解绑检查通过；试验结束恢复原控制器和原触摸模块。
-  不包含真实手势、真实多 transfer SPI 消息或实际 DMA 故障注入验收；Android 未修改。
+  solver/watchdog/MMAP 检查返回成功；但包裹整个控制器试验的
+  `deploy-logs/geni-completion-U5LrqQG6/kernel.log` 已记录两次内核 Oops，第一次甚至
+  发生在 smoke 前。脚本未检查内核故障而误报通过；恢复模块不能修复内存破坏。
+  用户随后报告两次强制重启。Android 未修改。
+
+2026-10-23 GPI 生命周期事故调查及离线修复：
+
+- 首次 Oops 在同一 boot 的 monotonic 52832.535 秒，加载实验控制器命令在
+  52830.306 秒；第二次 Oops 在 52883.692 秒，回退原控制器命令在 52882.824 秒。
+  首次 DRM、后续 memcg 坏指针基值相同，且与 SPI 配置前八字节完全一致；
+- 本机 GPI 源码及已安装模块反汇编确认释放 `config` 后未清空，重新配置直接
+  `krealloc` 旧指针；离线提取原函数，在 ASan 下稳定复现 double-free。
+  host harness 额外清空指针的对照通过，没有加载任何实验驱动；
+- 新增宿主补丁 0002 与固定原函数 fixture 的生命周期回归，只修复配置所有权。
+  不改固件、用户态算法或实际运行内核；尚未完成修复内核的启动/卸载验证；
+- 14:41 启动后核对当前加载原控制器 build ID
+  `b0f0627e8598dfb054a697204ece81cb84e8a115`，触摸模块仍为 `f27e70e`。
+  EFI initrd 中也为原控制器；遗留 `updates/spi-geni-qcom.ko` SHA-256
+  `ecf3c89c…` 已移到 `deploy-logs/gpi-lifetime-C4K1zALV/quarantine/`，
+  并重建 depmod 索引，磁盘解析恢复原模块。此次未重载任何运行模块；
+- 新增部署内核健康门控：采集前建立 journal cursor，拒绝已有 Oops/坏页内核，
+  检查阶段及结束时保留新日志与 taint；新故障、重启或证据读取失败均不能报告成功，
+  故障时停止进一步 live rollback/reload。此检查不能证明没有静默内存破坏。
+- 离线验证：`make check` 通过（37 项 Release CTest、legacy 回归和普通 V4L2
+  模块构建）。GPI 生命周期与 GENI completion 测试自身使用 ASan/UBSan；
+  本轮没有重跑完整 37 项 sanitizer 套件。
+- 在独立临时目录对本机完整 GPI 源码应用 0002，使用匹配 headers 构建 `gpi.ko`
+  成功，仅有编译器/pahole 版本差异警告。产物未安装、未加载，原源码未修改。
+  部署健康 helper 也在本机 journal 上完成只读验证，未操作硬件。
+- 最终成功信息延后至 EXIT 健康检查结束；试载还必须完成旧模块恢复及恢复后的
+  健康检查。回归覆盖 20 个健康门控场景和 6 个退出/恢复结果场景。
