@@ -1417,3 +1417,24 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
 - 这次实机验证证明的是主动 pre-SPI 失败时的异步等待、STREAMOFF 门控、预算耗尽
   后正常恢复及普通模块可运行，不是实际 DMA/SPI 失败、真实系统休眠/断电、初始化
   中途取消、异常触点/掌压或性能回归的完整证明。完整移植的其余验收缺口仍保留。
+
+2026-10-23 IDLE 读等待许可对齐与用户态更新：
+
+- 新增 `FrameReadMode`，按 Windows 的实际调用顺序在 EnterIdle 命令成功后立即
+  允许长读等待，而非等 solver 首次看到 IDLE；有效 active 帧取消，坏帧/新 epoch
+  清除，tagged 空轮询保留。统计 `read_idle_retry` 是 host 等待许可，不是 IC 的
+  IDLE 完成位；仍使用 `afe_frames idle` 观察有效帧报告；
+- 默认四秒 supervisor 路径和显式 `--experimental-rearm` 开关保持原样。
+  65536 个 suffix word、命令分发失败及生命周期对照通过，Release 与完整
+  ASan/UBSan 均 50/50；细节见
+  [SPB 审计：EnterIdle 命令与读等待许可](../docs/windows-spb-backend-audit.md#enteridle-命令与读等待许可)；
+- `039cdf0` 临时实验会话 25 秒，878 帧全有效，进入 IDLE 后未产生补读/复位，
+  strict replay 878/878。随后已安装新 daemon，运行服务仍明确
+  `producer_rearm=disabled`，877 帧时 bad/stale=0、NRestarts=0。
+  daemon SHA-256 为 `9bfc6684f823ad35dd65596e629ad807c795a9c94171892bd0b968fd2d18721e`；
+- 仅更新用户态程序，无内核源码变化，未重载任何模块；启动文件、unit 和 replay
+  哈希不变。本轮不需要重建 initramfs，当前 initramfs 仍为
+  `19fab49c4722da84a7d8d8387e06d15b7c09ee9c7ea66961845ef9cb5998a580`。
+  备份与证据在 `deploy-logs/read-mode-install-2OwoOVHt/`；
+- 没有真实触点、真实 lost-IRQ 或系统 suspend/resume 验收，不能将短期正常 IDLE
+  通过称为历史断触根因已解决，也没有因此默认启用实验恢复。

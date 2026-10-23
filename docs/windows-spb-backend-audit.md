@@ -473,3 +473,22 @@ sequence 873 首次报告 IDLE，相对命令行的 `hostTimeNs` 约 13.4 ms。
 `deploy-logs/read-mode-shadow-hY6AbfwS/`，检查的是记录的交付时刻，不模拟每次
 50 ms live poll、调度及 SPI 完成时刻。正常确认约 13.4 ms 的这份记录不解释此前
 连续空读现场，也不证明实机丢 IRQ 已恢复。
+
+### 本机试验与用户态部署
+
+源码提交 `039cdf0` 随后在同一测试内核完成 25 秒临时实验会话，显式传入
+`--experimental-rearm`，没有禁用 IRQ、注入故障或卸载模块。epoch=7，878 帧全部
+有效，bad/stale=0，IDLE 6 帧，EnterIdle 一次传输成功，`read_idle_retry=1`；
+没有 rearm、empty poll、reset 或 producer stall，录制 dropped=0。
+strict replay 为 878/878；同一离线时序工具看到一次命令先于确认，最大 IDLE
+交付间隔约 3050.11 ms，没有预测补读或预算耗尽。
+这验证实验路径在本次正常 IDLE 下没有误触发，不是主动恢复成功验收。
+
+随后只更新 `/usr/local/bin/himax-touchd`，SHA-256：
+`9bfc6684f823ad35dd65596e629ad807c795a9c94171892bd0b968fd2d18721e`。
+常驻服务恢复无实验参数的默认配置，PID=1602714、epoch=9、NRestarts=0；
+877 帧时 bad/stale=0，IDLE 5 帧，读等待许可为 1，没有 reset/stall。
+两轮都没有实际触点报告。内核/触摸模块/控制器没有重新加载，Image、DTB、
+两份 initramfs、BLS entry、systemd unit、replay 的哈希及三个模块运行 notes
+前后相同；kernel health 无新增故障。旧 daemon、实验 raw/侧车、部署脚本与日志在
+`deploy-logs/read-mode-install-2OwoOVHt/`。自动补读仍默认关闭，没有自动重启。
