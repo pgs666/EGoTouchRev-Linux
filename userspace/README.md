@@ -1035,3 +1035,15 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
   `artifacts/host-kernel-a06e05c/`，本机 SHA-256 清单校验通过；
 - 尚未安装、生成 initramfs 或启动验证，当前运行模块没有替换。
   [宿主补丁记录](../kernel-patches/README.md) 保存基线、产物哈希和后续验收边界。
+
+2026-10-23 独立测试内核安装：
+
+- 新增 `Fedora Linux 44 (Himax SPI/GPI test)` 启动项，版本
+  `7.1.8-gaokun3-himax1`。已安装匹配模块并生成 initramfs，解包后的
+  GPI/SPI/Himax/uinput 与安装产物逐字节一致；
+- 为避免旧 DKMS 源码在测试启动时覆盖模块，仅新启动项追加
+  `systemd.mask=dkms.service`。当前测试包尚未纳入 RPM/DKMS 管理；
+- 原有 167 个 ESP 文件、旧内核和旧模块的哈希复核通过，默认启动项不变。
+  没有重载模块或重启；当前仍运行原内核，真实启动/触控验收待用户切入新项后进行；
+- 证据位于 `deploy-logs/host-kernel-install-himax1/`，详细状态见
+  [宿主补丁记录](../kernel-patches/README.md)。

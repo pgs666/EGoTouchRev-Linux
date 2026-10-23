@@ -144,7 +144,45 @@ Himax 模块及依赖。反汇编确认 staged GPI 在 `kfree()` 后写入零指
 服务器和本机均已通过清单校验。归档不包含指向编译服务器的 build/source 链接，
 也不包含 kernel-devel、initramfs、用户态程序或启动项；它不是可直接刷写的 boot 镜像。
 
-本轮只构建和取回，未安装新内核、未改启动项、未重载驱动。当前运行仍为
-`7.1.8-gaokun3+` 和此前的触摸模块。下一步是将新 release 作为独立启动项部署，
-构建并检查 initramfs 中的匹配模块，保留旧内核后由用户重启；再核对实际运行
-build ID、内核健康与真实手势/睡眠。离线构建、符号解析和反汇编均不替代该验收。
+上述构建阶段只构建和取回，没有重载驱动。后续独立启动项部署见下节；
+离线构建、符号解析和反汇编均不替代启动与真实手势/睡眠验收。
+
+## 2026-10-23：独立测试启动项已安装，仍运行旧内核
+
+已将新 release 的 Image、配置、System.map、设备树和匹配模块安装到独立版本目录，
+并生成 initramfs。采用独立文件安装，没有运行 RPM/kernel-install 钩子，没有删除
+旧版本或改变默认启动项，也没有执行 reboot、modprobe、控制器解绑/重绑。
+
+测试项显示名称为 **Fedora Linux 44 (Himax SPI/GPI test)**，版本为
+`7.1.8-gaokun3-himax1`。下次由用户在 systemd-boot 菜单中选择此项启动。
+当前默认项和正在运行的版本均仍为 `7.1.8-gaokun3+`。
+
+本次新增路径：
+
+- `/usr/lib/modules/7.1.8-gaokun3-himax1/`；
+- `/boot/vmlinuz-7.1.8-gaokun3-himax1`、对应 config/System.map/DTB/initramfs；
+- ESP 下该 release 的独立 linux/initrd/DTB 目录和一个 BLS `.conf` 文件。
+
+本机 `dkms.service` 已启用，会在开机时使用原有 `/usr/src/himax-spi-0.1` 自动构建。
+此次测试包没有新版本的 kernel-devel，且不应让旧源码覆盖已核验的 V4L2 模块，
+所以**仅新测试项**追加 `systemd.mask=dkms.service`；没有修改全局服务设置或旧启动项。
+当前是手动安装的测试内核，不是已经纳入 RPM/DKMS 管理的正式发布。
+
+部署验证：
+
+- 从新 initramfs 解包 GPI/SPI/Himax/uinput，与新 release 的磁盘模块逐字节比较通过，
+  build ID 与上一节一致；nvme、btrfs 等启动依赖也存在；
+- ESP 中 linux/initrd/DTB 与源文件比较通过，设备树与旧内核版本完全一致；
+- 部署前 ESP 全部 167 个现有文件的 SHA-256 复核通过，原内核和原模块哈希未变；
+- 部署前后 bootctl 的 Current Entry、Default Entry 均指向旧版本；
+- 当前内核仍为 `7.1.8-gaokun3+`，taint 为 4096（OOT），触摸服务 active、
+  NRestarts=0；正在运行的 SPI/Himax build ID 仍为原版本；
+- ESP 安装后约剩 68 MiB。未清理任何旧启动文件。
+
+新 initramfs 的 SHA-256 为
+`3f59ed80670591e7f96ba0037450695943bf53cc720cc82c0800602cacb69297`。
+本机详细部署证据保存在被忽略的 `deploy-logs/host-kernel-install-himax1/`。
+
+启动后仍须确认 `uname -r`、三个修复/触摸模块的运行 build ID、内核故障日志、
+raw 帧与触点输出，再验证四边快滑、多指和真实系统睡眠。新项的存在和 initramfs
+内容正确不能证明该内核已经成功启动，也不能证明此前整机卡死已在实机消除。
