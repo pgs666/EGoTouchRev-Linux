@@ -125,6 +125,19 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-producer-recovery-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME producer-recovery COMMAND himax-producer-recovery-test)
+    include(cmake/StartupDrainReference.cmake)
+    himax_prepare_startup_drain("${UPSTREAM}/EGoTouchService/Device/himax"
+        "${TSACORE_OVERLAY}/startup-drain-windows.cpp")
+    add_executable(himax-startup-drain-test tests/startup-drain-test.cpp
+        "${TSACORE_OVERLAY}/startup-drain-windows.cpp")
+    target_include_directories(himax-startup-drain-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests" "${UPSTREAM}/Common/include")
+    target_compile_options(himax-startup-drain-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME windows-startup-drain COMMAND himax-startup-drain-test)
+    add_test(NAME startup-drain-reference-integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/startup-drain-reference-test.py" "${CMAKE_COMMAND}"
+        "${UPSTREAM}/EGoTouchService/Device/himax"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/StartupDrainReference.cmake")
     himax_prepare_rearm("${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms/himax-v4l2.c"
         "${TSACORE_OVERLAY}/rearm-native.c")
     add_executable(himax-rearm-test tests/rearm-test.cpp "${TSACORE_OVERLAY}/rearm-native.c")

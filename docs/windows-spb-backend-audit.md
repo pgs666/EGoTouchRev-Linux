@@ -492,3 +492,21 @@ strict replay 为 878/878；同一离线时序工具看到一次命令先于确�
 两份 initramfs、BLS entry、systemd unit、replay 的哈希及三个模块运行 notes
 前后相同；kernel health 无新增故障。旧 daemon、实验 raw/侧车、部署脚本与日志在
 `deploy-logs/read-mode-install-2OwoOVHt/`。自动补读仍默认关闭，没有自动重启。
+
+## 启动清帧的可执行参考
+
+新增 test-only oracle，原样编译固定 Windows `Init()` 中 IntOpen、
+ApplyFrameReadPolicy 和清帧循环，以及实际 ApplyFrameReadPolicy 方法。
+源码仍按 SHA-256 锁定；HalDevice 由脚本化测试替身替换，不链接到 daemon。
+覆盖六次 GetFrame 的全部 64 种成功/失败组合、失败后的 IntOpen 也失败、
+打开/读策略每一步失败后的关闭顺序，以及原文漂移/缺失拒绝。
+
+由实际控制流确认：先 master/slave IntOpen，分别设置 block=1 和 timeout=200 ms，
+再三轮 slave→master GetFrame。失败只请求该通道 IntOpen，清帧仍继续；
+成功包不检查 checksum，故它是“三次消费尝试”，不是“三个合法新扫描帧”。
+测试中的超时只脚本化累计时间，不模拟 KMDF 事件、SPI/DMA 或 IRQ。
+
+这项参考尚未更改 Linux 的启动路径。Linux 当前仍在 IRQ 关闭时固定间隔直接读
+三次 event stack；其时序不等价，不能将目前的常规启动成功视为这一移植项完成。
+后续应将初始化后的帧生产、队列清理与 AFE 就绪发布拆开，并验证超时、取消、
+旧 epoch 帧与 IRQ 竞争；不能在持有 IRQ 所需的 op_lock 时等待 IRQ 来完成清帧。
