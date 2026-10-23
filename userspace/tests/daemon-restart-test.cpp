@@ -187,7 +187,7 @@ bool Capture::Restart(uint64_t requestEpoch, uint64_t requestSequence) {
 }
 Input::~Input() = default;
 bool Input::Open(uint32_t) { return true; }
-bool Input::Report(std::span<const Contact> contacts) {
+bool Input::Report(std::span<const Contact> contacts, uint64_t) {
     if (!contacts.empty()) ++reports;
     else if (active) ++releases;
     active = !contacts.empty();

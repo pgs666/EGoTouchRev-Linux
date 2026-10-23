@@ -22,7 +22,7 @@ struct Contact {
 class SlotState {
 public:
     explicit SlotState(uint32_t flags = 0) : m_flags(flags) { m_ids.fill(-1); }
-    bool Frame(std::span<const Contact> contacts);
+    bool Frame(std::span<const Contact> contacts, uint64_t timestampNs = 0);
     std::span<const input_event> Events() const { return {m_events.data(), m_count}; }
     bool Active() const;
     int XMax() const { return m_flags & HX_RAW_SWAP_XY ? 15999 : 25599; }
@@ -32,6 +32,7 @@ private:
     void Event(uint16_t type, uint16_t code, int32_t value);
     Contact Transform(Contact contact) const;
     uint32_t m_flags;
+    uint64_t m_timestampNs = 0;
     std::array<int8_t, 10> m_ids{};
     std::array<input_event, 96> m_events{};
     size_t m_count = 0;
@@ -41,7 +42,8 @@ class Input {
 public:
     ~Input();
     bool Open(uint32_t flags);
-    bool Report(std::span<const Contact> contacts);
+    // HXST acquisition time in CLOCK_MONOTONIC; zero stamps host-only releases now.
+    bool Report(std::span<const Contact> contacts, uint64_t timestampNs = 0);
     bool Release() { return Report({}); }
     bool Active() const { return m_slots.Active(); }
     const std::string& Error() const { return m_error; }

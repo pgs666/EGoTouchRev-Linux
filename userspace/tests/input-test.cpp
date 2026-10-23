@@ -17,9 +17,16 @@ static int Events(const himax::SlotState& slots, int code, int value) {
 int main() {
     himax::SlotState slots;
     himax::Contact points[] = {{31, 100, 100, 200}, {4, 200, 300, 300}};
-    Check(slots.Frame(points) && slots.Active(), "two sparse IDs down");
+    constexpr uint64_t sampleNs = 1234567890123;
+    Check(slots.Frame(points, sampleNs) && slots.Active(), "two sparse IDs down");
+    Check(slots.Events().front().type == EV_KEY && slots.Events().front().code == BTN_TOUCH,
+          "touch key precedes coordinates");
+    for (const auto& event : slots.Events())
+        Check(event.input_event_sec == 1234 && event.input_event_usec == 567890,
+              "all events retain the acquisition timestamp");
     Check(Events(slots, ABS_MT_TRACKING_ID, 31) == 1, "ID 31 supported");
-    Check(slots.Frame(points), "move");
+    Check(slots.Frame(points, sampleNs - 1000) &&
+          slots.Events().back().input_event_usec == 567890, "input time cannot go backwards");
     Check(Events(slots, ABS_MT_TRACKING_ID, 31) == 0, "move preserves tracking ID");
     points[0].id = 7;
     Check(slots.Frame(points), "ID replacement");

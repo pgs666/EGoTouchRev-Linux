@@ -61,6 +61,10 @@ HX83121A SPI → V4L2 META_CAPTURE / HXST → himax-touchd → uinput → libinp
 baseline、AFE 状态解析、噪声处理、检测、跟踪和滤波由用户态完成。内核不再注册
 触摸 input device；`himax-touchd` 是唯一手指输入生产者。
 
+uinput 使用 HXST 的单调时钟采帧时间，同一帧各事件共享时间戳，避免把用户态
+调度间隔当作采样间隔。手动/超时释放使用当前时间，后续样本不会倒退输入时间；
+`BTN_TOUCH` 位于每帧最前面。此适配不增加确认帧，也不改变上游算法或坐标。
+
 算法直接编译上游 EGoTouchRev v1.4.0 的全部实际启用模块、`HimaxAfeAdapter`、
 `TsaCoreSolver` 和参数表，submodule 固定在
 `4d4f53d0bd8563d20850d5f380bcd6a8704c1e81`。不构建 Windows 服务、VHF 或 GUI。

@@ -708,7 +708,7 @@ int main(int argc, char** argv) {
                         static_cast<uint16_t>(std::clamp(t.signalSum, 0, 4095)),
                     };
                 }
-                if (!input.Report(std::span(contacts.data(), count))) {
+                if (!input.Report(std::span(contacts.data(), count), packet->timestamp_ns)) {
                     std::cerr << input.Error() << '\n';
                     return 1;
                 }

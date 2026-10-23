@@ -7,15 +7,22 @@
 #include <fcntl.h>
 #include <linux/uinput.h>
 #include <sys/ioctl.h>
+#include <time.h>
 #include <unistd.h>
 
 namespace himax {
 
 void SlotState::Event(uint16_t type, uint16_t code, int32_t value) {
-    m_events[m_count++] = input_event{{0, 0}, type, code, value};
+    auto& event = m_events[m_count++];
+    event = {};
+    event.input_event_sec = m_timestampNs / 1000000000;
+    event.input_event_usec = m_timestampNs % 1000000000 / 1000;
+    event.type = type;
+    event.code = code;
+    event.value = value;
 }
 
-bool SlotState::Frame(std::span<const Contact> contacts) {
+bool SlotState::Frame(std::span<const Contact> contacts, uint64_t timestampNs) {
     if ((m_flags & ~HX_RAW_COORDINATE_FLAGS) || contacts.size() > m_ids.size()) return false;
     uint32_t ids = 0;
     for (const auto& c : contacts) {
@@ -23,7 +30,12 @@ bool SlotState::Frame(std::span<const Contact> contacts) {
             (ids & (1u << c.id))) return false;
         ids |= 1u << c.id;
     }
+    // An input-only release may be newer than the next queued raw sample.
+    m_timestampNs = std::max(m_timestampNs, timestampNs);
     m_count = 0;
+    // mousedev expects BTN_TOUCH first in each synchronization frame.
+    Event(EV_KEY, BTN_TOUCH, contacts.empty() ? 0 : 1);
+    Event(EV_KEY, BTN_TOOL_FINGER, contacts.empty() ? 0 : 1);
     for (size_t slot = 0; slot < m_ids.size(); ++slot) {
         if (m_ids[slot] < 0 || ids & (1u << m_ids[slot])) continue;
         Event(EV_ABS, ABS_MT_SLOT, slot);
@@ -45,8 +57,6 @@ bool SlotState::Frame(std::span<const Contact> contacts) {
         Event(EV_ABS, ABS_MT_POSITION_Y, c.y);
         Event(EV_ABS, ABS_MT_PRESSURE, c.pressure);
     }
-    Event(EV_KEY, BTN_TOUCH, contacts.empty() ? 0 : 1);
-    Event(EV_KEY, BTN_TOOL_FINGER, contacts.empty() ? 0 : 1);
     if (!contacts.empty()) {
         const auto first = Transform(contacts[0]);
         Event(EV_ABS, ABS_X, first.x);
@@ -118,8 +128,13 @@ bool Input::Open(uint32_t flags) {
     return true;
 }
 
-bool Input::Report(std::span<const Contact> contacts) {
-    if (!m_slots.Frame(contacts)) {
+bool Input::Report(std::span<const Contact> contacts, uint64_t timestampNs) {
+    if (!timestampNs) {
+        timespec now{};
+        if (clock_gettime(CLOCK_MONOTONIC, &now)) return Fail("input timestamp");
+        timestampNs = static_cast<uint64_t>(now.tv_sec) * 1000000000 + now.tv_nsec;
+    }
+    if (!m_slots.Frame(contacts, timestampNs)) {
         m_error = "Invalid contact snapshot";
         return false;
     }
