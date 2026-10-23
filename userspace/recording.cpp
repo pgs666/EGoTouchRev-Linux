@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "recording.h"
 #include "hx-v4l2-uapi.h"
+#include "raw-payload.h"
 
 #include <algorithm>
 #include <cstring>
@@ -118,14 +119,14 @@ bool RecordingReader::Next(RecordedFrame& frame) {
         hx_raw_frame packet;
         std::memcpy(&packet, m_buffer.data(), sizeof(packet));
         if (packet.size != sizeof(packet) || packet.version < 1 || packet.version > HX_RAW_ABI_VERSION ||
-            packet.payload_size != kNativeTransportSize || packet.reserved[0] ||
+            !ValidPayload(packet) || packet.reserved[0] ||
             packet.reserved[1] || packet.reserved_tail ||
             packet.flags & ~(HX_RAW_FRAME_SOS | HX_RAW_FRAME_CHARGER)) {
             m_error = "Invalid HXST record";
             return false;
         }
         std::copy(std::begin(packet.payload), std::end(packet.payload), frame.payload.begin());
-        frame.length = sizeof(packet.payload);
+        frame.length = packet.payload_size;
         frame.timeNs = packet.timestamp_ns;
         frame.epoch = packet.epoch;
         frame.sequence = packet.sequence;

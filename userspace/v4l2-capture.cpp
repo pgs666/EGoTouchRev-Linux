@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
 #include "v4l2-capture.h"
+#include "raw-payload.h"
 
 #include <cerrno>
 #include <cstring>
@@ -116,7 +117,7 @@ bool Capture::Start() {
 bool Capture::RefreshInfo() {
     if (ioctl(m_fd, VIDIOC_HIMAX_INFO, &m_info)) return Fail("HIMAX_INFO");
     if (m_info.size != sizeof(m_info) || m_info.version != HX_RAW_ABI_VERSION ||
-        m_info.rows != 40 || m_info.cols != 60 || m_info.payload_size != HX_RAW_PAYLOAD_SIZE ||
+        m_info.rows != 40 || m_info.cols != 60 || !ValidPayloadSize(m_info.payload_size) ||
         (m_info.coordinate_flags & ~HX_RAW_COORDINATE_FLAGS) || m_info.project_id[15]) {
         m_error = "Incompatible Himax info";
         return false;
@@ -140,7 +141,7 @@ bool Capture::Frame(hx_raw_frame& frame) {
     std::memcpy(&frame, m_buffers[buffer.index].data, sizeof(frame));
     if (ioctl(m_fd, VIDIOC_QBUF, &buffer)) return Fail("QBUF");
     if (frame.size != sizeof(frame) || frame.version != HX_RAW_ABI_VERSION ||
-        frame.payload_size != HX_RAW_PAYLOAD_SIZE || frame.reserved[0] ||
+        frame.payload_size != m_info.payload_size || !ValidPayload(frame) || frame.reserved[0] ||
         frame.reserved[1] || frame.reserved_tail ||
         frame.flags & ~(HX_RAW_FRAME_SOS | HX_RAW_FRAME_CHARGER)) {
         m_error = "Invalid HXST metadata";

@@ -41,17 +41,18 @@ static void himax_state_event(struct himax_ts_data *ts, bool running)
 
 static int himax_read_raw(struct himax_ts_data *ts)
 {
-	u32 chunk = ts->spi_xfer_max_sz - HIMAX_BUS_READ_HEADER_SIZE;
-	u32 offset;
 	int ret;
 
-	for (offset = 0; offset < ts->event_buf_sz; offset += chunk) {
-		ret = himax_spi_read(ts, HIMAX_EVENT_STACK_ADDRESS,
-				     ts->event_buf + offset,
-				     min(chunk, ts->event_buf_sz - offset));
-		if (ret)
-			return ret;
-	}
+	/* The complete master is 5063 wire bytes, including the SPI prefix.
+	 * Do not issue another event-stack command for the legacy ABI tail.
+	 * himax_spi_read publishes only a successful, complete transaction.
+	 */
+	ret = himax_spi_read(ts, HIMAX_EVENT_STACK_ADDRESS,
+			     ts->event_buf, HX_RAW_MASTER_SIZE);
+	if (ret)
+		return ret;
+	memset(ts->event_buf + HX_RAW_MASTER_SIZE, 0,
+	       HX_RAW_PAYLOAD_SIZE - HX_RAW_MASTER_SIZE);
 	return 0;
 }
 
@@ -173,7 +174,7 @@ static irqreturn_t himax_raw_irq(int irq, void *data)
 	frame->timestamp_ns = now;
 	frame->flags = ts->frame_flags |
 		(ts->charger.connected ? HX_RAW_FRAME_CHARGER : 0);
-	frame->payload_size = HX_RAW_PAYLOAD_SIZE;
+	frame->payload_size = HX_RAW_MASTER_SIZE;
 	memcpy(frame->payload, ts->event_buf, sizeof(frame->payload));
 	buf->vb.sequence = ts->sequence;
 	buf->vb.field = V4L2_FIELD_NONE;
@@ -323,7 +324,7 @@ static long himax_private_ioctl(struct file *file, void *priv,
 		info->version = HX_RAW_ABI_VERSION;
 		info->rows = HIMAX_MAX_TX;
 		info->cols = HIMAX_MAX_RX;
-		info->payload_size = HX_RAW_PAYLOAD_SIZE;
+		info->payload_size = HX_RAW_MASTER_SIZE;
 		info->coordinate_flags = ts->coordinate_flags;
 		strscpy(info->project_id, ts->project_id, sizeof(info->project_id));
 		goto out;
@@ -594,13 +595,13 @@ static int himax_raw_probe(struct spi_device *spi)
 	if (device_property_read_bool(ts->dev, "touchscreen-swapped-x-y"))
 		ts->coordinate_flags |= HX_RAW_SWAP_XY;
 	ts->event_buf_sz = HIMAX_FULL_EVENT_STACK_SIZE;
-	ts->spi_xfer_max_sz = min_t(size_t, HIMAX_FULL_EVENT_STACK_SIZE,
-		min(spi_max_transfer_size(spi), spi_max_message_size(spi)));
-	if (ts->spi_xfer_max_sz < 22) {
-		ret = -EMSGSIZE; /* Largest AFE mailbox write includes AHB/header. */
+	ts->xfer_buf_sz = HX_RAW_MASTER_SIZE + HIMAX_BUS_READ_HEADER_SIZE;
+	if (spi_max_transfer_size(spi) < ts->xfer_buf_sz ||
+	    spi_max_message_size(spi) < ts->xfer_buf_sz) {
+		ret = dev_err_probe(ts->dev, -EMSGSIZE,
+				   "SPI controller cannot read a complete master frame\n");
 		goto free_ts;
 	}
-	ts->xfer_buf_sz = ts->spi_xfer_max_sz;
 	ts->xfer_buf = kmalloc(ts->xfer_buf_sz, GFP_KERNEL);
 	ts->event_buf = kmalloc(ts->event_buf_sz, GFP_KERNEL);
 	if (!ts->xfer_buf || !ts->event_buf) {

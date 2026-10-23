@@ -100,7 +100,7 @@ private:
                 output.write(reinterpret_cast<const char*>(&packet), sizeof(packet));
                 Check(output.good(), "Cannot save raw AFE evidence");
                 ++frames;
-                const auto error = himax::ToThpMaster(packet.payload, thp);
+                const auto error = himax::ToThpMaster({packet.payload, packet.payload_size}, thp);
                 if (error != himax::FrameError::None) {
                     Check(!validSeen && ++startupInvalid <= 4,
                           "Invalid master: " + std::string(himax::FrameErrorName(error)));

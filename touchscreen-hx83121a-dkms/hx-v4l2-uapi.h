@@ -6,6 +6,11 @@
 #include <linux/videodev2.h>
 
 #define HX_RAW_ABI_VERSION 2U
+/* Master data excludes the three SPI transport bytes. Keep the old record
+ * capacity for ABI compatibility; payload_size identifies bytes actually read.
+ * A master-sized payload must have zero padding through HX_RAW_PAYLOAD_SIZE.
+ */
+#define HX_RAW_MASTER_SIZE 5060U
 #define HX_RAW_PAYLOAD_SIZE 5132U
 #define V4L2_META_FMT_HIMAX_SPI v4l2_fourcc('H', 'X', 'S', 'T')
 #define HX_RAW_FRAME_SOS (1U << 0)

@@ -37,6 +37,8 @@ struct himax_ts_data {
     void *dev;
     u8 *xfer_buf;
     u32 xfer_buf_sz;
+    u8 *event_buf;
+    u32 event_buf_sz;
 };
 static inline void spi_message_init(struct spi_message *message) {
     memset(message, 0, sizeof(*message));
@@ -57,6 +59,7 @@ int himax_spi_read(struct himax_ts_data *, u8, u8 *, u32);
 int hx_spi_native_write(struct himax_ts_data *, u8, const u8 *, const u8 *, u32);
 int hx_spi_windows_read(struct hx_spi_test_bus *, u8, u8 *, u32);
 int hx_spi_windows_write(struct hx_spi_test_bus *, u8, const u8 *, const u8 *, u32);
+int hx_spi_native_read_event(struct himax_ts_data *);
 #ifdef __cplusplus
 }
 #endif

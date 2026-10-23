@@ -64,7 +64,7 @@ int ReplaySession(const char* path, std::ostream* touchTrace) {
         }
         screen.SetRotation(e.rotation);
         solver->SetChargerPlugged(packet.flags & HX_RAW_FRAME_CHARGER);
-        const auto error = ToThpMaster(packet.payload, thp);
+        const auto error = ToThpMaster({packet.payload, packet.payload_size}, thp);
         const bool valid = error == FrameError::None;
         bool reset = frameHealth.Observe(error);
         bool report = false;

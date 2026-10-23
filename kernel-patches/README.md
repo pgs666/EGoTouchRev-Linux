@@ -186,3 +186,19 @@ Himax 模块及依赖。反汇编确认 staged GPI 在 `kfree()` 后写入零指
 启动后仍须确认 `uname -r`、三个修复/触摸模块的运行 build ID、内核故障日志、
 raw 帧与触点输出，再验证四边快滑、多指和真实系统睡眠。新项的存在和 initramfs
 内容正确不能证明该内核已经成功启动，也不能证明此前整机卡死已在实机消除。
+
+## 2026-10-23：用户重启后的首次验证
+
+用户已手动进入 `7.1.8-gaokun3-himax1`，boot ID 为
+`e7887f81-0864-419a-9117-dcb84563b01b`。运行 GPI、GENI SPI、Himax 的 build ID
+与构建表格一致；taint=4096（OOT），本次 kernel journal 未见 Oops、坏页、锁死或
+Himax SPI 错误。仍有 GPU firmware/audio 等其他子系统警告，不称整个日志无错误。
+
+17:21:18 到 17:22:21 CST 的非中断式服务统计：frames 6853→7985，触点报告
+2109→2378，bad=2、stale=0 不变，服务 NRestarts=0。两项坏帧分别为 sync 和
+all-zero，无逐帧时间戳，不能确定归属于启动阶段。solver 平均用时 204–210 µs；
+IRQ→uinput p99 上界 7 ms，不含扫描前延迟或应用/显示延迟。
+
+该轮没有卸载/替换模块，也没有控制器解绑。当前加载的是 `a06e05c` 触摸构建，
+不是后续单 master 读取改动。短期帧流正常不证明休眠唤醒、真实快速入屏手势或
+长期稳定性通过。记录：`deploy-logs/host-kernel-install-himax1/boot-validation-20261023.md`。

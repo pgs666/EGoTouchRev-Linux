@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "recording.h"
 #include "hx-v4l2-uapi.h"
+#include "raw-payload.h"
 
 #include <algorithm>
 #include <cstdio>
@@ -92,6 +93,34 @@ int main(int argc, char** argv) {
               "HXST preserves payload and lifecycle metadata");
         Check(!reader.Next(frame) && reader.Error().empty(), "clean EOF");
     }
+    for (uint32_t size : {HX_RAW_MASTER_SIZE, HX_RAW_PAYLOAD_SIZE}) {
+        auto sized = packet;
+        sized.payload_size = size;
+        file.Write(&sized, sizeof(sized));
+        himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
+        Check(himax::ValidPayload(sized) && reader.Next(frame) && frame.length == size &&
+              frame.payload[40] == 123, "new and legacy captures preserve actual payload size");
+    }
+    for (uint32_t size : {0u, HX_RAW_MASTER_SIZE - 1, HX_RAW_MASTER_SIZE + 1,
+                          HX_RAW_PAYLOAD_SIZE + 1, UINT32_MAX}) {
+        auto sized = packet;
+        sized.payload_size = size;
+        file.Write(&sized, sizeof(sized));
+        himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
+        Check(!himax::ValidPayload(sized) && !reader.Next(frame) && !reader.Error().empty(),
+              "unknown and overflowing payload lengths rejected before padding access");
+    }
+    for (size_t offset : {size_t(HX_RAW_MASTER_SIZE), size_t(HX_RAW_PAYLOAD_SIZE - 1)}) {
+        auto padded = packet;
+        padded.payload_size = HX_RAW_MASTER_SIZE;
+        padded.payload[offset] = 1;
+        file.Write(&padded, sizeof(padded));
+        himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
+        Check(!himax::ValidPayload(padded) && !reader.Next(frame) && !reader.Error().empty(),
+              "uncaptured tail cannot masquerade as zero padding");
+        padded.payload_size = HX_RAW_PAYLOAD_SIZE;
+        Check(himax::ValidPayload(padded), "legacy captured tail remains opaque evidence");
+    }
     file.Write(&packet, sizeof(packet) - 1);
     {
         himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
@@ -133,6 +162,13 @@ int main(int argc, char** argv) {
     const uint16_t checksum = static_cast<uint16_t>(0u - sum);
     packet.payload[2] = checksum & 0xff;
     packet.payload[3] = checksum >> 8;
+    for (uint32_t size : {HX_RAW_MASTER_SIZE, HX_RAW_PAYLOAD_SIZE}) {
+        auto sized = packet;
+        sized.payload_size = size;
+        file.Write(&sized, sizeof(sized));
+        Check(Replay(argv[1], file.path, false) == 0,
+              "strict solver replay supports both captured master lengths");
+    }
     std::array<hx_raw_frame, 6> packets;
     packets.fill(packet);
     for (auto& bad : packets) bad.payload[0] = 0;

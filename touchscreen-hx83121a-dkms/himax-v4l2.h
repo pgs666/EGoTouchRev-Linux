@@ -27,7 +27,6 @@ struct himax_ts_data {
 	struct gpio_desc *gpiod_rst;
 	u8 *xfer_buf;
 	u8 *event_buf;
-	u32 spi_xfer_max_sz;
 	u32 xfer_buf_sz;
 	u32 event_buf_sz;
 	spinlock_t irq_lock;

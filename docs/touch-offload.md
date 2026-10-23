@@ -8,7 +8,7 @@ misc 字符设备/结果回交/运行时内核 fallback 草案。当前实现与
 
 ```text
 SPI IRQ
-  → threaded IRQ 完整读取 5132 字节
+  → threaded IRQ 一次 SPI 事务读取 5060 字节 master（线上含前缀为 5063 字节）
   → vb2 META_CAPTURE（HXST，MMAP）
   → 用户态校验 native master、前补 3 字节 THP 头
   → 原版 HimaxAfeAdapter + TSACore + TsaOutputMapper
@@ -16,8 +16,8 @@ SPI IRQ
   → Linux input/libinput
 ```
 
-内核仅有 `himax-v4l2.c`、共享的 `himax-spi-hw.c` 和可单独 host 测试的协议
-`hx-otp.c` / `hx-afe.c` 四个编译单元。不链接 baseline、
+内核包含 `himax-v4l2.c`、共享的 `himax-spi-hw.c` 和可单独 host 测试的协议
+`hx-otp.c` / `hx-afe.c` / `hx-raw-init.c` / `hx-ahb.c`。不链接 baseline、
 peak detection、tracker、滤波、input 或旧诊断 ring。保留的硬件职责包括 GPIO reset、
 AHB/SPI 事务、OTP 读取、reload、raw producer、panel follower、系统 PM、充电状态和命令邮箱。
 这些必须由硬件拥有者串行执行，无法可靠地简化为毫无生命周期的 SPI 字节转发器。
@@ -46,13 +46,19 @@ Linux 有两处宿主方向适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys
 | 接口 | 内容 |
 |---|---|
 | `V4L2_BUF_TYPE_META_CAPTURE` / `HXST` | 一个 buffer 对应一个 5184 字节 `hx_raw_frame` |
-| payload | 原样 5132 字节 SPI event stack，不在内核解析 suffix/checksum |
+| payload | 容量仍为 5132 字节；`payload_size=5060` 表示完整 master，剩余 72 字节必须为零；不在内核解析 suffix/checksum |
 | epoch/sequence | 每次 AFE 重启/屏幕停止改变 epoch；成功读取后 sequence 递增 |
 | timestamp_ns | IRQ 线程入口的 CLOCK_MONOTONIC 时间，不是硬件采样时间 |
 | flags | AFE SOS 恢复原因、当前充电状态 |
 | `VIDIOC_HIMAX_INFO` | ABI、网格 40×60、payload 长度、OTP project ID、固件坐标变换 |
 | `VIDIOC_HIMAX_COMMAND` | ClearStatus、频点、扫描率、IDLE、calibration、reset |
 | `V4L2_EVENT_HIMAX_STATE` | running/epoch；即使屏灭不再产帧也能及时释放触点 |
+
+2026-10-23 起，新代码按固定 Windows `Frame::kMasterFrameSize` 一次读取 master，
+不再为旧记录容量的尾部发出第二次 event-stack 命令。结构大小和 ioctl 编号不变，
+INFO 与每帧的 `payload_size` 表示实际读取长度；新用户态兼容旧模块/文件的 5132
+字节长度与新模块的 5060 字节长度，并拒绝新格式非零 padding。旧用户态会拒绝新
+模块，必须先更新 daemon 再切换模块，不能称为双向兼容。该读取变更尚未实机部署。
 
 命令必须来自当前 vb2 queue owner，并与当前 epoch、最近八帧内的 sequence 关联。
 校验 action、参数和保留字段；普通 action 最短间隔 20 ms，reset 最短一秒，

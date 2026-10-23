@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
             auto& packet = event.packet;
             packet.size = sizeof(packet);
             packet.version = HX_RAW_ABI_VERSION;
-            packet.payload_size = sizeof(packet.payload);
+            packet.payload_size = i < 125 ? HX_RAW_PAYLOAD_SIZE : HX_RAW_MASTER_SIZE;
             packet.epoch = i < 125 ? 1 : i < 161 ? 2 : 3;
             packet.sequence = i + 1;
             packet.timestamp_ns = 1000000000ULL + i * 9000000ULL;
@@ -158,11 +158,11 @@ int main(int argc, char** argv) {
                 i < 20 || (i >= 125 && i < 145) || (i >= 161 && i < 165) ? 0xbb : 0;
             Checksum(packet);
             if (i >= 120 && i < 125) packet.payload[0] = 0;
-            if (i == 160) std::fill(std::begin(packet.payload), std::end(packet.payload), 0xec);
+            if (i == 160) std::fill(packet.payload, packet.payload + packet.payload_size, 0xec);
             event.rotation = i / 80;
             screen.SetRotation(event.rotation);
             solver->SetChargerPlugged(packet.flags & HX_RAW_FRAME_CHARGER);
-            const auto error = himax::ToThpMaster(packet.payload, thp);
+            const auto error = himax::ToThpMaster({packet.payload, packet.payload_size}, thp);
             const bool reset = health.Observe(error);
             if (error != himax::FrameError::None) {
                 if (reset) {

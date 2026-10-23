@@ -140,6 +140,16 @@ if(BUILD_TESTING)
     target_compile_definitions(himax-spi-test PRIVATE CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2=1)
     target_compile_options(himax-spi-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME native-spi-protocol COMMAND himax-spi-test)
+    include(cmake/EventReadReference.cmake)
+    himax_prepare_event_read("${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms"
+        "${TSACORE_OVERLAY}/event-read-native.c")
+    add_executable(himax-event-read-test tests/event-read-test.cpp
+        "${TSACORE_OVERLAY}/spi-native.c" "${TSACORE_OVERLAY}/event-read-native.c")
+    target_include_directories(himax-event-read-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests")
+    target_compile_definitions(himax-event-read-test PRIVATE CONFIG_TOUCHSCREEN_HIMAX_HX83121A_V4L2=1)
+    target_compile_options(himax-event-read-test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(himax-event-read-test PRIVATE himax-tsacore)
+    add_test(NAME native-event-read COMMAND himax-event-read-test)
     add_test(NAME spi-reference-integration COMMAND "${Python3_EXECUTABLE}"
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/spi-reference-test.py" "${CMAKE_COMMAND}"
         "${UPSTREAM}/EGoTouchService/Device/himax"

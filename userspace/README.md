@@ -531,7 +531,11 @@ raw 录制文件使用 32 字节 `HXRC` 容器头，保存 project ID 和固件�
 回放其他面板时应显式指定 project ID。文件格式详见架构说明。
 CSV 坐标单位为面板原始方向的显示像素；uinput 使用其十倍量程，保留亚像素信息。
 native master 只前补三个运输字节，不改变原始矩阵、suffix 和 checksum。
-5132 字节 SPI 记录中，仅前 5060 字节属于 master，checksum 覆盖 `[2, 5060)`。
+5132 字节 payload 容量中，仅前 5060 字节属于 master，checksum 覆盖 `[2, 5060)`。
+新模块一次读取完整 master，`payload_size=5060`，尾部 72 字节为零 padding；
+旧模块/旧记录为 `payload_size=5132`。新 reader 接受两种长度，按实际长度回放，
+新格式尾部非零时拒绝。旧 daemon 不接受新模块，更新时先安装新版用户态；
+结构/ioctl 保持 ABI v2，不代表新模块能被旧 daemon 使用。
 suffix 中的 `0xbb` 是校准完成状态，通过 ClearStatus(8) 确认，不能作为每帧固定 magic。
 
 ## 恢复旧内核算法
@@ -1047,3 +1051,30 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
   没有重载模块或重启；当前仍运行原内核，真实启动/触控验收待用户切入新项后进行；
 - 证据位于 `deploy-logs/host-kernel-install-himax1/`，详细状态见
   [宿主补丁记录](../kernel-patches/README.md)。
+
+2026-10-23 新内核启动与 master 整帧读取对齐：
+
+- 用户已重启到 `7.1.8-gaokun3-himax1`；GPI/SPI/Himax 运行 build ID 与构建匹配。
+  短期帧流增长、服务零重启、bad=2 未增长，本次未发现内核 Oops/坏页/Himax SPI
+  错误。详见宿主补丁记录，不把成功启动等同于长期稳定或睡眠唤醒验收；
+- 复核固定 Windows `FrameLayout.h`、`HimaxChipFrame.cpp`：master 为 5063
+  线上字节，扣除三个 SPI 前缀为 5060。旧 native 读取按 5132 容量分为
+  5129+3，产生额外 event-stack 命令。现在一次读取完整 master，成功后将
+  HXST 尾部 72 字节清零，失败时保留完整上一帧。probe 拒绝不能承载完整
+  5063 字节事务的控制器，不再隐式拆帧；legacy 内核算法读取路径未改；
+- ABI v2 的结构大小保持不变，INFO/每帧 payload_size 改为 5060；新 daemon、
+  回放、AFE 测试按有效长度解析，同时支持旧 5132 格式。旧 daemon 不兼容新
+  模块，须先更新用户态。padding 不冒充硬件采样，5132 旧记录尾部仍按证据保留；
+- 新 `native-event-read` 直接提取生产读帧函数和 SPI 原语，覆盖线上命令、
+  完整 raw/checksum/suffix、传输边界、短读、重试、停止错误和上一帧保护。
+  录制/严格 solver 回放测试覆盖两种长度、非法长度和 padding，以及跨 epoch
+  的新旧格式会话。重启前 `make check` 通过；本轮重跑 38 项 Release 全过。
+  ASan/UBSan 的 38 项验证跨重启完成，删除无用测试宏后另重跑上述三项通过；
+- 在编译服务器保留原内核输出，使用独立 `master-read-HtPArJ` 模块目录构建
+  当前候选，vermagic=`7.1.8-gaokun3-himax1`。源码内容已与本地逐文件校验，
+  构建无 warning/error，取回 `artifacts/master-read-himax1/`。
+  模块 SHA-256：`cd117f996251e4bb2a76a424b551aaf2043d131f5c25ed95f2348feb6a93680f`，
+  build ID：`8373e1e315a0325f115c53592e07a28afd51c94b`；
+- **该单次 master 读取候选尚未部署**，当前运行仍为 `a06e05c` 触摸模块。
+  历史 1027 个有效采样的尾部均为零只是辅助证据，不证明新物理事务已正确运行。
+  下一步仍需实际采集/手势、IRQ/清帧语义与切频完成审计；Android 新架构未部署。

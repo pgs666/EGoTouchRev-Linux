@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: MIT
 #include "native-frame.h"
+#include "hx-v4l2-uapi.h"
 
 #include <algorithm>
 
 namespace himax {
+
+static_assert(kNativeMasterSize == HX_RAW_MASTER_SIZE);
+static_assert(kNativeTransportSize == HX_RAW_PAYLOAD_SIZE);
 
 FrameError ToThpMaster(std::span<const uint8_t> native,
                       std::array<uint8_t, Frame::kMasterFrameSize>& thp) noexcept {

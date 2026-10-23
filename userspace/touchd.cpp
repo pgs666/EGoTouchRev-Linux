@@ -328,7 +328,7 @@ int main(int argc, char** argv) {
             recordedFrame->hostTimeNs = now; // Exact time used by StreamState::Accept.
             recordedFrame->rotation = solverScreen.Rotation();
         }
-        const auto error = himax::ToThpMaster(packet->payload, thp);
+        const auto error = himax::ToThpMaster({packet->payload, packet->payload_size}, thp);
         const bool wasResetRequested = frameHealth.ResetRequested();
         bool requestReset = frameHealth.Observe(error);
         if (error != himax::FrameError::None) {
