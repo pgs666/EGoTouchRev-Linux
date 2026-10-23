@@ -262,3 +262,18 @@ owner/限频/STREAMOFF、672 帧 fresh strict replay 通过。
 这不是主控制器内存损坏事故；taint=4096、无新增 kernel fault。详细时序与未获验收
 范围见 [SPB 后端审计末节](../docs/windows-spb-backend-audit.md)。
 旧模块/镜像及回退证据在 `deploy-logs/bus-ready-install-8HLvWGMV/`。
+
+## 2026-10-23：配套来源标记模块已安装，自动补读仍默认关闭
+
+`1674f8e` 加入协商后的 tagged-rearm ioctl/逐帧来源，不改 v2 结构尺寸，
+普通 IRQ 和 legacy ioctl 的 flags 保持兼容。已临时验证单次主动读的 REARM 标记、
+后续同 epoch IRQ 清除标记，以及 672 帧默认采集/strict replay。
+随后普通模块、daemon 和 replay 已配套安装；正常服务为四秒等待，自动补读关闭。
+没有将这个受控结果称为真实 lost-IRQ 或自动恢复验收。
+
+模块 build ID：`5faf3ab0c3fa1d7c979793919307a738766971f2`。
+两份测试 initramfs SHA-256：
+`19fab49c4722da84a7d8d8387e06d15b7c09ee9c7ea66961845ef9cb5998a580`，
+解包模块核对通过；Image、DTB、BLS entry、SPI/GPI 未改，未自动重启。
+旧模块/程序/镜像及 kernel health 证据：
+`deploy-logs/tagged-rearm-install-jZr7HanI/`。

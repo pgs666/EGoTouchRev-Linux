@@ -1,22 +1,22 @@
 # Linux 用户态触控求解
 
 当前本机部署（2026-10-23）：测试内核 `7.1.8-gaokun3-himax1`，触摸模块已更新为
-`7f6c534` 的 master bus-ready 普通构建。**daemon 已临时回退到 `c00844e` 的四秒
-停帧等待版**，replay 仍与 `c00844e` 字节相同；原因是后续实机遇到连续空补读引发
-reset，尚不能排除自动补读误判。源码保留开发中的新恢复策略，不能把 HEAD 等同于
-已安装 daemon。初始化前主动失败/取消/恢复及普通启动已完成首轮实机验证；
+`1674f8e` 的 bus-ready/tagged-origin 普通构建，daemon 和 replay 也配套更新。
+**自动补读默认关闭，正常服务继续四秒等待**。早先自动空补读曾触发 reset，因此
+默认关闭保持不变；来源标记和 no-data 处理已修正，但尚不能排除过渡期误判。
+初始化前主动失败/取消/恢复及普通启动已完成首轮实机验证；
 可选运行中窗口录制默认关闭。下文末尾的增量记录按时间排列，其中早先的
 “尚未安装”是当时状态；最新部署记录见末节，不能据早先记录判断当前版本。
 
-开发中：新增 `VIDIOC_HIMAX_REARM` 和用户态无复位停帧恢复预算。
+开发中：新增 `VIDIOC_HIMAX_REARM_TAGGED` 和用户态无复位停帧恢复预算。
 当前 HEAD 已将自动补读改为 `--experimental-rearm` 显式启用，**默认关闭**，
 默认保留四秒停帧等待；systemd unit 不带该参数。`--observe`/`--info` 拒绝与实验
 选项组合。该开关不代表自动恢复已验收，只是防止从 HEAD 默认构建时重新启用已知
-有现场疑点的策略；当前已安装 daemon 仍是上述回退版本。
+有现场疑点的策略；当前已安装配套新程序，但普通服务不传实验参数。
 最新开发进一步增加 `VIDIOC_HIMAX_REARM_TAGGED` 与 HXST 来源标志，
 区分明确的空轮询和 IRQ 异常包；只豁免“已标记主动读 + 全零”，不豁免 checksum、
 bus filler 或未知大小。来源会保留到 raw/strict session replay；旧模块返回 ENOTTY
-时按保守路径等待，不猜测来源。仍未默认启用实验策略，也未替换当前运行程序。
+时按保守路径等待，不猜测来源。已配套安装，但仍未默认启用实验策略。
 正常模式 200 ms、IDLE 3600 ms 没有生产进展后先补读，不清 baseline 或重建 epoch；
 超过有界重试预算才走 supervisor。`--observe` 不主动补读；新 daemon 遇到旧模块
 ENOTTY 则保留四秒回退。日志 `producer_rearm` 将 `transferred` 与 `valid_after`
@@ -31,6 +31,10 @@ ENOTTY 则保留四秒回退。日志 `producer_rearm` 将 `transferred` 与 `va
 所以短期无触摸通过不足以证明该策略适合日常运行。详见审计末节的时序记录。
 回退 daemon 后统计 1534 帧、bad/stale=0、109 次触摸报告、121 个 IDLE 帧、
 同一 epoch、NRestarts=0。该测试启动项 initramfs 已同步，更新镜像尚未重启验收。
+随后安装 `1674f8e` 的保守默认版，日志为 `producer_rearm=disabled`：
+878→917 帧，bad=1（启动全零）不增长、stale=0、epoch=1、NRestarts=0、
+无触摸报告。受控单次主动补读则确认来源标记落盘与后续 IRQ 清除标记，不能据此
+推断自动补读在实际故障下可恢复。最新证据见 SPB 审计末节。
 
 默认数据路径为：
 

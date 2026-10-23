@@ -402,3 +402,36 @@ checkpatch 0 errors/0 warnings。服务器已构建匹配 `7.1.8-gaokun3-himax1`
 当前为候选构建，尚未试载/安装。自动恢复仍须显式 `--experimental-rearm`；
 active→IDLE 过渡、缺少 slave 通道的等待语义、真实 lost IRQ 和手势质量尚未验收。
 不能因为 tagged 空轮询不再触发五帧 reset，就声称有界 producer 超时也不会误判。
+
+### tagged-origin 实机试载与保守默认部署
+
+候选随后受控试载，未启用自动补读；只由专用 hardware test 在 IDLE 静默约 255 ms
+时主动读取一次。证据：
+`deploy-logs/tagged-rearm-trial-aUkkPVi9/`。
+
+- epoch=1、sequence 29 为全零补读，flags=6（CHARGER=2、REARM=4）；
+- 不再主动读，正常 IRQ 的 sequence 30 有效，flags=2，仍为 epoch=1；
+  这验证同设备后续 IRQ 不继承主动读来源，不能证明丢中断恢复；
+- 30 帧 raw 中有一个启动无效帧和一个 tagged 空轮询；新 raw replay 为
+  `rejected=1 startup_allowed=1 empty_rearms=1`，保留 no-data，未将其称为有效数据；
+- 同一新 replay 读取旧的 untagged IDLE 试验记录时，仍报两个 all-zero、
+  `empty_rearms=0` 并返回 1，没有给历史未知来源包“补造”标记；
+- 默认关闭自动补读的新 daemon 另录制 672 帧，bad/stale=0、无触摸报告，
+  strict replay `session_frames=672 verified_frames=672 live_output_verified=1`；
+- 权限/版本/reserved/epoch/token/限频/STREAMOFF 检查通过；SPI/GPI notes 相同，
+  无新 kernel fault、taint=4096。临时试载结束先恢复旧模块/daemon，磁盘/boot 未改。
+
+完成试载后，已正式安装 `1674f8e` 普通模块、daemon、replay，保守默认不变。
+运行 PID `1445301`，`/proc/PID/exe` 与已安装 daemon 一致；模块与上述候选哈希一致。
+日志明确为 `producer_rearm=disabled`；统计 878→917 帧、bad=1（启动全零）不增长、
+stale=0、IDLE 帧 5→44、epoch=1、NRestarts=0、没有触摸报告或新 reset。
+
+`/boot` 与 ESP 同一测试启动项 initramfs SHA-256：
+`19fab49c4722da84a7d8d8387e06d15b7c09ee9c7ea66961845ef9cb5998a580`；
+解包 Himax/GPI/SPI/uinput 与已安装模块逐字节一致。Image、DTB、BLS entry、
+SPI/GPI 运行 notes 和 systemd unit 不变；没有自动重启或改 Android 分区。
+旧模块、daemon、replay、两份旧 initramfs 与核验日志在
+`deploy-logs/tagged-rearm-install-jZr7HanI/previous-*` 及同目录，可回退。
+
+此轮解除了来源缺失和空包错误计数的具体问题；自动策略仍需过渡/真实故障验收，
+更新镜像仍待冷启动。默认不产生 kick，不能用默认运行统计代替实验模式验收。

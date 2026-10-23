@@ -75,6 +75,9 @@ HEAD 同时改为显式 `--experimental-rearm` 才使用新策略，默认构建
 IRQ 错误及非全零的主动读错误保持原规则；宽限从 ioctl 完成后开始。合成八个空轮询、
 丢失来源的回放反例、慢 SPI 完成后的截止测试已接入。这是修正已知语义冲突，
 并非证明 active→IDLE 过渡或真实丢 IRQ 恢复已解决；实验模式继续默认关闭。
+`1674f8e` 受控试载确认主动空读带 REARM、后续同 epoch 的 IRQ 清除 REARM；
+随后配套模块/daemon/replay 已安装，常驻服务保持 `producer_rearm=disabled`。
+更新后的测试 initramfs 尚未重启验收。
 
 | 范围 | 当前状态 | 尚需证据或实现 |
 |---|---|---|
