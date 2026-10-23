@@ -58,7 +58,9 @@ Linux 有两处宿主方向适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys
 不再为旧记录容量的尾部发出第二次 event-stack 命令。结构大小和 ioctl 编号不变，
 INFO 与每帧的 `payload_size` 表示实际读取长度；新用户态兼容旧模块/文件的 5132
 字节长度与新模块的 5060 字节长度，并拒绝新格式非零 padding。旧用户态会拒绝新
-模块，必须先更新 daemon 再切换模块，不能称为双向兼容。该读取变更尚未实机部署。
+模块，必须配套更新 daemon，不能称为双向兼容。`44e6917` 已在
+`7.1.8-gaokun3-himax1` 实机部署并更新测试启动项 initramfs；短期采集通过，
+真实手势质量、睡眠与长期验收仍未完成。
 
 命令必须来自当前 vb2 queue owner，并与当前 epoch、最近八帧内的 sequence 关联。
 校验 action、参数和保留字段；普通 action 最短间隔 20 ms，reset 最短一秒，

@@ -202,3 +202,18 @@ IRQ→uinput p99 上界 7 ms，不含扫描前延迟或应用/显示延迟。
 该轮没有卸载/替换模块，也没有控制器解绑。当前加载的是 `a06e05c` 触摸构建，
 不是后续单 master 读取改动。短期帧流正常不证明休眠唤醒、真实快速入屏手势或
 长期稳定性通过。记录：`deploy-logs/host-kernel-install-himax1/boot-validation-20261023.md`。
+
+## 2026-10-23：测试内核更新到触摸提交 `44e6917`
+
+用户要求后，将单次 master 读取模块和新 daemon/replay 安装并加载到同一测试内核。
+SPI/GPI 控制器未卸载，其运行 build ID 在前后逐字节核对一致；内核 Image、DTB、
+BLS entry、其他内核和默认启动选择不变。新触摸模块 build ID 为
+`8373e1e315a0325f115c53592e07a28afd51c94b`，不再是前述 `a06e05c` 模块。
+
+五秒 raw smoke、用户态求解、真实触摸报告与内核健康门控通过；完整统计与测试边界
+见 [用户态运行说明](../userspace/README.md)。已重建 `/boot` 与 ESP 测试项 initramfs，
+解包确认 Himax/GPI/SPI/uinput 与已安装文件一致。新 initramfs SHA-256 为
+`88d55c7559007d53ef23171b187e61a7f78175d671ac1ca4b97a1a7b7f58b17f`。
+该镜像尚未重启验证；旧镜像和模块/程序保存在
+`deploy-logs/master-read-install-44e6917/previous-*`，不占用 ESP 额外备份空间。
+仍是手动部署测试内核，DKMS mask 保留，没有伪造 DKMS 安装状态。

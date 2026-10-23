@@ -1078,3 +1078,25 @@ sense-on，再核对 SPI 封包、实际传输长度与错误重试。上游未�
 - **该单次 master 读取候选尚未部署**，当前运行仍为 `a06e05c` 触摸模块。
   历史 1027 个有效采样的尾部均为零只是辅助证据，不证明新物理事务已正确运行。
   下一步仍需实际采集/手势、IRQ/清帧语义与切频完成审计；Android 新架构未部署。
+
+2026-10-23 `44e6917` 单次 master 读取正式安装到测试内核：
+
+- 按用户要求替换当前 `7.1.8-gaokun3-himax1` 的外置触摸模块及配套 daemon/replay，
+  未热替换 SPI/GPI、未更改 kernel Image/DTB、未改 Android 或其他版本模块。
+  该内核没有本机 headers，使用上述服务器构建产物，不调用 DKMS；启动项的
+  DKMS runtime mask 保留。原模块、程序与 initramfs 均备份到
+  `deploy-logs/master-read-install-44e6917/`；
+- 安装前重新运行 38 项 Release CTest 全过。五秒 smoke 514 帧，首帧全零由
+  启动容错丢弃，后续 513 帧校验通过，recording_error/dropped/stale=0。
+  文件首记录 payload_size=5060。临时 solver 876 帧、bad/stale=0；无触摸输入，
+  不构成手势测试。交接后的常驻服务 1798 帧、bad/stale=0、touch_reports=443、
+  NRestarts=0；真实触控报告存在，但未验证用户感知的平滑度/边缘手势；
+- 运行与磁盘模块 build ID 均为 `8373e1e315a0325f115c53592e07a28afd51c94b`，
+  SHA-256 与上一节候选一致。已安装 daemon 与 Release 产物逐字节一致，SHA-256
+  为 `764ac6045bdefc8d42dbbebc2f441d35fb1488aaa72d0295b40e98e33d13096c`；
+- 重建 `/boot` 与 ESP 同一测试启动项的 initramfs，解包核对 Himax/GPI/SPI/uinput
+  与磁盘模块逐字节一致，kernel Image/DTB/BLS entry 哈希未变。新 initramfs
+  SHA-256：`88d55c7559007d53ef23171b187e61a7f78175d671ac1ca4b97a1a7b7f58b17f`；
+- 部署、交接、更新启动镜像后的健康门控均通过，没有新 Oops/WARN/坏页。
+  没有自动重启，更新后的 initramfs 仍待下次开机验证；默认启动项保持原旧内核，
+  要重启试用本版本仍选 **Fedora Linux 44 (Himax SPI/GPI test)**。
