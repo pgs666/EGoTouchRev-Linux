@@ -48,8 +48,10 @@ threaded IRQ 读硬件；四秒超时、混合错误五帧阈值不是 Windows �
 [SPB 后端证据与移植边界](windows-spb-backend-audit.md)：确认 ACPI/Resource Hub
 绑定、两帧 FIFO、IRQ 生产者，以及 `IntOpen` 的无复位补读行为。两个固定名称不能
 证明两个物理片选；旧逆向文档中的“无 ACPI、DT 应建双节点”不再作为依据。
-下一项应补齐 master-only 无复位 producer kick 的门控/竞态与恢复证据，而不是
-用重启 daemon 或热重载父 SPI/GPI 模拟 `IntOpen`；该接口尚未实现。
+随后已实现 master-only 无复位 producer kick 的门控/竞态和有界恢复策略，而不是
+用重启 daemon 或热重载父 SPI/GPI 模拟 `IntOpen`。生产函数及固定 Windows
+重试 lambda 的离线对照已接入测试；模块在编译服务器构建完成但尚未部署，
+真实停 IRQ/恢复、PM 并发和手势回归仍待验收。
 
 | 范围 | 当前状态 | 尚需证据或实现 |
 |---|---|---|

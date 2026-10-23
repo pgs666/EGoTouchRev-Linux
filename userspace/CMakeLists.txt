@@ -111,6 +111,30 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
     target_compile_options(himax-stream-test PRIVATE -Wall -Wextra -Werror)
     add_test(NAME stream-lifecycle COMMAND himax-stream-test)
+    include(cmake/RearmReference.cmake)
+    himax_prepare_rearm_policy("${UPSTREAM}/EGoTouchService/Device/himax"
+        "${TSACORE_OVERLAY}/rearm-policy-windows.cpp")
+    add_executable(himax-producer-recovery-test tests/producer-recovery-test.cpp
+        "${TSACORE_OVERLAY}/rearm-policy-windows.cpp")
+    target_include_directories(himax-producer-recovery-test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_options(himax-producer-recovery-test PRIVATE -Wall -Wextra -Werror)
+    add_test(NAME producer-recovery COMMAND himax-producer-recovery-test)
+    himax_prepare_rearm("${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms/himax-v4l2.c"
+        "${TSACORE_OVERLAY}/rearm-native.c")
+    add_executable(himax-rearm-test tests/rearm-test.cpp "${TSACORE_OVERLAY}/rearm-native.c")
+    target_include_directories(himax-rearm-test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tests"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms")
+    target_compile_options(himax-rearm-test PRIVATE -Wall -Wextra -Werror)
+    target_link_libraries(himax-rearm-test PRIVATE Threads::Threads)
+    add_test(NAME native-producer-rearm COMMAND himax-rearm-test)
+    set_tests_properties(native-producer-rearm PROPERTIES TIMEOUT 10)
+    add_test(NAME rearm-reference-integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/rearm-reference-test.py" "${CMAKE_COMMAND}"
+        "${UPSTREAM}/EGoTouchService/Device/himax"
+        "${CMAKE_CURRENT_SOURCE_DIR}/../touchscreen-hx83121a-dkms/himax-v4l2.c"
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/RearmReference.cmake")
     add_executable(himax-recording-test tests/recording-test.cpp)
     target_link_libraries(himax-recording-test PRIVATE himax-tsacore)
     target_compile_options(himax-recording-test PRIVATE -Wall -Wextra -Werror)

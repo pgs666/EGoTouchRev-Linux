@@ -7,6 +7,7 @@
 #include "input.h"
 #include "v4l2-capture.h"
 #include "stream-state.h"
+#include "producer-recovery.h"
 #include "service-notify.h"
 #include "screen-rotation.h"
 #include "solver-screen.h"
@@ -181,6 +182,10 @@ int main(int argc, char** argv) {
     uint64_t epoch = 0, lastNs = NowNs();
     uint64_t frames = 0, stale = 0, bad = 0;
     himax::StreamState stream;
+    himax::ProducerRecovery producerRecovery;
+    uint64_t rearmRequests = 0, rearmTransfers = 0, rearmRaces = 0, rearmFailed = 0;
+    uint64_t rearmUnsupported = 0, rearmValid = 0, rearmEpoch = 0, rearmSequence = 0;
+    bool rearmPending = false;
     bool afeStarted = false;
     bool profileSelected = false;
     bool recordingHeaderWritten = false;
@@ -234,6 +239,11 @@ int main(int argc, char** argv) {
         if (resetRequests)
             std::cerr << "afe_reset requested=" << resetRequests << " succeeded=" << resetSuccess
                       << " failed=" << resetRequests - resetSuccess << '\n';
+        if (rearmRequests)
+            std::cerr << "producer_rearm requested=" << rearmRequests
+                      << " transferred=" << rearmTransfers << " raced=" << rearmRaces
+                      << " failed=" << rearmFailed << " unsupported=" << rearmUnsupported
+                      << " valid_after=" << rearmValid << '\n';
         std::cerr << "screen_rotation=" << solverScreen.Rotation()
                   << " (-1 means no host orientation)\n";
         if (recorder)
@@ -276,10 +286,37 @@ int main(int argc, char** argv) {
         }
         pollRotation(loopNow);
         if (dumpRequested) { dumpRequested = 0; printStats(); }
-        if (stream.TimedOut(NowNs())) {
-            std::cerr << "AFE producer stalled for four seconds; restarting through supervisor\n";
+        const auto recovery = observe ?
+            (stream.TimedOut(loopNow) ? himax::ProducerRecovery::Step::Exhausted :
+                                      himax::ProducerRecovery::Step::None) :
+            producerRecovery.Next(stream, loopNow, afeStarted &&
+                (solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle));
+        if (recovery == himax::ProducerRecovery::Step::Exhausted) {
+            std::cerr << "AFE producer stall budget exhausted; restarting through supervisor\n";
             exitCode = 1;
             break;
+        }
+        if (recovery == himax::ProducerRecovery::Step::Rearm) {
+            ++rearmRequests;
+            const bool ok = capture.Rearm(stream.Epoch(), stream.Sequence());
+            const int error = ok ? 0 : errno;
+            producerRecovery.Result(error);
+            if (ok) {
+                ++rearmTransfers;
+                rearmPending = true;
+                rearmEpoch = stream.Epoch();
+                rearmSequence = stream.Sequence();
+                std::cerr << "No-reset producer rearm transferred a frame; epoch=" << rearmEpoch
+                          << " after_sequence=" << rearmSequence << '\n';
+            } else if (error == ESTALE || error == EAGAIN || error == ENOBUFS) {
+                ++rearmRaces;
+            } else if (error == ENOTTY) {
+                ++rearmUnsupported;
+                std::cerr << "Module has no producer rearm ioctl; keeping four-second fallback\n";
+            } else {
+                ++rearmFailed;
+                std::cerr << "No-reset producer rearm failed: " << std::strerror(error) << '\n';
+            }
         }
         if (NowNs() - heartbeat >= 1000000000) {
             himax::NotifyService("WATCHDOG=1");
@@ -321,6 +358,7 @@ int main(int argc, char** argv) {
                     recordEvent(event);
                 }
                 if (!state.running || state.epoch != epoch) {
+                    rearmPending = false;
                     if (!observe && !input.Release()) return 1;
                     solver->OnAfeStopped();
                     afeStarted = false;
@@ -347,6 +385,7 @@ int main(int argc, char** argv) {
             continue;
         }
         if (packet->epoch != epoch || !afeStarted) {
+            if (rearmPending && packet->epoch != rearmEpoch) rearmPending = false;
             // STREAMON while the panel is off does not read OTP. Only a
             // running epoch proves that hardware initialization attempted it.
             if (!capture.RefreshInfo()) {
@@ -399,6 +438,11 @@ int main(int argc, char** argv) {
                 std::cerr << "Raw master recovery requested: "
                           << himax::FrameErrorName(error) << '\n';
         } else {
+            if (rearmPending && packet->epoch == rearmEpoch && packet->sequence > rearmSequence) {
+                ++rearmValid;
+                rearmPending = false;
+                std::cerr << "Valid master frame received after no-reset producer rearm\n";
+            }
             lastNs = now;
             frame->rawPtr = thp.data();
             frame->rawLen = thp.size();

@@ -84,6 +84,16 @@ INFO 与每帧的 `payload_size` 表示实际读取长度；新用户态兼容�
 重建 AFE epoch 不清除 reset 的限频时间戳。
 这是邮箱传输确认，calibration-done 仍通过后续帧状态确认，不能把写入成功称为校准完成。
 
+另外增加 ABI v2 的独立 `VIDIOC_HIMAX_REARM`（现有 ioctl 和结构布局不变）。
+它不是邮箱 action：`hx_raw_rearm` 为 32 字节，要求当前 queue owner、运行态、
+完全相同的 epoch/sequence（首次帧前允许 sequence=0）、200 ms 生产静默、
+200 ms 请求限频及可用的 vb2 buffer。任何保留字段必须为零。
+请求和 IRQ 复用同一完整帧发布函数；IRQ 抢先产生新帧时返回 ESTALE，补读抢先时
+忽略比补读时间戳更早的已排队 IRQ，避免它再读一次同一事件。不会切换 epoch、
+通知 AFE stopped/started 或重置 solver。成功仅代表完整 SPI 传输并交付到 vb2，
+不代表 checksum 有效，更不代表触控故障已修复。无 buffer 返回 ENOBUFS 且不读 SPI。
+新接口及用户态策略已编译/离线测试，**尚未替换本机已安装版本**。
+
 邮箱协议的生产实现位于 `hx-afe.c`：写入 16 字节包体，再写四字节触发头，最后读回
 16 字节；只有三步均成功才轮转五个槽位，任意失败保留当前槽位供重试。host 测试会
 直接编译固定版本 Windows `HimaxProtocol.cpp` 中的原始构包函数，对全部 65,536 种
@@ -278,14 +288,22 @@ STREAMOFF 和 shutdown 阻止后台硬件访问；新 AFE 启动时重新安排�
 
 ## 故障与恢复
 
-- SPI 半帧不会进入 vb2；连续三次读取失败停止 IRQ 并重启 AFE。
+- SPI 半帧不会进入 vb2；连续三次 IRQ 读取失败停止 IRQ 并重启 AFE。
+  主动无复位补读失败只返回错误，不能借这条错误路径直接触发 reset。
 - 用户态连续五次 native 校验失败或遇到 SOS，可申请受限 reset。
 - 无有效新帧 250 ms 后释放已上报触点。
 - 停屏事件立即释放，不等待这个超时。
 - 进程正常退出或被杀时关闭 uinput，虚拟输入设备销毁。
 - systemd 三秒 watchdog 覆盖算法挂住的情况，停止/休眠期间也持续喂狗。
-- 运行中四秒没有新帧则退出，由 supervisor 重建 stream/AFE；允许原版 IDLE
-  约三秒的 master 间隔，屏灭不计入超时；重复 running 事件不能掩盖停帧。
+- 新代码先尝试无复位补读：正常模式等待 200 ms，IDLE 等待 18×200 ms；
+  请求后至少留 20 ms 的取帧机会，无进展时按 200 ms 等待加 20 ms grace 继续尝试。
+  七次请求或每次请求前累计等待已超过 3200 ms 时，在该次请求的 grace 后耗尽预算，
+  再退出让 supervisor 重建 stream/AFE。轮询调度会使实际时间向上取整。
+  IDLE 的第一笔补读可能已超过累计预算，仍会发出并留出 grace，不跳过最后一次补读。
+  这是单 master 的适配，不等于 Windows 双通道串行取帧的总耗时。
+- `--observe` 不发主动补读；旧模块返回 ENOTTY 时，新 daemon 也恢复四秒超时路径。
+  屏灭不计入停帧超时；重复 running 事件不能掩盖停帧。用户态分别统计请求、
+  transfer 成功、竞态/门控拒绝、失败、不支持，以及之后实际收到有效帧的次数。
 - supervisor 等待两秒后持续重试，不因十次启动限制而永久停止硬件恢复。
 - 多个消费者不能同时拥有采集队列；不允许内核和用户态同时上报同一块触屏。
 

@@ -64,6 +64,19 @@ struct hx_raw_command {
 	__u32 reserved[2];
 };
 
+/* Additive ABI v2 ioctl. A no-reset master read is allowed only when this
+ * owner's producer is quiet and still exactly at the observed sequence.
+ * sequence=0 is valid before the first frame of a running epoch.
+ * Success means one complete SPI transfer was published, not solver validity.
+ */
+struct hx_raw_rearm {
+	__u32 size;
+	__u32 version;
+	__aligned_u64 epoch;
+	__aligned_u64 sequence;
+	__u32 reserved[2];
+};
+
 /* Lifecycle events release userspace contacts immediately even if no frames
  * arrive while the panel is off. Event u.data begins with this structure.
  */
@@ -75,5 +88,6 @@ struct hx_raw_state {
 
 #define VIDIOC_HIMAX_INFO _IOR('V', BASE_VIDIOC_PRIVATE, struct hx_raw_info)
 #define VIDIOC_HIMAX_COMMAND _IOW('V', BASE_VIDIOC_PRIVATE + 1, struct hx_raw_command)
+#define VIDIOC_HIMAX_REARM _IOW('V', BASE_VIDIOC_PRIVATE + 2, struct hx_raw_rearm)
 
 #endif

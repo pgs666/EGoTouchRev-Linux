@@ -154,7 +154,7 @@ transport success 只表示请求已提交/分发，不保证后续有效帧或�
 | 停帧恢复 | `StreamState::TimedOut()` 四秒后退出 daemon，由 supervisor 重启并重新初始化 AFE | 缺少先做无 reset 的通道补读；需要独立实现与故障测试 |
 | slave | 没启用 | 不为手指移植顺带启用笔；取得真实资源映射与手指依赖证据后再决定 |
 
-推荐的下一项实现是 **master-only、无复位的 producer kick**，而不是热重载 SPI/GPI：
+初版据此提出的实现约束是 **master-only、无复位的 producer kick**，而不是热重载 SPI/GPI：
 
 1. 在 kernel client 内与 IRQ 共用有界、完整帧发布路径；任何 kick 都必须受
    streaming/panel/PM/shutdown、当前 epoch/sequence 和 owner 门控。
@@ -167,6 +167,35 @@ transport success 只表示请求已提交/分发，不保证后续有效帧或�
 5. 继续保持完整内核中的 GENI/GPI 修复。严禁通过重载父控制器来模拟 Windows
    `IntOpen` 或 Resource Hub target reopen。
 
-本次只完成后端审计，没有新增该 kick 接口，也没有改变当前运行模块、服务或启动文件。
+本文初版只完成后端审计。后续已经实现上述 master-only kick 接口及用户态恢复预算：
+`VIDIOC_HIMAX_REARM`、`himax_rearm()`、共享 `himax_capture_frame()` 和
+`ProducerRecovery`，具体约束见 [Offload 故障与恢复说明](touch-offload.md)。
+测试直接编译生产捕获/校验/IRQ 函数，并以真实 pthread mutex 排列“旧 IRQ 等待时
+补读先完成”的顺序；Windows 重试 oracle 直接提取固定上游 `readChannel` lambda，
+只替换 HAL、时钟和 sleep，比较正常、IDLE 和已有累计耗时的补读/耗尽时间点。
+这些测试不模拟真实 IRQ 电平、DMA 或 PM 并发。新增接口尚未部署；当前运行模块、
+服务和启动文件保持原版本。
 仍需实机验证 suspend/resume、快速入屏、多指和长期稳定性；手工切频仍只有 transport
 成功而没有固件完成证据。这些缺口没有被本文消除。
+
+### 新实现的构建与验证记录
+
+- Release 构建、50 项 CTest 通过；包含生产 rearm/IRQ 提取、旧模块回退、正常/IDLE
+  预算、直接编译 Windows lambda 的时间点对照，以及提取刷新/上游源文件漂移门控。
+- 最终源码的 ASan/UBSan Debug 构建和完整 50 项 CTest 也通过（107.67 秒）；
+  该结果覆盖所有上述 host tests，不是对运行内核、真实 DMA/IRQ 的 sanitizer 验证。
+- `make -C tests clean test` 全部通过；legacy baseline/tracking 源码未修改。
+- kernel diff 的 checkpatch：0 errors、0 warnings；`git diff --check` 通过。
+- 编译服务器在独立 external-module 目录构建普通模块，通过匹配内核
+  `7.1.8-gaokun3-himax1` 的 Kbuild。未修改共享源码、原 kernel-out 配置或父控制器。
+- 取回后核对编译端/本机三份变更的 kernel source/header SHA-256 相同；模块
+  vermagic 为 `7.1.8-gaokun3-himax1 SMP preempt mod_unload aarch64`，build ID
+  `f42b16a7318df983e5015083f794b5196f2ea550`。
+- 本机候选产物（被 gitignore 忽略）：`artifacts/producer-rearm-himax1/`。
+  模块 SHA-256 为 `42bd7ea789679ce910e6df0bdbc7e446dcf413b1cd6bc10f0264d2347ebb70e6`；
+  daemon 为 `b284a9bcce9e197b4458ccbb169748c4e1e11ff6e5f91ef56bdef5155d6e3dd5`。
+  replay 未改变，哈希仍为 `50928ddf507a858e829eb98a296e9859c92fe31589eb4146cafd7f6e953ca15b`。
+- 未执行真实 IRQ 丢失/停帧故障注入、PM/IRQ 并发、睡眠或新版本手势测试；
+  没有将“软件模拟缺 IRQ 后可补读”当作“实机已经恢复”。
+- 没有安装此候选。验收时仍运行 build ID `89b9985b76556d2179e11e83e6e1b426f2864efe`
+  的旧模块；服务 PID `720293`、active、NRestarts=0，未重载父 SPI/GPI。

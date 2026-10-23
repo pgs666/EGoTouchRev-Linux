@@ -6,6 +6,15 @@
 可选运行中窗口录制默认关闭。下文末尾的增量记录按时间排列，其中早先的
 “尚未安装”是当时状态；最新部署记录见末节，不能据早先记录判断当前版本。
 
+后续开发（尚未部署）：新增 `VIDIOC_HIMAX_REARM` 和用户态无复位停帧恢复预算。
+正常模式 200 ms、IDLE 3600 ms 没有生产进展后先补读，不清 baseline 或重建 epoch；
+超过有界重试预算才走 supervisor。`--observe` 不主动补读；新 daemon 遇到旧模块
+ENOTTY 则保留四秒回退。日志 `producer_rearm` 将 `transferred` 与 `valid_after`
+分开统计，后者只是后续有效帧的观察，不能证明故障一定由 kick 修复。会话回放记录
+补读交付的普通 HXST 帧，不记录/重放真实硬件 kick；strict replay 不是总线操作复现。
+约束和实机测试缺口见 [SPB 后端审计](../docs/windows-spb-backend-audit.md) 和
+[Offload 文档](../docs/touch-offload.md)。
+
 默认数据路径为：
 
 ```text

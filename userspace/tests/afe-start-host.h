@@ -21,6 +21,7 @@ struct himax_ts_data {
     unsigned start_test_failures;
     struct hx_raw_charger_state charger;
     uint64_t epoch, sequence, last_command_ns[HX_RAW_RESET + 1];
+    uint64_t last_frame_ns;
     char project_id[16];
     bool otp_tried, irq_enabled;
     unsigned char afe_command_slot, read_errors;
@@ -92,6 +93,7 @@ static inline bool mod_delayed_work(void *queue, struct delayed_work *work, unsi
     return false;
 }
 #define system_wq ((void *)0)
+static inline uint64_t ktime_get_ns(void) { return 1000000000ULL; }
 #define msecs_to_jiffies(value) (value)
 // Protocol waits are tested separately. No wall-time sleeps or real IRQ/SPI.
 #define usleep_range(low, high) (++ts->sleeps)

@@ -53,6 +53,8 @@ struct himax_ts_data {
 	u8 read_errors;
 	u64 epoch;
 	u64 sequence;
+	u64 last_frame_ns;
+	u64 last_rearm_ns;
 	u64 last_command_ns[HX_RAW_RESET + 1];
 	u32 frame_flags;
 	u32 coordinate_flags;

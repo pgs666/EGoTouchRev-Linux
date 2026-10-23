@@ -124,6 +124,7 @@ static int himax_start_afe(struct himax_ts_data *ts)
 		dev_warn(ts->dev, "initial scan-rate transport: %d\n", ret);
 	ts->power.controller_initialized = true;
 	ts->read_errors = 0;
+	ts->last_frame_ns = ktime_get_ns();
 	himax_state_event(ts, true);
 	himax_int_enable(ts, true);
 	mod_delayed_work(system_wq, &ts->charger_work, 0);
@@ -169,35 +170,26 @@ static void himax_return_buffers(struct himax_ts_data *ts,
 	spin_unlock_irqrestore(&ts->buffer_lock, flags);
 }
 
-static irqreturn_t himax_raw_irq(int irq, void *data)
+/* op_lock is held. Both IRQ and no-reset rearm publish the identical record.
+ * SPI failures do not advance the producer or destroy its last complete data.
+ */
+static int himax_capture_frame(struct himax_ts_data *ts, u64 now)
 {
-	struct himax_ts_data *ts = data;
 	struct himax_video_buffer *buf;
 	struct hx_raw_frame *frame;
 	unsigned long flags;
-	u64 now = ktime_get_ns();
 	int ret;
 
-	mutex_lock(&ts->op_lock);
-	if (!hx_raw_can_read(&ts->power))
-		goto out;
 	ret = himax_read_raw(ts);
-	if (ret) {
-		if (++ts->read_errors >= 3) {
-			himax_int_enable(ts, false);
-			ts->power.controller_initialized = false;
-			ts->frame_flags = HX_RAW_FRAME_SOS;
-			himax_state_event(ts, false);
-			mod_delayed_work(system_wq, &ts->panel_reinit_work, 0);
-		}
-		goto out;
-	}
+	if (ret)
+		return ret;
 	ts->read_errors = 0;
 	ts->sequence++;
+	ts->last_frame_ns = now;
 	spin_lock_irqsave(&ts->buffer_lock, flags);
 	if (list_empty(&ts->buffers)) {
 		spin_unlock_irqrestore(&ts->buffer_lock, flags);
-		goto out;  /* Producer drains SPI even when the reader falls behind. */
+		return 0; /* IRQ drains SPI even when the reader falls behind. */
 	}
 	buf = list_first_entry(&ts->buffers, struct himax_video_buffer, link);
 	list_del(&buf->link);
@@ -218,6 +210,66 @@ static irqreturn_t himax_raw_irq(int irq, void *data)
 	buf->vb.vb2_buf.timestamp = now;
 	vb2_set_plane_payload(&buf->vb.vb2_buf, 0, sizeof(*frame));
 	vb2_buffer_done(&buf->vb.vb2_buf, VB2_BUF_STATE_DONE);
+	return 0;
+}
+
+/* op_lock is held, including validation and SPI. Unlike AFE commands, rearm
+ * requires an exact producer sequence: an IRQ that wins this lock invalidates
+ * the request rather than allowing a stale timeout to read another frame.
+ */
+static int himax_rearm(struct himax_ts_data *ts, struct file *file,
+		       const struct hx_raw_rearm *request)
+{
+	unsigned long flags;
+	bool available;
+	u64 now;
+
+	if (request->size != sizeof(*request) ||
+	    request->version != HX_RAW_ABI_VERSION ||
+	    request->reserved[0] || request->reserved[1])
+		return -EINVAL;
+	if (ts->power.shutting_down)
+		return -ENODEV;
+	if (!vb2_is_busy(&ts->queue) || ts->queue.owner != file->private_data)
+		return -EBUSY;
+	if (!hx_raw_can_read(&ts->power) || !request->epoch ||
+	    request->epoch != ts->epoch || request->sequence != ts->sequence)
+		return -ESTALE;
+	now = ktime_get_ns();
+	if (now - ts->last_frame_ns < 200 * NSEC_PER_MSEC ||
+	    (ts->last_rearm_ns && now - ts->last_rearm_ns < 200 * NSEC_PER_MSEC))
+		return -EAGAIN;
+	spin_lock_irqsave(&ts->buffer_lock, flags);
+	available = !list_empty(&ts->buffers);
+	spin_unlock_irqrestore(&ts->buffer_lock, flags);
+	if (!available)
+		return -ENOBUFS;
+	ts->last_rearm_ns = now;
+	/* Do not initialize AFE, change epoch, or escalate a failed kick to reset.
+	 * Userspace owns the bounded stall budget and verifies subsequent frames.
+	 */
+	return himax_capture_frame(ts, now);
+}
+
+static irqreturn_t himax_raw_irq(int irq, void *data)
+{
+	struct himax_ts_data *ts = data;
+	u64 now = ktime_get_ns();
+	int ret;
+
+	(void)irq;
+	mutex_lock(&ts->op_lock);
+	if (!hx_raw_can_read(&ts->power) || now <= ts->last_frame_ns)
+		goto out;
+	/* A queued IRQ older than a successful rearm must not reread its frame. */
+	ret = himax_capture_frame(ts, now);
+	if (ret && ++ts->read_errors >= 3) {
+		himax_int_enable(ts, false);
+		ts->power.controller_initialized = false;
+		ts->frame_flags = HX_RAW_FRAME_SOS;
+		himax_state_event(ts, false);
+		mod_delayed_work(system_wq, &ts->panel_reinit_work, 0);
+	}
 out:
 	mutex_unlock(&ts->op_lock);
 	return IRQ_HANDLED;
@@ -365,6 +417,10 @@ static long himax_private_ioctl(struct file *file, void *priv,
 		info->payload_size = HX_RAW_MASTER_SIZE;
 		info->coordinate_flags = ts->coordinate_flags;
 		strscpy(info->project_id, ts->project_id, sizeof(info->project_id));
+		goto out;
+	}
+	if (cmd == VIDIOC_HIMAX_REARM) {
+		ret = himax_rearm(ts, file, arg);
 		goto out;
 	}
 	if (cmd != VIDIOC_HIMAX_COMMAND) {

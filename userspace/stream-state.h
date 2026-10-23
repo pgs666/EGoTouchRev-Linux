@@ -42,6 +42,11 @@ public:
         return m_running && now > m_lastProgress && now - m_lastProgress > 4000000000ULL;
     }
 
+    bool Running() const { return m_running; }
+    uint64_t Epoch() const { return m_epoch; }
+    uint64_t Sequence() const { return m_frameEpoch == m_epoch ? m_sequence : 0; }
+    uint64_t ProgressNs() const { return m_lastProgress; }
+
 private:
     uint64_t m_epoch = 0;
     uint64_t m_frameEpoch = 0;
