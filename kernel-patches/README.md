@@ -95,3 +95,56 @@ word_len、fragmentation、CS）。本机已安装 `gpi.ko` 的反汇编也确�
 真实模块试载和部署记录见 [用户态说明](../userspace/README.md) 的时间顺序记录。
 成功的单 transfer Himax 采集不能替代其他 SPI 设备、多 transfer 消息和真实 DMA
 故障注入验证。
+
+## 2026-10-23：完整宿主内核构建完成，尚未启动验证
+
+编译服务器的 `build-7.1.8-volume90` 与本机已安装内核对应：
+
+- 原 Image SHA-256：
+  `5bc08bb63edc67519a2b4a98be5df988fa87de614d92f8fd5079c34fd089c820`；
+- 原配置 SHA-256：
+  `aa2ab4a8d309f994b4bd32ae8a553527947c7ca87fc5a3c710b25b6f6f5f8852`；
+- 原源码提交：`1a157b20dc41d7df9c2b87f4810e113234d0942d`。
+
+任务使用独立目录 `build-7.1.8-himax-a06e05c`，在只读 v7.1.8 共享源码上建立
+overlay，用原源码相对基线的 diff 重建已安装版本，并断言重建后的 Git tree 与
+原提交相同。原有构建目录、共享源码与本机 kernel-devel 均未修改。随后只应用
+本目录的 0001、0002 两项宿主源码补丁。
+
+交叉构建的新 release 为 `7.1.8-gaokun3-himax1`。配置差异为：
+
+- `LOCALVERSION` 使用独立后缀，构建环境设置空 `LOCALVERSION`，避免附加 `+`；
+- `INPUT_UINPUT=m`，供当前用户态求解器使用；
+- 禁用旧的树内 `TOUCHSCREEN_HIMAX_HX83121A_SPI`，其附属诊断选项随之消失；
+- 当前触摸仓库 `a06e05c` 的 V4L2 模块单独针对新内核编译，安装到产物的
+  `updates/himax-spi.ko`；`HIMAX_AFE_DIAGNOSTICS=0`，手写笔仍未启用。
+
+完整 `Image modules dtbs`、外置触摸模块和离线 staging 均成功，构建日志未发现
+warning/error。最终 staged GPI/SPI/Himax/uinput 模块均为 AArch64，vermagic 一致；
+`depmod -e -F System.map` 无未解析符号，`modprobe --show-depends` 能解析唯一的
+Himax 模块及依赖。反汇编确认 staged GPI 在 `kfree()` 后写入零指针，GENI
+成功分支直接完成 transfer，不再提前写入 message success。
+
+| staged 模块 | Build ID |
+|---|---|
+| GPI DMA | `b72eb0c756a33d167940119024c41c958215dc06` |
+| GENI SPI | `3d725658409dcccc60c0e6cf6d21abd68791af88` |
+| Himax V4L2 | `1e02ace5a5c2fef1b1e98f9bdd42eed14634dfc6` |
+
+产物已取回本机，位于被 gitignore 忽略的 `artifacts/host-kernel-a06e05c/`：
+
+- `linux-7.1.8-gaokun3-himax1.tar.zst`：Image、DTB、配置、System.map 与匹配模块；
+- `SHA256SUMS`、`staged-modules.txt`、`config.diff`、`host-fixes.diff`；
+- 两个修复函数的反汇编、模块依赖检查、构建日志及本次任务的构建/收尾脚本。
+
+归档 SHA-256 为
+`f05ccb75e67b66229cf7c8ea3f3a24de373302403d2cdaaaedf0db737f506fb0`，
+新 Image SHA-256 为
+`a3fe2a4a0de9d839bc845195584e421b3456be12a2e2112cb3ab3bd84446dcb6`。
+服务器和本机均已通过清单校验。归档不包含指向编译服务器的 build/source 链接，
+也不包含 kernel-devel、initramfs、用户态程序或启动项；它不是可直接刷写的 boot 镜像。
+
+本轮只构建和取回，未安装新内核、未改启动项、未重载驱动。当前运行仍为
+`7.1.8-gaokun3+` 和此前的触摸模块。下一步是将新 release 作为独立启动项部署，
+构建并检查 initramfs 中的匹配模块，保留旧内核后由用户重启；再核对实际运行
+build ID、内核健康与真实手势/睡眠。离线构建、符号解析和反汇编均不替代该验收。
