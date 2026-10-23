@@ -143,7 +143,7 @@ bool Capture::Frame(hx_raw_frame& frame) {
     if (frame.size != sizeof(frame) || frame.version != HX_RAW_ABI_VERSION ||
         frame.payload_size != m_info.payload_size || !ValidPayload(frame) || frame.reserved[0] ||
         frame.reserved[1] || frame.reserved_tail ||
-        frame.flags & ~(HX_RAW_FRAME_SOS | HX_RAW_FRAME_CHARGER)) {
+        frame.flags & ~HX_RAW_FRAME_FLAGS) {
         m_error = "Invalid HXST metadata";
         return false;
     }
@@ -182,7 +182,7 @@ bool Capture::Rearm(uint64_t epoch, uint64_t sequence) {
     request.version = HX_RAW_ABI_VERSION;
     request.epoch = epoch;
     request.sequence = sequence;
-    return ioctl(m_fd, VIDIOC_HIMAX_REARM, &request) == 0;
+    return ioctl(m_fd, VIDIOC_HIMAX_REARM_TAGGED, &request) == 0;
 }
 
 }  // namespace himax

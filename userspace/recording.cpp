@@ -121,7 +121,8 @@ bool RecordingReader::Next(RecordedFrame& frame) {
         if (packet.size != sizeof(packet) || packet.version < 1 || packet.version > HX_RAW_ABI_VERSION ||
             !ValidPayload(packet) || packet.reserved[0] ||
             packet.reserved[1] || packet.reserved_tail ||
-            packet.flags & ~(HX_RAW_FRAME_SOS | HX_RAW_FRAME_CHARGER)) {
+            (packet.version < 2 && (packet.flags & HX_RAW_FRAME_REARM)) ||
+            packet.flags & ~HX_RAW_FRAME_FLAGS) {
             m_error = "Invalid HXST record";
             return false;
         }
@@ -132,6 +133,7 @@ bool RecordingReader::Next(RecordedFrame& frame) {
         frame.sequence = packet.sequence;
         frame.sos = packet.flags & HX_RAW_FRAME_SOS;
         frame.charger = packet.flags & HX_RAW_FRAME_CHARGER;
+        frame.rearm = packet.flags & HX_RAW_FRAME_REARM;
     } else if (m_format == RecordingFormat::Trace) {
         std::copy(m_buffer.end() - kNativeTransportSize, m_buffer.end(), frame.payload.begin());
         frame.length = kNativeTransportSize;

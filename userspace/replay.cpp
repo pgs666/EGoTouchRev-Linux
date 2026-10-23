@@ -115,7 +115,7 @@ int main(int argc, char** argv) {
     himax::RecordedFrame record;
     std::array<uint8_t, Frame::kMasterFrameSize> thp{};
     uint64_t sequence = 0;
-    size_t rejected = 0, allowed = 0, valid = 0;
+    size_t rejected = 0, allowed = 0, valid = 0, emptyRearms = 0;
     unsigned int initialRejected = 0;
     bool epochStarted = false;
     uint64_t epoch = 0;
@@ -140,6 +140,11 @@ int main(int argc, char** argv) {
         solver->SetChargerPlugged(record.charger);
         const auto error = himax::ToThpMaster(
             std::span(record.payload.data(), record.length), thp);
+        if (himax::IsEmptyRearm(error, record.rearm)) {
+            ++emptyRearms;
+            std::cerr << "frame " << sequence << ": empty-rearm (no data)\n";
+            continue;
+        }
         if (error != himax::FrameError::None) {
             ++rejected;
             // AFE calibration can leave a short startup transient. Keep
@@ -181,7 +186,7 @@ int main(int argc, char** argv) {
         return 1;
     }
     std::cerr << "frames=" << sequence << " rejected=" << rejected
-              << " startup_allowed=" << allowed
+              << " startup_allowed=" << allowed << " empty_rearms=" << emptyRearms
               << " profile=" << solver->LoadedPrmtName() << '\n';
     return finishTrace(valid && rejected == allowed ? 0 : 1);
 }

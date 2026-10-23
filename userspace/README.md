@@ -13,6 +13,10 @@ reset，尚不能排除自动补读误判。源码保留开发中的新恢复策
 默认保留四秒停帧等待；systemd unit 不带该参数。`--observe`/`--info` 拒绝与实验
 选项组合。该开关不代表自动恢复已验收，只是防止从 HEAD 默认构建时重新启用已知
 有现场疑点的策略；当前已安装 daemon 仍是上述回退版本。
+最新开发进一步增加 `VIDIOC_HIMAX_REARM_TAGGED` 与 HXST 来源标志，
+区分明确的空轮询和 IRQ 异常包；只豁免“已标记主动读 + 全零”，不豁免 checksum、
+bus filler 或未知大小。来源会保留到 raw/strict session replay；旧模块返回 ENOTTY
+时按保守路径等待，不猜测来源。仍未默认启用实验策略，也未替换当前运行程序。
 正常模式 200 ms、IDLE 3600 ms 没有生产进展后先补读，不清 baseline 或重建 epoch；
 超过有界重试预算才走 supervisor。`--observe` 不主动补读；新 daemon 遇到旧模块
 ENOTTY 则保留四秒回退。日志 `producer_rearm` 将 `transferred` 与 `valid_after`

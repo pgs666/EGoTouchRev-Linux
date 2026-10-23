@@ -81,17 +81,26 @@ int main(int argc, char** argv) {
     packet.timestamp_ns = 1234567890;
     packet.epoch = 7;
     packet.sequence = 8;
-    packet.flags = HX_RAW_FRAME_CHARGER | HX_RAW_FRAME_SOS;
+    packet.flags = HX_RAW_FRAME_CHARGER | HX_RAW_FRAME_SOS | HX_RAW_FRAME_REARM;
     packet.payload[40] = 123;
     file.Write(&packet, sizeof(packet));
     himax::RecordedFrame frame;
     {
         himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
         Check(reader.Next(frame) && frame.timeNs == packet.timestamp_ns &&
-              frame.epoch == 7 && frame.sos && frame.charger &&
+              frame.epoch == 7 && frame.sos && frame.charger && frame.rearm &&
               frame.length == HX_RAW_PAYLOAD_SIZE && frame.payload[40] == 123,
               "HXST preserves payload and lifecycle metadata");
         Check(!reader.Next(frame) && reader.Error().empty(), "clean EOF");
+    }
+    for (bool oldVersion : {false, true}) {
+        auto invalid = packet;
+        if (oldVersion) invalid.version = 1;
+        else invalid.flags |= 1U << 31;
+        file.Write(&invalid, sizeof(invalid));
+        himax::RecordingReader reader(file.path, himax::RecordingFormat::Hxst, 0);
+        Check(!reader.Next(frame) && !reader.Error().empty(),
+              "unknown flags and pre-v2 origin claims are rejected");
     }
     for (uint32_t size : {HX_RAW_MASTER_SIZE, HX_RAW_PAYLOAD_SIZE}) {
         auto sized = packet;

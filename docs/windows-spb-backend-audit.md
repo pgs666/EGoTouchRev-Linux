@@ -359,3 +359,46 @@ CLI 测试检查组合拒绝及 help 默认提示；引用集成检查 daemon �
 未替换上述已回退的运行程序；最终核对 service active、PID `1256329`、
 NRestarts=0，运行 exe 与旧版本备份一致，两份新测试 initramfs 相同，kernel health
 没有新增 fault。这些结果没有解除自动 rearm 的现场验收缺口。
+
+## 后续：主动读取来源、空轮询语义与回放
+
+为解除“主动空读和 IRQ 错误混在一起”这一具体缺口，新代码加入：
+
+- `HX_RAW_FRAME_REARM`，只在 `VIDIOC_HIMAX_REARM_TAGGED`（private +3）请求的
+  完整数据包上设置。普通 IRQ 无此标志，同一设备后续 IRQ 也不继承它。
+  原 +2 ioctl 保留旧 flags，避免旧调用者收到未知字段。结构尺寸与 ABI v2 不变。
+- 新 host 请求 +3；旧模块返回 ENOTTY 后保留四秒等待。禁止退而使用 +2 再通过
+  猜测时间或 sequence 来给未知来源包分类。
+- 只将“明确来源为主动读且 checksum body 全零”当作 no-data。它不调用求解器，
+  不修改 baseline、不清真实 IRQ 错误、不产生第五帧 IRQ 错误恢复，也不取消已存在的
+  reset。有效主动读仍解算，checksum/filler/size 错误仍真实累计/恢复。
+- 空轮询虽交付了 HXST 元数据，不代表固件自然 producer 有进展。
+  `ProducerRecovery::EmptyRearm()` 只消费 delivery stamp，不刷新等待起点、
+  attempt count 或最近一次完成后的 grace。mode 保留上一有效帧判断；普通无效 IRQ
+  仍使上一 mode 不再被信任。
+- grace 从 ioctl 返回开始计算，而非从发起请求计算。host 测试模拟 150 ms 的
+  SPI 阻塞，确认返回后仍有完整 20 ms 等待，重试计时也从完成时刻继续。
+- `RecordedFrame`、HXST reader、SessionReader 都保留来源；strict replay 使用同一个
+  `MasterFrameHealth` 规则。fresh HXSE 1 侧车语法不变，旧 reader 见到未知 raw flag
+  会拒绝；新 reader 对 v1 帧伪造该 v2 来源也拒绝。
+  raw replay 将 `empty_rearms` 单列为 no-data，不算 valid，纯空文件仍不通过。
+
+测试构造八个连续 tagged 空轮询，再加入真实五帧 IRQ checksum 错误和 bus filler：
+只有真实故障触发两次 reset。将 raw 文件里八个来源标志删除后，strict replay
+必须因为缺少对应的 reset action 而失败；恢复原来源后重新通过。这验证了落盘/
+配对/回放链路不能静默丢失 provenance，而不仅是单测里给同一函数传一个 bool。
+另外覆盖 legacy +2 flags、同设备后续 IRQ、不支持模块回退、空轮询 deadline、
+错误计数不清除和 tagged 非空错误。
+
+最终 Release 50/50、完整 ASan/UBSan 50/50（107.37 秒）通过，kernel diff
+checkpatch 0 errors/0 warnings。服务器已构建匹配 `7.1.8-gaokun3-himax1`
+的普通模块，源码/header 哈希与本机一致：
+
+- module SHA-256：`cbef3bb520d0824df76d349ca940c1f8b00fda8df7055e3161245dba32afb335`；
+- module build ID：`5faf3ab0c3fa1d7c979793919307a738766971f2`；
+- daemon SHA-256：`2f3ed524ae6ac8694749e94d931ad0bce2f1569c0ac00eead5d855aa145423b9`；
+- replay SHA-256：`bc2f72d9248c11dab8dffa412583549490b04ab21c4e455eed36e2d6dc756642`。
+
+当前为候选构建，尚未试载/安装。自动恢复仍须显式 `--experimental-rearm`；
+active→IDLE 过渡、缺少 slave 通道的等待语义、真实 lost IRQ 和手势质量尚未验收。
+不能因为 tagged 空轮询不再触发五帧 reset，就声称有界 producer 超时也不会误判。

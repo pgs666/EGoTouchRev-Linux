@@ -51,13 +51,30 @@ int main() {
         Check(p.size == sizeof(p) && p.version == HX_RAW_ABI_VERSION && p.epoch == 7 &&
               p.sequence == 1 && p.timestamp_ns == hx_test_now && p.payload_size == HX_RAW_MASTER_SIZE,
               "normal HXST metadata preserved");
-        Check(p.flags == (HX_RAW_FRAME_SOS | HX_RAW_FRAME_CHARGER), "flags match normal IRQ publication");
+        Check(p.flags == (HX_RAW_FRAME_SOS | HX_RAW_FRAME_CHARGER | HX_RAW_FRAME_REARM),
+              "tagged rearm preserves lifecycle flags and records its origin");
         Check(p.reserved[0] == 0 && p.reserved[1] == 0 && p.reserved_tail == 0 &&
               p.payload[HX_RAW_MASTER_SIZE - 1] == 0x37 && p.payload[HX_RAW_MASTER_SIZE] == 0,
               "full payload and zero tail");
         Check(f.ts.epoch == 7 && f.ts.power.controller_initialized && f.ts.schedules == 0 &&
               f.ts.state_events == 0 && f.ts.irq_changes == 0, "rearm never resets AFE or publishes lifecycle changes");
         Check(f.Rearm() == -ESTALE && f.ts.reads == 1, "same token cannot be reused");
+        hx_enqueue(&f.ts, f.buffer);
+        ++hx_test_now;
+        hx_irq(&f.ts);
+        Check(f.ts.sequence == 2 && f.Output().vb2_buf.frame.flags ==
+                  (HX_RAW_FRAME_SOS | HX_RAW_FRAME_CHARGER),
+              "a later IRQ on the same device cannot inherit the poll tag");
+    }
+    {
+        Fixture legacy;
+        Check(hx_rearm_legacy(&legacy.ts, &legacy.owner, &legacy.request) == 0 &&
+              !(legacy.Output().vb2_buf.frame.flags & HX_RAW_FRAME_REARM),
+              "legacy ioctl retains flags accepted by old consumers");
+        Fixture irq;
+        hx_irq(&irq.ts);
+        Check(!(irq.Output().vb2_buf.frame.flags & HX_RAW_FRAME_REARM),
+              "natural IRQ frame is never labeled as a poll");
     }
     for (int field = 0; field < 4; ++field) {
         Fixture f;

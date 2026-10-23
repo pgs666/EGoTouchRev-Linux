@@ -15,6 +15,9 @@
 #define V4L2_META_FMT_HIMAX_SPI v4l2_fourcc('H', 'X', 'S', 'T')
 #define HX_RAW_FRAME_SOS (1U << 0)
 #define HX_RAW_FRAME_CHARGER (1U << 1)
+/* Explicitly requested polling read, not a natural IRQ notification. */
+#define HX_RAW_FRAME_REARM (1U << 2)
+#define HX_RAW_FRAME_FLAGS (HX_RAW_FRAME_SOS | HX_RAW_FRAME_CHARGER | HX_RAW_FRAME_REARM)
 #define HX_RAW_INVERT_X (1U << 0)
 #define HX_RAW_INVERT_Y (1U << 1)
 #define HX_RAW_SWAP_XY (1U << 2)
@@ -89,5 +92,10 @@ struct hx_raw_state {
 #define VIDIOC_HIMAX_INFO _IOR('V', BASE_VIDIOC_PRIVATE, struct hx_raw_info)
 #define VIDIOC_HIMAX_COMMAND _IOW('V', BASE_VIDIOC_PRIVATE + 1, struct hx_raw_command)
 #define VIDIOC_HIMAX_REARM _IOW('V', BASE_VIDIOC_PRIVATE + 2, struct hx_raw_rearm)
+/* Use a separate additive ioctl to negotiate origin-tagged frames. Legacy
+ * REARM callers still receive the old flags; old modules return ENOTTY for
+ * this request so new hosts can retain the conservative timeout fallback.
+ */
+#define VIDIOC_HIMAX_REARM_TAGGED _IOW('V', BASE_VIDIOC_PRIVATE + 3, struct hx_raw_rearm)
 
 #endif

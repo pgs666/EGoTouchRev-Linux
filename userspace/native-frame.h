@@ -25,6 +25,13 @@ enum class FrameError {
     Count,
 };
 
+// An intentionally polled empty event stack is no-data, not an IRQ error.
+// Only AllZero has this meaning; a tagged checksum/filler/size error remains
+// a real error and must never be hidden by its acquisition origin.
+inline bool IsEmptyRearm(FrameError error, bool rearm) noexcept {
+    return rearm && error == FrameError::AllZero;
+}
+
 // HimaxChipFrame.cpp treats an unresponsive bus filled with 0xEC as immediate
 // SOS. The finger-only Linux host uses five consecutive invalid masters for
 // other errors; this is not the Windows dual-channel mixed-counter policy.
@@ -34,7 +41,8 @@ public:
     static constexpr unsigned int kBadFrameLimit = 5;
 
     void Reset() noexcept { m_bad = 0; m_reset = false; }
-    bool Observe(FrameError error) noexcept {
+    bool Observe(FrameError error, bool rearm = false) noexcept {
+        if (IsEmptyRearm(error, rearm)) return m_reset;
         if (error == FrameError::None) {
             Reset();
         } else {

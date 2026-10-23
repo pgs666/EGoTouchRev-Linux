@@ -192,10 +192,10 @@ static void himax_return_buffers(struct himax_ts_data *ts,
 	spin_unlock_irqrestore(&ts->buffer_lock, flags);
 }
 
-/* op_lock is held. Both IRQ and no-reset rearm publish the identical record.
+/* op_lock is held. IRQ and rearm share record publication except origin.
  * SPI failures do not advance the producer or destroy its last complete data.
  */
-static int himax_capture_frame(struct himax_ts_data *ts, u64 now)
+static int himax_capture_frame(struct himax_ts_data *ts, u64 now, bool rearm)
 {
 	struct himax_video_buffer *buf;
 	struct hx_raw_frame *frame;
@@ -223,7 +223,7 @@ static int himax_capture_frame(struct himax_ts_data *ts, u64 now)
 	frame->epoch = ts->epoch;
 	frame->sequence = ts->sequence;
 	frame->timestamp_ns = now;
-	frame->flags = ts->frame_flags |
+	frame->flags = ts->frame_flags | (rearm ? HX_RAW_FRAME_REARM : 0) |
 		(ts->charger.connected ? HX_RAW_FRAME_CHARGER : 0);
 	frame->payload_size = HX_RAW_MASTER_SIZE;
 	memcpy(frame->payload, ts->event_buf, sizeof(frame->payload));
@@ -240,7 +240,7 @@ static int himax_capture_frame(struct himax_ts_data *ts, u64 now)
  * the request rather than allowing a stale timeout to read another frame.
  */
 static int himax_rearm(struct himax_ts_data *ts, struct file *file,
-		       const struct hx_raw_rearm *request)
+		       const struct hx_raw_rearm *request, bool tagged)
 {
 	unsigned long flags;
 	bool available;
@@ -270,7 +270,7 @@ static int himax_rearm(struct himax_ts_data *ts, struct file *file,
 	/* Do not initialize AFE, change epoch, or escalate a failed kick to reset.
 	 * Userspace owns the bounded stall budget and verifies subsequent frames.
 	 */
-	return himax_capture_frame(ts, now);
+	return himax_capture_frame(ts, now, tagged);
 }
 
 static irqreturn_t himax_raw_irq(int irq, void *data)
@@ -284,7 +284,7 @@ static irqreturn_t himax_raw_irq(int irq, void *data)
 	if (!hx_raw_can_read(&ts->power) || now <= ts->last_frame_ns)
 		goto out;
 	/* A queued IRQ older than a successful rearm must not reread its frame. */
-	ret = himax_capture_frame(ts, now);
+	ret = himax_capture_frame(ts, now, false);
 	if (ret && ++ts->read_errors >= 3) {
 		himax_int_enable(ts, false);
 		ts->power.controller_initialized = false;
@@ -441,8 +441,8 @@ static long himax_private_ioctl(struct file *file, void *priv,
 		strscpy(info->project_id, ts->project_id, sizeof(info->project_id));
 		goto out;
 	}
-	if (cmd == VIDIOC_HIMAX_REARM) {
-		ret = himax_rearm(ts, file, arg);
+	if (cmd == VIDIOC_HIMAX_REARM || cmd == VIDIOC_HIMAX_REARM_TAGGED) {
+		ret = himax_rearm(ts, file, arg, cmd == VIDIOC_HIMAX_REARM_TAGGED);
 		goto out;
 	}
 	if (cmd != VIDIOC_HIMAX_COMMAND) {

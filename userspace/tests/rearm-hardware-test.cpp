@@ -83,6 +83,7 @@ public:
         Next(Now() + 1000000000ULL, transportOnly);
         Check(packet.epoch == epoch && packet.sequence == prior.sequence + 1,
               "Kick did not deliver exactly one packet in unchanged epoch");
+        Check(packet.flags & HX_RAW_FRAME_REARM, "Tagged ioctl did not preserve poll origin");
         Check(packet.timestamp_ns >= before && packet.timestamp_ns <= after,
               "Packet timestamp is not inside the synchronous rearm transaction");
         const bool same = packet.payload_size == prior.payload_size &&
@@ -102,6 +103,7 @@ public:
         // No more kicks: verify that the normal IRQ path continues independently.
         Next(Now() + 5000000000ULL);
         Check(packet.epoch == epoch, "Normal IRQ flow required an AFE restart");
+        Check(!(packet.flags & HX_RAW_FRAME_REARM), "Natural IRQ retained an old poll origin");
         std::cout << "normal-IRQ-after-rearm epoch=" << packet.epoch << " sequence=" << packet.sequence
                   << " idle=" << suffix.idleFlag() << std::endl;
         request = Request();
@@ -117,7 +119,7 @@ public:
 
 private:
     static int Error(int fd, const hx_raw_rearm& request) {
-        return ioctl(fd, VIDIOC_HIMAX_REARM, &request) == 0 ? 0 : errno;
+        return ioctl(fd, VIDIOC_HIMAX_REARM_TAGGED, &request) == 0 ? 0 : errno;
     }
     static void Expect(int fd, const hx_raw_rearm& request, int error, const char* name) {
         const int actual = Error(fd, request);

@@ -265,7 +265,9 @@ bool SessionReader::Next(SessionEvent& e) {
             e.packet.epoch = raw.epoch;
             e.packet.sequence = raw.sequence;
             e.packet.timestamp_ns = raw.timeNs;
-            e.packet.flags = (raw.sos ? HX_RAW_FRAME_SOS : 0) | (raw.charger ? HX_RAW_FRAME_CHARGER : 0);
+            e.packet.flags = (raw.sos ? HX_RAW_FRAME_SOS : 0) |
+                             (raw.charger ? HX_RAW_FRAME_CHARGER : 0) |
+                             (raw.rearm ? HX_RAW_FRAME_REARM : 0);
             e.packet.payload_size = raw.length;
             std::copy(raw.payload.begin(), raw.payload.end(), e.packet.payload);
         }

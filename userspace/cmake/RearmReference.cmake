@@ -13,7 +13,13 @@ ${buffer}
 ${capture}
 int hx_rearm(struct himax_ts_data *ts, struct file *file, const struct hx_raw_rearm *request) {
     mutex_lock(&ts->op_lock);
-    int result = himax_rearm(ts, file, request);
+    int result = himax_rearm(ts, file, request, true);
+    mutex_unlock(&ts->op_lock);
+    return result;
+}
+int hx_rearm_legacy(struct himax_ts_data *ts, struct file *file, const struct hx_raw_rearm *request) {
+    mutex_lock(&ts->op_lock);
+    int result = himax_rearm(ts, file, request, false);
     mutex_unlock(&ts->op_lock);
     return result;
 }

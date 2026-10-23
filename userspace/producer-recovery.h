@@ -18,20 +18,20 @@ public:
         if (!enabled)
             return stream.TimedOut(now) ? Step::Exhausted : Step::None;
         if (!stream.Running()) {
-            m_epoch = m_progress = m_sequence = m_lastAttempt = 0;
+            m_epoch = m_progress = m_observedProgress = m_sequence = m_lastAttempt = m_completed = 0;
             m_attempts = 0;
             return Step::None;
         }
         if (m_epoch != stream.Epoch()) {
             m_attempts = 0;
-            m_lastAttempt = 0;
+            m_lastAttempt = m_completed = 0;
         }
         if (m_epoch != stream.Epoch() || m_sequence != stream.Sequence() ||
-            m_progress != stream.ProgressNs()) {
+            m_observedProgress != stream.ProgressNs()) {
             m_epoch = stream.Epoch();
             m_sequence = stream.Sequence();
-            m_progress = stream.ProgressNs();
-            m_lastAttempt = 0;
+            m_observedProgress = m_progress = stream.ProgressNs();
+            m_lastAttempt = m_completed = 0;
             // Delivery ends the previous wait, but an all-zero/checksum-bad
             // packet cannot forgive the accumulated rearm attempts.
         }
@@ -44,19 +44,22 @@ public:
         // Always allow the first kick, including after the IDLE retry window
         // already consumed the 3.2-second Windows per-call budget.
         if (m_lastAttempt) {
-            if (now < m_lastAttempt || now - m_lastAttempt < 20000000ULL)
+            const auto completed = m_completed ? m_completed : m_lastAttempt;
+            if (now < completed || now - completed < 20000000ULL)
                 return Step::None;
             if (m_attempts >= 7 || m_lastAttempt - m_progress > 3200000000ULL)
                 return Step::Exhausted;
-            if (now - m_lastAttempt < 220000000ULL) return Step::None;
+            if (now - completed < 220000000ULL) return Step::None;
         }
         ++m_attempts;
         m_lastAttempt = now;
+        m_completed = 0;
         return Step::Rearm;
     }
 
-    void Result(int error) {
+    void Result(int error, uint64_t completed = 0) {
         if (error == ENOTTY) m_unsupported = true;
+        m_completed = completed;
     }
 
     // Windows clears read stalls after frame validity, not merely a successful
@@ -64,12 +67,21 @@ public:
     void Frame(bool valid) {
         if (valid) {
             m_attempts = 0;
-            m_lastAttempt = 0;
+            m_lastAttempt = m_completed = 0;
         }
     }
 
+    // Consume the tagged packet's delivery stamp without treating an empty
+    // poll as natural producer progress. Keep the attempt, grace and deadline.
+    void EmptyRearm(const StreamState& stream) {
+        if (m_epoch != stream.Epoch()) return;
+        m_sequence = stream.Sequence();
+        m_observedProgress = stream.ProgressNs();
+    }
+
 private:
-    uint64_t m_epoch = 0, m_progress = 0, m_sequence = 0, m_lastAttempt = 0;
+    uint64_t m_epoch = 0, m_progress = 0, m_observedProgress = 0, m_sequence = 0;
+    uint64_t m_lastAttempt = 0, m_completed = 0;
     unsigned m_attempts = 0;
     bool m_unsupported = false;
 };

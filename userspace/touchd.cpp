@@ -192,6 +192,7 @@ int main(int argc, char** argv) {
     himax::ProducerRecovery producerRecovery;
     uint64_t rearmRequests = 0, rearmTransfers = 0, rearmRaces = 0, rearmFailed = 0;
     uint64_t rearmUnsupported = 0, rearmValid = 0, rearmEpoch = 0, rearmSequence = 0;
+    uint64_t emptyRearms = 0;
     bool rearmPending = false;
     bool lastFrameValid = false;
     bool afeStarted = false;
@@ -251,7 +252,7 @@ int main(int argc, char** argv) {
             std::cerr << "producer_rearm requested=" << rearmRequests
                       << " transferred=" << rearmTransfers << " raced=" << rearmRaces
                       << " failed=" << rearmFailed << " unsupported=" << rearmUnsupported
-                      << " valid_after=" << rearmValid << '\n';
+                      << " valid_after=" << rearmValid << " empty=" << emptyRearms << '\n';
         std::cerr << "screen_rotation=" << solverScreen.Rotation()
                   << " (-1 means no host orientation)\n";
         if (recorder)
@@ -307,7 +308,7 @@ int main(int argc, char** argv) {
             ++rearmRequests;
             const bool ok = capture.Rearm(stream.Epoch(), stream.Sequence());
             const int error = ok ? 0 : errno;
-            producerRecovery.Result(error);
+            producerRecovery.Result(error, NowNs());
             if (ok) {
                 ++rearmTransfers;
                 rearmPending = true;
@@ -319,7 +320,7 @@ int main(int argc, char** argv) {
                 ++rearmRaces;
             } else if (error == ENOTTY) {
                 ++rearmUnsupported;
-                std::cerr << "Module has no producer rearm ioctl; keeping four-second fallback\n";
+                std::cerr << "Module has no tagged producer rearm ioctl; keeping four-second fallback\n";
             } else {
                 ++rearmFailed;
                 std::cerr << "No-reset producer rearm failed: " << std::strerror(error) << '\n';
@@ -437,13 +438,22 @@ int main(int argc, char** argv) {
             recordedFrame->rotation = solverScreen.Rotation();
         }
         const auto error = himax::ToThpMaster({packet->payload, packet->payload_size}, thp);
-        lastFrameValid = error == himax::FrameError::None;
-        producerRecovery.Frame(lastFrameValid);
+        const bool fromRearm = packet->flags & HX_RAW_FRAME_REARM;
+        const bool emptyRearm = himax::IsEmptyRearm(error, fromRearm);
+        if (emptyRearm) producerRecovery.EmptyRearm(stream);
+        else lastFrameValid = error == himax::FrameError::None;
+        producerRecovery.Frame(error == himax::FrameError::None);
         const bool wasResetRequested = frameHealth.ResetRequested();
-        bool requestReset = frameHealth.Observe(error);
+        bool requestReset = frameHealth.Observe(error, fromRearm);
         if (error != himax::FrameError::None) {
-            ++bad;
-            ++frameErrors[static_cast<size_t>(error)];
+            if (emptyRearm) {
+                ++emptyRearms;
+                std::cerr << "Empty producer poll; epoch=" << packet->epoch
+                          << " sequence=" << packet->sequence << " (not IRQ progress)\n";
+            } else {
+                ++bad;
+                ++frameErrors[static_cast<size_t>(error)];
+            }
             if (requestReset && !wasResetRequested)
                 std::cerr << "Raw master recovery requested: "
                           << himax::FrameErrorName(error) << '\n';

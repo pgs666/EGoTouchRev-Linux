@@ -12,12 +12,16 @@ windows = (Path(upstream) / "HimaxChipFrame.cpp").read_bytes()
 production = Path(native).read_bytes()
 daemon = (Path(native).parent.parent / "userspace" / "touchd.cpp").read_text()
 assert "afeStarted && lastFrameValid &&" in daemon
-assert daemon.index("const auto error = himax::ToThpMaster(") < daemon.index("producerRecovery.Frame(lastFrameValid)")
-assert daemon.index("producerRecovery.Frame(lastFrameValid)") < daemon.index("frameHealth.Observe(error)")
-assert "lastFrameValid = error == himax::FrameError::None;" in daemon
+assert daemon.index("const auto error = himax::ToThpMaster(") < daemon.index("producerRecovery.Frame(error ==")
+assert daemon.index("producerRecovery.Frame(error ==") < daemon.index("frameHealth.Observe(error, fromRearm)")
+assert "else lastFrameValid = error == himax::FrameError::None;" in daemon
+assert "if (emptyRearm) producerRecovery.EmptyRearm(stream);" in daemon
 assert "bool experimentalRearm = false;" in daemon
 assert 'arg == "--experimental-rearm"' in daemon
 assert "(solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle), experimentalRearm)" in daemon
+capture_source = (Path(native).parent.parent / "userspace" / "v4l2-capture.cpp").read_text()
+assert "return ioctl(m_fd, VIDIOC_HIMAX_REARM_TAGGED, &request) == 0;" in capture_source
+assert "const bool fromRearm = packet->flags & HX_RAW_FRAME_REARM;" in daemon
 with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     root = Path(directory)
     (root / "HimaxChipFrame.cpp").write_bytes(windows)
@@ -41,9 +45,9 @@ with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
         assert generated.count(text[text.index(first):text.index(last)]) == 1
     ioctl = text[text.index("static long himax_private_ioctl("):text.index("static const struct v4l2_ioctl_ops")]
     assert ioctl.index("mutex_lock(&ts->op_lock)") < ioctl.index("cmd == VIDIOC_HIMAX_REARM")
-    assert "ret = himax_rearm(ts, file, arg);" in ioctl
+    assert "ret = himax_rearm(ts, file, arg, cmd == VIDIOC_HIMAX_REARM_TAGGED);" in ioctl
     assert ioctl.index("cmd == VIDIOC_HIMAX_REARM") < ioctl.index("cmd != VIDIOC_HIMAX_COMMAND")
-    assert ioctl.index("himax_rearm(ts, file, arg)") < ioctl.index("mutex_unlock(&ts->op_lock)")
+    assert ioctl.index("himax_rearm(ts, file, arg,") < ioctl.index("mutex_unlock(&ts->op_lock)")
     expected = windows.decode()
     exact = expected[expected.index("    enum class Read :"):expected.index("    // ── slave（笔）──")]
     exact = exact.replace("std::this_thread::sleep_for", "TestSleep")

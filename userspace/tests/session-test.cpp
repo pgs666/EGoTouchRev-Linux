@@ -158,13 +158,18 @@ int main(int argc, char** argv) {
                 i < 20 || (i >= 125 && i < 145) || (i >= 161 && i < 165) ? 0xbb : 0;
             Checksum(packet);
             if (i >= 120 && i < 125) packet.payload[2] ^= 1;
+            if (i >= 110 && i < 118) {
+                std::fill(std::begin(packet.payload), std::end(packet.payload), 0);
+                packet.flags |= HX_RAW_FRAME_REARM;
+            }
+            if (i == 90) packet.flags |= HX_RAW_FRAME_REARM; // Valid poll still runs solver.
             if (i == 180) packet.payload[0] = 0; // Valid non-magic frame still runs the solver.
             if (i == 160) std::fill(packet.payload, packet.payload + packet.payload_size, 0xec);
             event.rotation = i / 80;
             screen.SetRotation(event.rotation);
             solver->SetChargerPlugged(packet.flags & HX_RAW_FRAME_CHARGER);
             const auto error = himax::ToThpMaster({packet.payload, packet.payload_size}, thp);
-            const bool reset = health.Observe(error);
+            const bool reset = health.Observe(error, packet.flags & HX_RAW_FRAME_REARM);
             if (error != himax::FrameError::None) {
                 if (reset) {
                     ++resets;
@@ -199,6 +204,26 @@ int main(int argc, char** argv) {
     }
     Check(Replay(argv[1], path) == 0, "live-output/action/lifecycle replay matches");
     const auto original = Read(path + ".events");
+    {
+        const auto raw = Read(path);
+        Check(raw.starts_with("HXRC") && raw.size() == 32 + 300 * sizeof(hx_raw_frame),
+              "raw fixture layout");
+        auto damaged = raw;
+        // Removing only acquisition provenance turns eight no-data polls into
+        // eight IRQ errors. Strict replay must reject the now missing resets.
+        for (unsigned i = 110; i < 118; ++i) {
+            const size_t offset = 32 + i * sizeof(hx_raw_frame);
+            hx_raw_frame p{};
+            std::memcpy(&p, damaged.data() + offset, sizeof(p));
+            Check(p.flags & HX_RAW_FRAME_REARM, "tagged empty fixture exists");
+            p.flags &= ~HX_RAW_FRAME_REARM;
+            std::memcpy(damaged.data() + offset, &p, sizeof(p));
+        }
+        Write(path, damaged);
+        Check(Replay(argv[1], path) != 0, "lost empty-poll origin cannot pass strict replay");
+        Write(path, raw);
+        Check(Replay(argv[1], path) == 0, "restoring provenance restores strict verification");
+    }
     {
         const auto raw = Read(path);
         const auto trace = std::string(directory) + "/touch-trace.csv";
@@ -249,10 +274,13 @@ int main(int argc, char** argv) {
     {
         himax::SessionReader reader(path.c_str());
         size_t frames = 0;
+        unsigned polls = 0;
         while (reader.Next(read)) if (read.kind == himax::SessionKind::Frame) {
             Check(read.packet.sequence == ++frames, "raw sequence survives pairing");
+            polls += !!(read.packet.flags & HX_RAW_FRAME_REARM);
         }
-        Check(reader.Error().empty() && frames == 300, "paired record count validated");
+        Check(reader.Error().empty() && frames == 300 && polls == 9,
+              "paired reader preserves all empty and valid poll origins");
     }
     {
         himax::SessionRecorder collision(path);

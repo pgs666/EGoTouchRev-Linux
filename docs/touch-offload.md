@@ -56,10 +56,11 @@ fresh 录制仍为 HXSE 1。配置、文件和验证边界见
 | `V4L2_BUF_TYPE_META_CAPTURE` / `HXST` | 一个 buffer 对应一个 5184 字节 `hx_raw_frame` |
 | payload | 容量仍为 5132 字节；`payload_size=5060` 表示完整 master，剩余 72 字节必须为零；不在内核解析 suffix/checksum |
 | epoch/sequence | 每次 AFE 重启/屏幕停止改变 epoch；成功读取后 sequence 递增 |
-| timestamp_ns | IRQ 线程入口的 CLOCK_MONOTONIC 时间，不是硬件采样时间 |
-| flags | AFE SOS 恢复原因、当前充电状态 |
+| timestamp_ns | IRQ 线程入口或主动补读开始时的 CLOCK_MONOTONIC 时间，不是硬件采样时间 |
+| flags | AFE SOS 恢复原因、当前充电状态；协商后的主动读取带 `HX_RAW_FRAME_REARM` |
 | `VIDIOC_HIMAX_INFO` | ABI、网格 40×60、payload 长度、OTP project ID、固件坐标变换 |
 | `VIDIOC_HIMAX_COMMAND` | ClearStatus、频点、扫描率、IDLE、calibration、reset |
+| `VIDIOC_HIMAX_REARM_TAGGED` | 带明确来源的主动补读；旧模块不支持时返回 ENOTTY |
 | `V4L2_EVENT_HIMAX_STATE` | running/epoch；即使屏灭不再产帧也能及时释放触点 |
 
 AFE 初始化重试（已部署普通模块）：STREAMON 或恢复 work 每次只尝试一次，失败后发布
@@ -302,7 +303,7 @@ STREAMOFF 和 shutdown 阻止后台硬件访问；新 AFE 启动时重新安排�
 - 进程正常退出或被杀时关闭 uinput，虚拟输入设备销毁。
 - systemd 三秒 watchdog 覆盖算法挂住的情况，停止/休眠期间也持续喂狗。
 - 新代码先尝试无复位补读：正常模式等待 200 ms，IDLE 等待 18×200 ms；
-  请求后至少留 20 ms 的取帧机会，无进展时按 200 ms 等待加 20 ms grace 继续尝试。
+  ioctl 完成后至少留 20 ms 的取帧机会，无进展时按 200 ms 等待加 20 ms grace 继续尝试。
   七次请求或每次请求前累计等待已超过 3200 ms 时，在该次请求的 grace 后耗尽预算，
   再退出让 supervisor 重建 stream/AFE。轮询调度会使实际时间向上取整。
   IDLE 的第一笔补读可能已超过累计预算，仍会发出并留出 grace，不跳过最后一次补读。
@@ -311,7 +312,8 @@ STREAMOFF 和 shutdown 阻止后台硬件访问；新 AFE 启动时重新安排�
   屏灭不计入停帧超时；重复 running 事件不能掩盖停帧。用户态分别统计请求、
   transfer 成功、竞态/门控拒绝、失败、不支持，以及之后实际收到有效帧的次数。
 - 计数清除以有效 master 校验为依据，不能因收到 sequence 增长的全零包就清除
-  累计 rearm 次数；无效包不能沿用旧 IDLE 标志。实机在正常 IDLE 静默期间主动补读
+  累计 rearm 次数。普通无效 IRQ 包不沿用旧 IDLE 标志；明确标记的空轮询不更新
+  已验证的 mode，也不推进 producer deadline/IRQ 错误计数。实机在正常 IDLE 静默期间主动补读
   确实返回过全零，后续正常 IRQ 继续有效出帧，不能把这种试验称为丢中断恢复。
 - supervisor 等待两秒后持续重试，不因十次启动限制而永久停止硬件恢复。
 - 多个消费者不能同时拥有采集队列；不允许内核和用户态同时上报同一块触屏。
@@ -321,6 +323,18 @@ STREAMOFF 和 shutdown 阻止后台硬件访问；新 AFE 启动时重新安排�
 升级试用期间临时 mask 常驻服务，避免 udev 让旧 daemon 抢占新版队列。
 卸载模块可能连带卸载依赖，部署和回退均在卸载后重新加载目标模块的依赖，
 并在恢复后核实设备绑定及原服务状态。
+
+新来源协商不改变 ABI v2 的结构尺寸：新增独立 `VIDIOC_HIMAX_REARM_TAGGED`
+（private +3）。旧 `VIDIOC_HIMAX_REARM`（+2）保留旧 flags，不向旧调用者输出
+其不认识的标志。新 host 只用 +3；旧模块即使支持 +2，也会以 ENOTTY 回退，
+不会猜测 untagged 包来自主动补读。普通 IRQ 始终不带 REARM。
+
+只有 `REARM + AllZero` 被解释为“轮询无数据”：不送入 solver、不更新 baseline、
+不推进 IRQ 错误阈值，也不清已有真实错误；pending reset 不被它取消。
+REARM 的 checksum、filler、长度错误仍按真实错误处理，有效 REARM 仍正常解算。
+raw HXRC/HXST 与 fresh HXSE 1 侧车配对读取都保留来源；strict replay 用同一规则。
+raw `--hxst` 单独列出 `empty_rearms`，不把它们称为有效帧；没有有效帧仍不能回放成功。
+旧文件不含来源标记时保持原错误语义，不能根据时间接近就给它补造 provenance。
 
 ## Linux 与 Android
 

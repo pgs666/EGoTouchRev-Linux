@@ -95,6 +95,37 @@ int main() {
               "valid data starts a fresh rearm budget");
     }
     for (bool idle : {false, true}) {
+        himax::StreamState polled;
+        Recovery policy;
+        polled.State({HX_RAW_ABI_VERSION, 1, 1}, base);
+        auto when = base + (idle ? 3600 : 200) * ms;
+        unsigned attempts = 0;
+        for (;;) {
+            Check(policy.Next(polled, when, idle) == Step::Rearm, "empty poll attempt starts");
+            ++attempts;
+            const auto complete = when + 150 * ms; // Real SPI may block.
+            policy.Result(0, complete);
+            hx_raw_frame p{};
+            p.epoch = 1;
+            p.sequence = attempts;
+            p.flags = HX_RAW_FRAME_REARM;
+            p.timestamp_ns = complete + ms;
+            Check(polled.Accept(p, p.timestamp_ns), "tagged poll still has valid transport metadata");
+            policy.Frame(false);
+            policy.EmptyRearm(polled);
+            Check(policy.Next(polled, complete + 19 * ms, idle) == Step::None,
+                  "empty poll cannot remove post-completion grace");
+            if (idle || attempts == 7) {
+                Check(policy.Next(polled, complete + 20 * ms, idle) == Step::Exhausted,
+                      "empty polling cannot refresh natural producer deadline or attempt budget");
+                break;
+            }
+            Check(policy.Next(polled, complete + 219 * ms, idle) == Step::None,
+                  "next timeout starts after ioctl completion, not request start");
+            when = complete + 220 * ms;
+        }
+    }
+    for (bool idle : {false, true}) {
         for (unsigned elapsed : {0u, 2600u, 3201u}) {
             std::array<unsigned, 16> expected{};
             const auto count = hx_windows_rearm_schedule(idle, elapsed, expected.data(), expected.size());

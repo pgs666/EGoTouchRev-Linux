@@ -75,6 +75,7 @@ static inline bool mod_delayed_work(void *wq, int *work, unsigned delay) {
     return false;
 }
 int hx_rearm(struct himax_ts_data *, struct file *, const struct hx_raw_rearm *);
+int hx_rearm_legacy(struct himax_ts_data *, struct file *, const struct hx_raw_rearm *);
 int hx_irq(struct himax_ts_data *);
 void hx_enqueue(struct himax_ts_data *, void *);
 unsigned long hx_buffer_size(void);

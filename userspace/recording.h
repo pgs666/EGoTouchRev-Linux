@@ -23,6 +23,7 @@ struct RecordedFrame {
     uint64_t sequence = 0;
     bool sos = false;
     bool charger = false;
+    bool rearm = false;
     bool readOk = true;
 };
 

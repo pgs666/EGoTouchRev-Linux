@@ -66,7 +66,7 @@ int ReplaySession(const char* path, std::ostream* touchTrace) {
         solver->SetChargerPlugged(packet.flags & HX_RAW_FRAME_CHARGER);
         const auto error = ToThpMaster({packet.payload, packet.payload_size}, thp);
         const bool valid = error == FrameError::None;
-        bool reset = frameHealth.Observe(error);
+        bool reset = frameHealth.Observe(error, packet.flags & HX_RAW_FRAME_REARM);
         bool report = false;
         if (!valid) {
             if (e.report || e.status || e.ctrl || e.digest) {

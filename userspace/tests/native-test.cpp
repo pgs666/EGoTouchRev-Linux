@@ -71,6 +71,23 @@ int main(int argc, char** argv) {
     native[0] ^= 1;
 
     himax::MasterFrameHealth health;
+    for (unsigned i = 0; i < 20; ++i)
+        Check(!health.Observe(himax::FrameError::AllZero, true),
+              "tagged empty polls alone never manufacture IRQ error recovery");
+    for (unsigned i = 0; i < 4; ++i) {
+        Check(!health.Observe(himax::FrameError::Checksum), "real IRQ error retained");
+        Check(!health.Observe(himax::FrameError::AllZero, true),
+              "empty poll neither advances nor clears genuine IRQ error count");
+    }
+    Check(health.Observe(himax::FrameError::AllZero), "fifth real IRQ error still recovers");
+    Check(health.Observe(himax::FrameError::AllZero, true), "empty poll cannot cancel pending recovery");
+    health.Reset();
+    Check(health.Observe(himax::FrameError::BusFiller, true), "tagged bus filler remains immediate SOS");
+    health.Reset();
+    for (unsigned i = 0; i < 4; ++i)
+        Check(!health.Observe(himax::FrameError::Checksum, true), "tagged checksum still counts");
+    Check(health.Observe(himax::FrameError::Checksum, true), "five tagged checksum errors still recover");
+    health.Reset();
     for (const auto error : {himax::FrameError::Sync, himax::FrameError::Checksum,
                              himax::FrameError::AllZero, himax::FrameError::Size})
         Check(!health.Observe(error), "first four mixed bad frames do not reset");
