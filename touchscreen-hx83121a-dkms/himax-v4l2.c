@@ -317,7 +317,12 @@ static int himax_queue_setup(struct vb2_queue *q, unsigned int *count,
 	if (*planes)
 		return *planes == 1 && sizes[0] >= sizeof(struct hx_raw_frame) ?
 			0 : -EINVAL;
-	*count = clamp_t(unsigned int, *count, 2, 8);
+	/* Keep the two oldest completed packets; no free buffer means the new
+	 * IRQ packet is drained but not retained. No per-frame allocation.
+	 * max_num_buffers is a vb2 index-space bound, not FIFO depth: setting
+	 * that below VB2_MAX_FRAME would WARN in vb2_core_queue_init().
+	 */
+	*count = HX_RAW_QUEUE_DEPTH;
 	*planes = 1;
 	sizes[0] = sizeof(struct hx_raw_frame);
 	return 0;

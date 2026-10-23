@@ -29,7 +29,7 @@ public:
 private:
     bool Fail(const char* operation);
     struct Mapping { void* data = nullptr; size_t size = 0; };
-    std::array<Mapping, 4> m_buffers{};
+    std::array<Mapping, HX_RAW_QUEUE_DEPTH> m_buffers{};
     hx_raw_info m_info{};
     int m_fd = -1;
     bool m_streaming = false;

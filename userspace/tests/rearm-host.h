@@ -29,6 +29,7 @@ struct vb2_buffer { u64 timestamp; struct hx_raw_frame frame; unsigned done, byt
 struct vb2_v4l2_buffer { struct vb2_buffer vb2_buf; u64 sequence; unsigned field; };
 struct vb2_queue { void *owner; bool busy; };
 struct file { void *private_data; };
+struct device;
 struct himax_ts_data;
 struct delayed_work { struct himax_ts_data *owner; unsigned kind; };
 struct himax_ts_data {
@@ -97,6 +98,7 @@ static inline bool mod_delayed_work(void *wq, struct delayed_work *work, unsigne
 int hx_rearm(struct himax_ts_data *, struct file *, const struct hx_raw_rearm *);
 int hx_rearm_legacy(struct himax_ts_data *, struct file *, const struct hx_raw_rearm *);
 int hx_irq(struct himax_ts_data *);
+int hx_queue_setup(unsigned *, unsigned *, unsigned sizes[]);
 void hx_startup_tick(struct himax_ts_data *);
 void hx_enqueue(struct himax_ts_data *, void *);
 unsigned long hx_buffer_size(void);

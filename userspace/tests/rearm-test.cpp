@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <climits>
+#include <cstring>
 #include <iostream>
 #include <thread>
 #include <vector>
@@ -54,6 +56,48 @@ static void DuringRead() {
 }
 
 int main() {
+    static_assert(HX_RAW_QUEUE_DEPTH == 2);
+    for (unsigned requested : {0u, 1u, 2u, 4u, 8u, 32u, UINT_MAX}) {
+        unsigned count = requested, planes = 0, sizes[] = {0};
+        Check(hx_queue_setup(&count, &planes, sizes) == 0 && count == 2 && planes == 1 &&
+              sizes[0] == sizeof(hx_raw_frame), "actual queue allocation always retains two complete packets");
+        for (unsigned plane : {1u, 2u}) for (unsigned bytes : {0u, unsigned(sizeof(hx_raw_frame) - 1),
+                                                             unsigned(sizeof(hx_raw_frame)), UINT_MAX}) {
+            count = requested;
+            planes = plane;
+            sizes[0] = bytes;
+            Check(hx_queue_setup(&count, &planes, sizes) ==
+                      (plane == 1 && bytes >= sizeof(hx_raw_frame) ? 0 : -EINVAL),
+                  "existing-plane validation still rejects short or multiplane layouts");
+            Check(count == requested, "layout recheck cannot silently allocate extra buffers");
+        }
+    }
+    {
+        Fixture f;
+        void* second = std::calloc(1, hx_buffer_size());
+        Check(second != nullptr, "second buffer allocation");
+        hx_enqueue(&f.ts, second);
+        hx_irq(&f.ts);
+        ++hx_test_now;
+        hx_irq(&f.ts);
+        const auto firstSaved = f.Output().vb2_buf.frame;
+        const auto secondSaved = static_cast<vb2_v4l2_buffer*>(second)->vb2_buf.frame;
+        for (unsigned i = 0; i < 20; ++i) { ++hx_test_now; hx_irq(&f.ts); }
+        Check(f.ts.reads == 22 && f.ts.sequence == 22 &&
+              !std::memcmp(&firstSaved, &f.Output().vb2_buf.frame, sizeof(firstSaved)) &&
+              !std::memcmp(&secondSaved, &static_cast<vb2_v4l2_buffer*>(second)->vb2_buf.frame,
+                           sizeof(secondSaved)),
+              "full two-frame queue drains producer but never overwrites retained oldest packets");
+        Check(firstSaved.sequence == 1 && secondSaved.sequence == 2,
+              "two available buffers are filled in FIFO order");
+        hx_enqueue(&f.ts, f.buffer);
+        ++hx_test_now;
+        hx_irq(&f.ts);
+        Check(f.Output().vb2_buf.frame.sequence == 23 && f.ts.epoch == 7 &&
+              !f.ts.state_events && !f.ts.schedules,
+              "consumer resumes at new producer sequence with observable gap, no AFE reset");
+        std::free(second);
+    }
     for (bool startup : {false, true}) {
         Fixture f;
         if (startup) {

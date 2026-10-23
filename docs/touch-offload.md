@@ -230,8 +230,20 @@ report/status/ctrl/触点摘要。只有收到 `END`、两文件数量匹配、d
 
 ## 队列和时序
 
-队列限制为 2～8 个 buffer，daemon 默认分配四个。没有可用 buffer 时仍排空 SPI，
-丢弃该帧；硬件不等待算法线程。MMAP 避免 read 的 copy_to_user，但当前仍有
+当前源码由分配回调固定返回两个 buffer，daemon 也只申请两个，匹配已审计
+`SpbThpTool.sys` 的两帧 FIFO 容量和队满丢新策略。此前版本是 2～8 个、daemon
+默认四个。没有可用 buffer 时仍排空 SPI，丢弃新交付；旧两帧的内容/时间戳不被
+覆盖，producer sequence 继续增加，后续接收能看见间隔。它不是 latest-only 队列，
+也不能声称每帧保留或不会丢 UP。用户态取回后立即复制并 requeue，不持有映射
+等待算法。容量只限制保留帧数，不给调度延迟设上界。
+
+不能直接设置 `vb2_queue.max_num_buffers=2`：当前内核要求这个索引空间上限至少为
+`VB2_MAX_FRAME`，否则 WARN；实际容量通过 queue_setup/REQBUFS 协商。
+本驱动没有提供 CREATE_BUFS 扩容 ioctl。两帧包括正在被用户态复制的 buffer，
+与 Windows 动态节点 FIFO/异步 completion 的调度并非逐项等价；仍需实测。
+本项为候选源码，常驻部署状态以用户态运行说明和部署证据为准。
+
+硬件不等待算法线程。MMAP 避免 read 的 copy_to_user，但当前仍有
 SPI bounce buffer → event buffer → vb2 buffer → 用户态私有帧的拷贝，不声称零拷贝。
 约 0.6 MB/s 原始数据带宽的瓶颈应通过测量判断。
 
@@ -247,17 +259,20 @@ daemon 使用 poll，逐帧求解；超过 50 ms 的旧帧、重复/乱序 seque
 
 ## 硬件和算法生命周期
 
-STREAMON、亮屏恢复和受限 reset 执行：
+当前候选源码的 STREAMON、亮屏恢复和受限 reset 执行如下；其异步清帧已临时试载，
+尚未因此默认替换常驻模块：
 
 ```text
 关 IRQ / 停止事件
 → epoch++
-→ reset/detect（最多三轮）
+→ master 0x13 bus-ready 探测（零值等 500 ms，I/O 失败异步退避）
+→ reset/detect（每次一次失败后按 200/500/1000/1500/2000 ms 异步重试）
 → 首次 OTP 读取后再次 reset/detect
 → reload / MCU ready / raw runtime
-→ 排空三帧
+→ 开 IRQ producer，初始读取一次
+→ 三次启动消费尝试：IRQ 数据优先，等 200 ms 超时才补读
 → StartCalibration / 120 Hz
-→ running 事件 / 开 IRQ
+→ running 事件 / 交付后续数据
 ```
 
 OTP 使用原版独立的 AHB burst、DD access 解锁和只读槽位选择流程，

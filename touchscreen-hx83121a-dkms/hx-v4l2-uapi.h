@@ -6,6 +6,10 @@
 #include <linux/videodev2.h>
 
 #define HX_RAW_ABI_VERSION 2U
+/* Bounded retained-frame capacity, matching the audited SPB FIFO. This is
+ * allocation policy, not a change to HXST record layout or ioctl numbers.
+ */
+#define HX_RAW_QUEUE_DEPTH 2U
 /* Master data excludes the three SPI transport bytes. Keep the old record
  * capacity for ABI compatibility; payload_size identifies bytes actually read.
  * A master-sized payload must have zero padding through HX_RAW_PAYLOAD_SIZE.

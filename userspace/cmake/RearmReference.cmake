@@ -8,10 +8,16 @@ function(himax_prepare_rearm native output)
         "static void himax_state_event(" buffer)
     himax_raw_reference_extract("${source}" "static void himax_publish_frame(struct himax_ts_data *ts, u64 now, bool rearm)\n{"
         "static int himax_queue_setup(" capture)
+    himax_raw_reference_extract("${source}" "static int himax_queue_setup("
+        "static int himax_buffer_prepare(" queue_setup)
     set(generated "#include \"rearm-host.h\"
 #include \"himax-v4l2-startup.h\"
 ${buffer}
 ${capture}
+${queue_setup}
+int hx_queue_setup(unsigned *count, unsigned *planes, unsigned sizes[]) {
+    return himax_queue_setup(NULL, count, planes, sizes, NULL);
+}
 int hx_rearm(struct himax_ts_data *ts, struct file *file, const struct hx_raw_rearm *request) {
     mutex_lock(&ts->op_lock);
     int result = himax_rearm(ts, file, request, true);

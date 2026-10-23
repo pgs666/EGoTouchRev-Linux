@@ -52,8 +52,11 @@ with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     text = production.decode()
     for first, last in (("struct himax_video_buffer {", "static void himax_state_event("),
                         ("static void himax_publish_frame(struct himax_ts_data *ts, u64 now, bool rearm)\n{",
-                         "static int himax_queue_setup(")):
+                         "static int himax_queue_setup("),
+                        ("static int himax_queue_setup(", "static int himax_buffer_prepare(")):
         assert generated.count(text[text.index(first):text.index(last)]) == 1
+    probe = text[text.index("static int himax_raw_probe("):text.index("static void himax_raw_remove(")]
+    assert "q->max_num_buffers = HX_RAW_QUEUE_DEPTH" not in probe
     ioctl = text[text.index("static long himax_private_ioctl("):text.index("static const struct v4l2_ioctl_ops")]
     assert ioctl.index("mutex_lock(&ts->op_lock)") < ioctl.index("cmd == VIDIOC_HIMAX_REARM")
     assert "ret = himax_rearm(ts, file, arg, cmd == VIDIOC_HIMAX_REARM_TAGGED);" in ioctl
