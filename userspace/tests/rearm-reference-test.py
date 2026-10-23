@@ -10,6 +10,11 @@ import tempfile
 cmake, upstream, native, module = sys.argv[1:]
 windows = (Path(upstream) / "HimaxChipFrame.cpp").read_bytes()
 production = Path(native).read_bytes()
+daemon = (Path(native).parent.parent / "userspace" / "touchd.cpp").read_text()
+assert "afeStarted && lastFrameValid &&" in daemon
+assert daemon.index("const auto error = himax::ToThpMaster(") < daemon.index("producerRecovery.Frame(lastFrameValid)")
+assert daemon.index("producerRecovery.Frame(lastFrameValid)") < daemon.index("frameHealth.Observe(error)")
+assert "lastFrameValid = error == himax::FrameError::None;" in daemon
 with tempfile.TemporaryDirectory(prefix="himax-rearm-reference-") as directory:
     root = Path(directory)
     (root / "HimaxChipFrame.cpp").write_bytes(windows)

@@ -199,3 +199,36 @@ transport success 只表示请求已提交/分发，不保证后续有效帧或�
   没有将“软件模拟缺 IRQ 后可补读”当作“实机已经恢复”。
 - 没有安装此候选。验收时仍运行 build ID `89b9985b76556d2179e11e83e6e1b426f2864efe`
   的旧模块；服务 PID `720293`、active、NRestarts=0，未重载父 SPI/GPI。
+
+### 随后的实机试载：IDLE 补读是全零，不能宣称恢复
+
+上述“没有安装”是首轮构建状态。随后在修复版测试内核上临时试载相同普通模块，
+只卸载/加载 Himax client；GPI/SPI 从未卸载，前后 build-ID note 比较一致。
+手动实机测试新增 `himax-rearm-hardware-test`，不注册为 CTest。
+
+第一轮要求补读本身通过 frame checksum/非零校验，**未通过**：
+IDLE 静默约 253 ms 时 rearm SPI 返回成功，交付 sequence 29，但数据全零。
+没有把它当有效数据；试验立即退出并恢复旧模块/服务。
+证据：`deploy-logs/producer-rearm-trial-zl0Gw9DG/`。
+
+这暴露了用户态计时语义的缺口：新 HXST 元数据能结束本次等待，但无效内容不能清除
+累计 rearm 次数。已修正 `ProducerRecovery::Frame(valid)`，只在有效 master 后
+清次数；无效帧也不允许沿用旧 IDLE 标志。新增“SPI 成功但七次无效帧”的预算回归，
+并检查 daemon 在真实帧校验之后调用该反馈。
+
+第二轮显式使用 `--transport-only`，允许记录这一个全零补读，但不放宽默认有效帧
+要求。相同现象再次出现：epoch 1、sequence 28 后补读得到全零 sequence 29，
+随后没有再发送 kick，正常 IRQ 取得有效 sequence 30，仍为 epoch 1。
+过时 token、非法大小/版本/reserved、其他 owner、立刻重复补读、STREAMOFF 的
+拒绝结果均符合接口规定。30 帧 raw 记录含两帧无效数据（首帧及补读帧），
+raw replay 正确拒绝非首帧全零，**不是回放通过**。
+
+随后新 daemon 六秒正常采集 672 帧，bad=0、stale=0、无触摸报告，
+strict replay 为 `session_frames=672 verified_frames=672 live_output_verified=1`。
+试验结束已恢复原模块/服务，磁盘及启动文件未改；taint=4096、无新增内核 fault。
+证据：`deploy-logs/producer-rearm-transport-stHtYCsR/`。
+
+计时修正之后 Release 50/50、完整 ASan/UBSan 50/50（107.75 秒）通过；新增硬件
+测试程序能正常编译，但从不由 CTest 自动访问硬件。新版 daemon SHA-256：
+`16eeda6c95b104c0af49acd5b405d0c7871e9ef5e52e7b1e7448c24c2feec9ee`；
+kernel candidate 未改。这里仍没有真实丢 IRQ、故障修复或触控质量证据。

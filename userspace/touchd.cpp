@@ -186,6 +186,7 @@ int main(int argc, char** argv) {
     uint64_t rearmRequests = 0, rearmTransfers = 0, rearmRaces = 0, rearmFailed = 0;
     uint64_t rearmUnsupported = 0, rearmValid = 0, rearmEpoch = 0, rearmSequence = 0;
     bool rearmPending = false;
+    bool lastFrameValid = false;
     bool afeStarted = false;
     bool profileSelected = false;
     bool recordingHeaderWritten = false;
@@ -289,7 +290,7 @@ int main(int argc, char** argv) {
         const auto recovery = observe ?
             (stream.TimedOut(loopNow) ? himax::ProducerRecovery::Step::Exhausted :
                                       himax::ProducerRecovery::Step::None) :
-            producerRecovery.Next(stream, loopNow, afeStarted &&
+            producerRecovery.Next(stream, loopNow, afeStarted && lastFrameValid &&
                 (solver->LastAfeStatus() & Solvers::Tsa::AfeStatus::kIdle));
         if (recovery == himax::ProducerRecovery::Step::Exhausted) {
             std::cerr << "AFE producer stall budget exhausted; restarting through supervisor\n";
@@ -359,6 +360,7 @@ int main(int argc, char** argv) {
                 }
                 if (!state.running || state.epoch != epoch) {
                     rearmPending = false;
+                    lastFrameValid = false;
                     if (!observe && !input.Release()) return 1;
                     solver->OnAfeStopped();
                     afeStarted = false;
@@ -429,6 +431,8 @@ int main(int argc, char** argv) {
             recordedFrame->rotation = solverScreen.Rotation();
         }
         const auto error = himax::ToThpMaster({packet->payload, packet->payload_size}, thp);
+        lastFrameValid = error == himax::FrameError::None;
+        producerRecovery.Frame(lastFrameValid);
         const bool wasResetRequested = frameHealth.ResetRequested();
         bool requestReset = frameHealth.Observe(error);
         if (error != himax::FrameError::None) {

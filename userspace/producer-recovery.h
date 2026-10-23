@@ -20,22 +20,28 @@ public:
             m_attempts = 0;
             return Step::None;
         }
+        if (m_epoch != stream.Epoch()) {
+            m_attempts = 0;
+            m_lastAttempt = 0;
+        }
         if (m_epoch != stream.Epoch() || m_sequence != stream.Sequence() ||
             m_progress != stream.ProgressNs()) {
             m_epoch = stream.Epoch();
             m_sequence = stream.Sequence();
             m_progress = stream.ProgressNs();
             m_lastAttempt = 0;
-            m_attempts = 0;
+            // Delivery ends the previous wait, but an all-zero/checksum-bad
+            // packet cannot forgive the accumulated rearm attempts.
         }
         if (m_unsupported)
             return stream.TimedOut(now) ? Step::Exhausted : Step::None;
         if (now <= m_progress) return Step::None;
         const auto quiet = now - m_progress;
         if (quiet < (idle ? 3600000000ULL : 200000000ULL)) return Step::None;
+        if (m_attempts >= 7 && !m_lastAttempt) return Step::Exhausted;
         // Always allow the first kick, including after the IDLE retry window
         // already consumed the 3.2-second Windows per-call budget.
-        if (m_attempts) {
+        if (m_lastAttempt) {
             if (now < m_lastAttempt || now - m_lastAttempt < 20000000ULL)
                 return Step::None;
             if (m_attempts >= 7 || m_lastAttempt - m_progress > 3200000000ULL)
@@ -49,6 +55,15 @@ public:
 
     void Result(int error) {
         if (error == ENOTTY) m_unsupported = true;
+    }
+
+    // Windows clears read stalls after frame validity, not merely a successful
+    // transport. In particular an IDLE kick can legitimately return all zeros.
+    void Frame(bool valid) {
+        if (valid) {
+            m_attempts = 0;
+            m_lastAttempt = 0;
+        }
     }
 
 private:

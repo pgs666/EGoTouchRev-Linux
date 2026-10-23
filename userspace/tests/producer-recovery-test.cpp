@@ -37,6 +37,7 @@ int main() {
     frame.sequence = 5;
     frame.timestamp_ns = base + 1600 * ms;
     Check(stream.Accept(frame, frame.timestamp_ns), "producer progress");
+    recovery.Frame(true);
     Check(recovery.Next(stream, frame.timestamp_ns, true) == Step::None, "progress cancels attempts");
     Check(recovery.Next(stream, frame.timestamp_ns + 3599 * ms, true) == Step::None, "IDLE quiet is normal");
     Check(recovery.Next(stream, frame.timestamp_ns + 3600 * ms, true) == Step::Rearm, "IDLE gets one kick");
@@ -61,6 +62,30 @@ int main() {
     Check(failures.Next(stream, base + 10420 * ms, false) == Step::Rearm, "EIO retries without reset");
     Check(failures.Next(stream, base + 13201 * ms, false) == Step::Rearm, "last kick precedes elapsed-budget check");
     Check(failures.Next(stream, base + 13221 * ms, false) == Step::Exhausted, "duplicate event cannot extend deadline");
+    {
+        himax::StreamState badStream;
+        Recovery badRecovery;
+        badStream.State({HX_RAW_ABI_VERSION, 1, 1}, base);
+        hx_raw_frame badPacket{};
+        badPacket.epoch = 1;
+        for (unsigned i = 0; i < 7; ++i) {
+            const auto when = base + (200 + i * 201) * ms;
+            Check(badRecovery.Next(badStream, when, false) == Step::Rearm, "invalid-data attempt");
+            badRecovery.Result(0); // SPI success is not valid data progress.
+            badPacket.sequence = i + 1;
+            badPacket.timestamp_ns = when + ms;
+            Check(badStream.Accept(badPacket, badPacket.timestamp_ns), "fresh transport metadata");
+            badRecovery.Frame(false);
+        }
+        Check(badRecovery.Next(badStream, base + (200 + 7 * 201) * ms, false) == Step::Exhausted,
+              "invalid packets cannot perpetually restart rearm budget");
+        badPacket.sequence++;
+        badPacket.timestamp_ns += 202 * ms;
+        Check(badStream.Accept(badPacket, badPacket.timestamp_ns), "valid data after bad series");
+        badRecovery.Frame(true);
+        Check(badRecovery.Next(badStream, badPacket.timestamp_ns + 200 * ms, false) == Step::Rearm,
+              "valid data starts a fresh rearm budget");
+    }
     for (bool idle : {false, true}) {
         for (unsigned elapsed : {0u, 2600u, 3201u}) {
             std::array<unsigned, 16> expected{};
