@@ -73,7 +73,7 @@ int ReplaySession(const char* path, std::ostream* touchTrace) {
                 return 1;
             }
             lastHost = std::max(lastHost, e.hostTimeNs);
-            restart.State(e.state);
+            restart.State(e.state, e.stateFlags);
             if (!e.state.running || e.state.epoch != epoch) {
                 solver->OnAfeStopped();
                 started = false;

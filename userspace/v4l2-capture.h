@@ -23,6 +23,7 @@ public:
     bool Rearm(uint64_t epoch, uint64_t sequence);
     // Success only schedules AFE reconstruction; preserve errno on failure.
     bool Restart(uint64_t epoch, uint64_t sequence);
+    uint32_t StateFlags() const { return m_stateFlags; }
     int Fd() const { return m_fd; }
     const hx_raw_info& Info() const { return m_info; }
     const std::string& Error() const { return m_error; }
@@ -35,6 +36,7 @@ private:
     hx_raw_info m_info{};
     int m_fd = -1;
     bool m_streaming = false;
+    uint32_t m_stateFlags = 0;
     std::string m_error;
     std::string m_path;
 };

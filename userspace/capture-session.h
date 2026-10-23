@@ -31,6 +31,7 @@ struct SessionEvent {
     uint64_t hostTimeNs = 0;
     hx_raw_frame packet{};
     hx_raw_state state{};
+    uint32_t stateFlags = 0;
     int rotation = -1;
     bool report = false;
     uint32_t status = 0;
@@ -97,6 +98,7 @@ private:
     bool m_begun = false;
     bool m_ended = false;
     bool m_recoveryVersion = false;
+    bool m_powerVersion = false;
 };
 
 }  // namespace himax

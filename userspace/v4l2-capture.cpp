@@ -157,11 +157,18 @@ bool Capture::Event(hx_raw_state& state) {
         return Fail("DQEVENT");
     }
     if (event.type != V4L2_EVENT_HIMAX_STATE) return false;
-    std::memcpy(&state, event.u.data, sizeof(state));
-    if (state.version != HX_RAW_ABI_VERSION || state.running > 1) {
+    hx_raw_lifecycle lifecycle{};
+    std::memcpy(&lifecycle, event.u.data, sizeof(lifecycle));
+    state = lifecycle.state;
+    const uint32_t flags = lifecycle.stop_flags;
+    if (state.version != HX_RAW_ABI_VERSION || state.running > 1 ||
+        lifecycle.reserved || (flags & ~HX_RAW_STOP_FLAGS) ||
+        (flags && !(flags & HX_RAW_STOP_KNOWN)) ||
+        (state.running && (flags & HX_RAW_STOP_REASONS))) {
         m_error = "Invalid Himax lifecycle event";
         return false;
     }
+    m_stateFlags = flags;
     return true;
 }
 

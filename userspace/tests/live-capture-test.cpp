@@ -86,7 +86,7 @@ int main() {
         Check(first.size() == 1, "one private capture directory");
         const auto path = first.front().string();
         const auto sidecar = Read(path + ".events");
-        Check(sidecar.starts_with("HXSE 2 live-no-checkpoint\n") &&
+        Check(sidecar.starts_with("HXSE 4 live-no-checkpoint\n") &&
               sidecar.ends_with("END 1 0 0\n"), "live origin is explicit, completed window has clean footer");
         himax::RecordingReader reader(path.c_str(), himax::RecordingFormat::Hxst, 0);
         himax::RecordedFrame frame;

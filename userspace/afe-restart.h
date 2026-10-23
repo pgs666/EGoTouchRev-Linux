@@ -56,6 +56,7 @@ public:
         if (!error) {
             ++m_accepted;
             m_waiting = true;
+            m_fenced = true;
             m_retrying = false;
             return true;
         }
@@ -69,6 +70,7 @@ public:
     bool Frame(const hx_raw_frame& packet, uint64_t now, bool usable) {
         if (m_failed) return false;
         if (!usable) { m_stableSince = 0; return false; }
+        if (m_fenced && packet.epoch <= m_epoch) return false;
         bool recovered = false;
         if (m_waiting) {
             if (packet.epoch <= m_epoch) return false;
@@ -79,6 +81,7 @@ public:
             m_waiting = false;
             recovered = true;
         }
+        m_fenced = false;
         if (m_lastUsable && (now < m_lastUsable || now - m_lastUsable > 4000000000ULL))
             m_stableSince = 0;
         m_lastUsable = now;
@@ -89,13 +92,22 @@ public:
     }
 
     bool Allows(const hx_raw_frame& packet) const {
-        return !m_waiting || packet.epoch > m_epoch;
+        return !m_fenced || packet.epoch > m_epoch;
     }
     bool Allows(const hx_raw_state& state) const {
-        return !m_waiting || !state.running || state.epoch > m_epoch;
+        return !m_fenced || !state.running || state.epoch > m_epoch;
     }
-    void State(const hx_raw_state& state) {
+    bool State(const hx_raw_state& state, uint32_t flags = 0) {
         if (!state.running) m_stableSince = 0;
+        if (state.running || !(flags & HX_RAW_STOP_KNOWN) ||
+            !(flags & HX_RAW_STOP_REASONS) || state.epoch < m_epoch) return false;
+        // Windows EnterStandby cancels recovery and resets its failure budget.
+        // Keep the accepted-request epoch fence until genuinely newer data.
+        const bool interrupted = m_waiting || m_retrying;
+        m_waiting = m_retrying = m_failed = false;
+        m_accepted = 0;
+        m_lastUsable = 0;
+        return interrupted;
     }
     bool Waiting() const { return m_waiting; }
     uint64_t Epoch() const { return m_epoch; }
@@ -105,7 +117,7 @@ private:
     uint64_t m_epoch = 0, m_sequence = 0, m_progress = 0;
     uint64_t m_began = 0, m_submitted = 0, m_completed = 0, m_stableSince = 0, m_lastUsable = 0;
     unsigned m_accepted = 0;
-    bool m_retrying = false, m_waiting = false, m_failed = false;
+    bool m_retrying = false, m_waiting = false, m_failed = false, m_fenced = false;
 };
 
 } // namespace himax

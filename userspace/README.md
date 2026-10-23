@@ -45,6 +45,11 @@ AFE 重建计数。传输成功和后续有效数据分开，不把后者当作�
 回退、修正及受控试载记录见 [SPB 后端审计](../docs/windows-spb-backend-audit.md)；
 真实故障、手势/PM 和长期运行验收仍有缺口。
 
+当前模块另通过生命周期事件尾部传递停止原因：明确关屏、休眠、停流或关机时，
+取消待完成的恢复等待并重置连续故障预算，保留旧 epoch 隔离；重建中的临时停止
+不取消超时。`status` 的 `stop_flags` 和 `afe_interrupted` 可用于观察，旧模块缺少
+原因时沿用原行为。常规帧路径不增加 ioctl 或确认帧。
+
 默认数据路径为：
 
 ```text
@@ -538,7 +543,7 @@ bash scripts/test-v4l2-panel.sh
 录制创建两个新文件，不覆盖已有文件：
 
 - `FILE.hxst`：原有 HXRC v1 面板头及未经修改的 HXST 帧；
-- `FILE.hxst.events`：HXSE v3 recovery 侧车（旧文件为 v1），保存每帧使用的方向、求解结果摘要、AFE 请求及
+- `FILE.hxst.events`：HXSE v4 power 侧车（兼容读取旧 v1/v3），保存每帧使用的方向、求解结果摘要、AFE 请求及
   执行退出状态、panel 生命周期和超时释放事件，以及完整性尾记录。
 
 输入线程不等待磁盘：队列满或后台写入失败会禁用录制并记录错误，触控继续。
@@ -776,7 +781,7 @@ systemd 的 `StateDirectory=himax-touchd-captures` 提供
 
 保存内容包括当时的 raw、epoch/sequence/时间戳、面板身份与坐标标志，以及旁文件
 中的方向、生命周期、输出 digest/status/ctrl 和实际 AFE 命令/结果。它从已有
-算法状态中途开始，文件头明确为 **`HXSE 2 live-no-checkpoint`**，即使正常收尾
+算法状态中途开始，文件头明确为 **`HXSE 4 live-no-checkpoint`**，即使正常收尾
 也不是“完整可重现的 solver 会话”。`himax-replay --session` 会明确拒绝，不能因为
 平坦 raw 恰好给出相同空输出就声称现场已严格复现。可用普通 raw 回放研究矩阵：
 
@@ -1678,3 +1683,9 @@ completion marker 和正常清状态握手，修正了前次仅观察半秒而�
 2833 帧，bad/stale=0，两级恢复计数及 NRestarts 均为 0。这只确认当次正常
 产帧，不代表真实停帧恢复或边缘手势已验收。备份与安装记录保存在
 `deploy-logs/read-recovery-install-U19x7ZPG/`。
+
+随后补齐停止原因并部署配套模块和用户态：PID=2929330，912 帧有效，
+bad/stale=0，`stop_flags=1`，两级恢复及服务重启均为 0。服务器模块构建、
+用户态构建及相关的四项既有检查通过。两份测试 initramfs 已同步并核对模块；
+未冷启动，也未主动触发系统休眠或恢复中关屏。备份及记录位于
+`deploy-logs/power-stop-install-2z6wnlGI/`，本轮不改 SPI/GPI、启动选择或 Android。

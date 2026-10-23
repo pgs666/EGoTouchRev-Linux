@@ -36,13 +36,24 @@ struct himax_video_buffer {
 static void himax_state_event(struct himax_ts_data *ts, bool running)
 {
 	struct v4l2_event event = { .type = V4L2_EVENT_HIMAX_STATE };
-	struct hx_raw_state state = {
-		.version = HX_RAW_ABI_VERSION,
-		.running = running,
-		.epoch = ts->epoch,
+	struct hx_raw_lifecycle lifecycle = {
+		.state = {
+			.version = HX_RAW_ABI_VERSION,
+			.running = running,
+			.epoch = ts->epoch,
+		},
+		.stop_flags = HX_RAW_STOP_KNOWN,
 	};
 
-	memcpy(event.u.data, &state, sizeof(state));
+	if (!ts->power.panel_prepared || !ts->power.panel_enabled)
+		lifecycle.stop_flags |= HX_RAW_STOP_PANEL;
+	if (ts->power.system_suspended)
+		lifecycle.stop_flags |= HX_RAW_STOP_SUSPEND;
+	if (!ts->power.streaming)
+		lifecycle.stop_flags |= HX_RAW_STOP_STREAM;
+	if (ts->power.shutting_down)
+		lifecycle.stop_flags |= HX_RAW_STOP_SHUTDOWN;
+	memcpy(event.u.data, &lifecycle, sizeof(lifecycle));
 	v4l2_event_queue(ts->video, &event);
 }
 

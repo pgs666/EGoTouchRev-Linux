@@ -249,14 +249,19 @@ int main(int argc, char** argv) {
         Check(Replay(argv[1], path, path.c_str()) != 0 && Read(path) == raw &&
               Read(path + ".events") == original, "trace cannot overwrite raw session or sidecar");
     }
-    Check(original.starts_with("HXSE 3 recovery\n") && original.ends_with("END 300 0 0\n"),
+    Check(original.starts_with("HXSE 4 power\n") && original.ends_with("END 300 0 0\n"),
           "explicit complete footer");
     {
         auto legacy = original;
-        legacy.replace(0, std::string("HXSE 3 recovery\n").size(), "HXSE 1\n");
+        legacy.replace(0, std::string("HXSE 4 power\n").size(), "HXSE 1\n");
         const auto begin = legacy.find("B W273AS2700 5 0 0\n");
-        Check(begin != legacy.npos, "version-three policy metadata exists");
+        Check(begin != legacy.npos, "recovery policy metadata exists");
         legacy.replace(begin, std::string("B W273AS2700 5 0 0\n").size(), "B W273AS2700 5 0\n");
+        for (size_t at = 0; (at = legacy.find("\nS ", at)) != legacy.npos; ++at) {
+            const auto end = legacy.find('\n', at + 1);
+            const auto flags = legacy.rfind(' ', end);
+            legacy.erase(flags, end - flags);
+        }
         Write(path + ".events", legacy);
         Check(Replay(argv[1], path) == 0, "legacy HXSE 1 still verifies without recovery records");
         Write(path + ".events", original);
@@ -319,9 +324,9 @@ int main(int argc, char** argv) {
     Write(path + ".events", altered);
     Check(Replay(argv[1], path) != 0, "incorrect live contact digest detected");
     altered = original;
-    const auto running = altered.find("S 0 1 1\n");
+    const auto running = altered.find("S 0 1 1 0\n");
     Check(running != altered.npos, "running state fixture exists");
-    altered.replace(running, 8, "S 0 1 0\n");
+    altered.replace(running, std::string("S 0 1 1 0\n").size(), "S 0 1 0 0\n");
     Write(path + ".events", altered);
     Check(Replay(argv[1], path) != 0, "frame after panel-off cannot reactivate input");
     Write(path + ".events", original);

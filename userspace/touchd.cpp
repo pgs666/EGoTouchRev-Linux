@@ -216,7 +216,8 @@ int main(int argc, char** argv) {
     uint64_t rearmRequests = 0, rearmTransfers = 0, rearmRaces = 0, rearmFailed = 0;
     uint64_t rearmUnsupported = 0, rearmValid = 0, rearmEpoch = 0, rearmSequence = 0;
     uint64_t emptyRearms = 0;
-    uint64_t restartRequests = 0, restartScheduled = 0, restartRecovered = 0;
+    uint64_t restartRequests = 0, restartScheduled = 0, restartRecovered = 0, restartInterrupted = 0;
+    uint32_t stopFlags = 0;
     bool rearmPending = false;
     bool afeStarted = false;
     bool profileSelected = false;
@@ -279,7 +280,8 @@ int main(int argc, char** argv) {
                       << " valid_after=" << rearmValid << " empty=" << emptyRearms << '\n';
         if (restartRequests)
             std::cerr << "afe_restart requested=" << restartRequests << " scheduled=" << restartScheduled
-                      << " valid_after=" << restartRecovered << " waiting=" << afeRestart.Waiting() << '\n';
+                      << " valid_after=" << restartRecovered << " interrupted=" << restartInterrupted
+                      << " waiting=" << afeRestart.Waiting() << '\n';
         std::cerr << "screen_rotation=" << solverScreen.Rotation()
                   << " (-1 means no host orientation)\n";
         if (recorder)
@@ -328,6 +330,37 @@ int main(int argc, char** argv) {
         }
         return true;
     };
+    const auto drainStates = [&] {
+        hx_raw_state state{};
+        while (capture.Event(state)) {
+            if (!afeRestart.Allows(state)) continue;
+            if (!stream.State(state, NowNs())) continue;
+            stopFlags = capture.StateFlags();
+            if (afeRestart.State(state, stopFlags)) {
+                ++restartInterrupted;
+                std::cerr << "AFE recovery interrupted by power/stream stop; flags="
+                          << stopFlags << " epoch=" << state.epoch << '\n';
+            }
+            if (recordingActive()) {
+                himax::SessionEvent event;
+                event.kind = himax::SessionKind::State;
+                event.hostTimeNs = NowNs();
+                event.state = state;
+                event.stateFlags = stopFlags;
+                recordEvent(event);
+            }
+            if (!state.running || state.epoch != epoch) {
+                if (control) control->CalibrationStopped();
+                rearmPending = false;
+                readMode.Reset();
+                if (!observe && !input.Release()) return false;
+                solver->OnAfeStopped();
+                afeStarted = false;
+            }
+            if (state.running && !profileSelected && !selectProfile()) return false;
+        }
+        return capture.Error().empty();
+    };
     himax::NotifyService("READY=1");
     std::cerr << (observe ? "Observing " : "Solving ") << capture.Path()
               << " project=" << (autoProject ? "pending-OTP" : project) << '\n';
@@ -367,8 +400,18 @@ int main(int argc, char** argv) {
             exitCode = 1;
             break;
         }
-        const auto restartStep = experimentalRestart ? afeRestart.Next(stream, loopNow, exhausted) :
+        auto restartStep = experimentalRestart ? afeRestart.Next(stream, loopNow, exhausted) :
             himax::AfeRestart::Step::None;
+        if (restartStep == himax::AfeRestart::Step::Fallback) {
+            // Power may have changed while the main thread was descheduled.
+            // Drain its authoritative events before declaring a recovery timeout.
+            // This adds no extra ioctl to the normal frame path.
+            if (!drainStates()) {
+                std::cerr << "Cannot consume AFE lifecycle: " << capture.Error() << '\n';
+                return 1;
+            }
+            restartStep = afeRestart.Next(stream, NowNs(), exhausted);
+        }
         if (restartStep == himax::AfeRestart::Step::Fallback) {
             std::cerr << "In-process AFE restart failed/exhausted; falling back to supervisor\n";
             exitCode = 1;
@@ -464,29 +507,9 @@ int main(int argc, char** argv) {
             exitCode = 1;
             break;
         }
-        if (pending.revents & POLLPRI) {
-            hx_raw_state state{};
-            while (capture.Event(state)) {
-                if (!afeRestart.Allows(state)) continue;
-                if (!stream.State(state, NowNs())) continue;
-                afeRestart.State(state);
-                if (recordingActive()) {
-                    himax::SessionEvent event;
-                    event.kind = himax::SessionKind::State;
-                    event.hostTimeNs = NowNs();
-                    event.state = state;
-                    recordEvent(event);
-                }
-                if (!state.running || state.epoch != epoch) {
-                    if (control) control->CalibrationStopped();
-                    rearmPending = false;
-                    readMode.Reset();
-                    if (!observe && !input.Release()) return 1;
-                    solver->OnAfeStopped();
-                    afeStarted = false;
-                }
-                if (state.running && !profileSelected && !selectProfile()) return 1;
-            }
+        if ((pending.revents & POLLPRI) && !drainStates()) {
+            std::cerr << "Cannot consume AFE lifecycle: " << capture.Error() << '\n';
+            return 1;
         }
         if (!capture.Error().empty()) {
             std::cerr << capture.Error() << '\n';
@@ -513,6 +536,8 @@ int main(int argc, char** argv) {
                         " afe_restart=" + std::to_string(experimentalRestart) +
                         " afe_restarts=" + std::to_string(restartScheduled) +
                         " afe_recovered=" + std::to_string(restartRecovered) +
+                        " afe_interrupted=" + std::to_string(restartInterrupted) +
+                        " stop_flags=" + std::to_string(stopFlags) +
                         " restart_waiting=" + std::to_string(afeRestart.Waiting()) +
                         " calibration=" + control->CalibrationState() +
                         " calibration_done_frames=" + std::to_string(calibrationFrames));

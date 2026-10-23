@@ -120,6 +120,21 @@ int main() {
     {
         Policy policy;
         auto stream = Running(1, base);
+        Check(policy.Next(stream, base, true) == Step::Request && policy.Result(0, base + ms),
+              "power interruption fixture");
+        const hx_raw_state stopped{HX_RAW_ABI_VERSION, 0, 2};
+        Check(!policy.State(stopped) && policy.Waiting(),
+              "old producer's unknown stopped event does not cancel reconstruction");
+        Check(policy.State(stopped, HX_RAW_STOP_KNOWN | HX_RAW_STOP_PANEL) && !policy.Waiting(),
+              "confirmed panel off cancels reconstruction wait");
+        stream.State(stopped, base + 2 * ms);
+        Check(policy.Next(stream, base + 2 * Policy::kReadyBudgetNs, false) == Step::None &&
+              !policy.Allows(hx_raw_state{HX_RAW_ABI_VERSION, 1, 1}),
+              "long standby neither times out nor reopens the old epoch");
+    }
+    {
+        Policy policy;
+        auto stream = Running(1, base);
         Check(policy.Next(stream, base + 5000 * ms, true) == Step::Request, "time fixture");
         Check(!policy.Result(0, base) && policy.Next(stream, base + 5001 * ms, true) == Step::Fallback,
               "backwards completion cannot be admitted");

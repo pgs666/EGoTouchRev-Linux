@@ -45,8 +45,8 @@ Linux 有两处宿主方向适配：构建时生成 `TsaCoreSolver.cpp` 与 `Sys
 
 可选用户态运行窗口采集不新增内核 ioctl，不另开 V4L2 consumer，也不 reset AFE。
 默认无录制管理线程/队列；显式配置后由 SIGUSR2 触发限时窗口。其 HXRC raw 格式
-不变，但侧车标注 `HXSE 2 live-no-checkpoint`，严格 session replay 拒绝中途状态；
-fresh 录制现写 HXSE 3 recovery（继续读取旧 HXSE 1）。配置、文件和验证边界见
+不变，但侧车标注 `HXSE 4 live-no-checkpoint`，严格 session replay 拒绝中途状态；
+fresh 录制现写 HXSE 4 power（继续读取旧 HXSE 1/3）。配置、文件和验证边界见
 [运行中窗口录制](../userspace/README.md#不重置当前触控的运行中窗口录制)。
 `c00844e` 已在本机完成两个无重置窗口（560/2 帧）的首轮验证，并安装用户态程序；
 测试配置已移除，默认仍关闭录制。尚无有触点录制的实机时延/手势质量验收。
@@ -199,12 +199,12 @@ daemon 在打开设备和 STREAMON 前建立接收器，并向抽象地址
 退出先释放输入，再排空队列；异常退出、丢事件或缺少尾记录均不能通过严格回放。
 未启用录制时没有队列、写盘线程、raw 诊断复制或输出摘要计算。
 
-fresh HXSE v3 为 ASCII、十进制整数、每行一条记录，解析限长 1023 字节：
+fresh HXSE v4 为 ASCII、十进制整数、每行一条记录，解析限长 1023 字节：
 
 ```text
-HXSE 3 recovery
+HXSE 4 power
 B PROJECT_ID coordinate_flags observe experimental_restart
-S host_ns epoch running
+S host_ns epoch running stop_flags
 R host_ns
 J decision_ns completed_ns epoch sequence errno
 F index host_ns rotation report afe_status ctrl contact_digest action_count [action parameter result]...
@@ -222,8 +222,14 @@ scheduled。只有 `B` 明确开启实验恢复且非 observe 时才接受；失
 受理请求按 `OnAfeSos → OnAfeStopped` 隔离旧流，后续新 epoch 重新 `OnAfeStarted`。
 生命周期、ready event、SPI 完整包和触控质量恢复仍是不同层次的证据。
 
-继续支持旧 `HXSE 1`：其 `B` 没有实验标志、也不允许 `J`。新 writer 总是使用 v3，
-旧 reader 不能假装理解新恢复流程。运行中窗口仍用 v2/no-checkpoint，可能包含
+`stop_flags` 保存内核生命周期事件新增的尾部信息，原 16 字节状态前缀不变。
+bit 0 表示原因已知，bit 1～4 分别表示面板关闭、系统休眠、停流和关机。
+只有明确的停止原因才中断恢复等待；重建中的普通 stopped 通知不会取消超时。
+旧模块的尾部为零，保留原有行为。
+
+继续支持旧 `HXSE 1/3`，其中 `S` 没有停止原因；v1 的 `B` 也没有实验标志、不允许
+`J`。新 writer 使用 v4，旧 reader 不能假装理解新的电源语义。运行中窗口使用
+`HXSE 4 live-no-checkpoint`，可能包含
 `J` 供人工诊断，但严格 replay 继续拒绝它，而不推测中途 solver 状态。
 
 `action` 使用 `hx_raw_action` ABI，`parameter` 为原始参数，`result=0` 表示命令
@@ -362,7 +368,7 @@ STREAMOFF 和 shutdown 阻止后台硬件访问；新 AFE 启动时重新安排�
 只有 `REARM + AllZero` 被解释为“轮询无数据”：不送入 solver、不更新 baseline、
 不推进 IRQ 错误阈值，也不清已有真实错误；pending reset 不被它取消。
 REARM 的 checksum、filler、长度错误仍按真实错误处理，有效 REARM 仍正常解算。
-raw HXRC/HXST 与 fresh HXSE 1/3 侧车配对读取都保留来源；strict replay 用同一规则。
+raw HXRC/HXST 与 fresh HXSE 1/3/4 侧车配对读取都保留来源；strict replay 用同一规则。
 raw `--hxst` 单独列出 `empty_rearms`，不把它们称为有效帧；没有有效帧仍不能回放成功。
 旧文件不含来源标记时保持原错误语义，不能根据时间接近就给它补造 provenance。
 
@@ -376,7 +382,10 @@ raw `--hxst` 单独列出 `empty_rearms`，不把它们称为有效帧；没有�
 都可用才结束等待。Linux 额外设置竞态重试一秒、100 ms 退避、受理后十五秒等数据、
 最多连续三次受理；连续三十秒好数据且无过长间隔后才恢复预算。它们是本地边界，
 不是 Windows 原样参数。等待期间不嵌套发 frame-bound reset，不因更多坏帧无限
-重置等待时间；既有 250 ms input-only release 保留。该路径尚未实机故障验收，
+重置等待时间；既有 250 ms input-only release 保留。新生命周期事件明确标记面板/
+系统电源停止时，取消恢复等待并重置连续故障预算；下一次亮屏由内核正常初始化。
+旧模块不提供停止原因，仍保留十五秒 fallback，不从模糊 stopped 通知猜测关屏。
+该路径尚未实机故障验收，
 当前默认 unit 显式添加 `--experimental-rearm --experimental-restart`；
 带 live-capture 的可选 drop-in 和 fresh 采集脚本也保留相同恢复行为。
 本机已配套安装模块/daemon，并同步测试内核的 initramfs；真实故障恢复和 PM/

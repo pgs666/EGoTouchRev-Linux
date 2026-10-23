@@ -109,6 +109,26 @@ struct hx_raw_state {
 	__aligned_u64 epoch;
 };
 
+/* Additive event tail: the original 16-byte state prefix stays unchanged.
+ * Old producers leave the tail zero, which means the stop reason is unknown.
+ * Only an explicit power/stream stop may cancel a pending recovery deadline;
+ * initialization and recovery also publish stopped events, with no stop bits.
+ */
+#define HX_RAW_STOP_KNOWN (1U << 0)
+#define HX_RAW_STOP_PANEL (1U << 1)
+#define HX_RAW_STOP_SUSPEND (1U << 2)
+#define HX_RAW_STOP_STREAM (1U << 3)
+#define HX_RAW_STOP_SHUTDOWN (1U << 4)
+#define HX_RAW_STOP_REASONS (HX_RAW_STOP_PANEL | HX_RAW_STOP_SUSPEND | \
+			     HX_RAW_STOP_STREAM | HX_RAW_STOP_SHUTDOWN)
+#define HX_RAW_STOP_FLAGS (HX_RAW_STOP_KNOWN | HX_RAW_STOP_REASONS)
+
+struct hx_raw_lifecycle {
+	struct hx_raw_state state;
+	__u32 stop_flags;
+	__u32 reserved;
+};
+
 #define VIDIOC_HIMAX_INFO _IOR('V', BASE_VIDIOC_PRIVATE, struct hx_raw_info)
 #define VIDIOC_HIMAX_COMMAND _IOW('V', BASE_VIDIOC_PRIVATE + 1, struct hx_raw_command)
 #define VIDIOC_HIMAX_REARM _IOW('V', BASE_VIDIOC_PRIVATE + 2, struct hx_raw_rearm)

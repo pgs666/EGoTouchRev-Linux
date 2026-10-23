@@ -101,7 +101,8 @@ struct SessionRecorder::Impl {
             events << '\n';
             break;
         case SessionKind::State:
-            events << "S " << e.hostTimeNs << ' ' << e.state.epoch << ' ' << e.state.running << '\n';
+            events << "S " << e.hostTimeNs << ' ' << e.state.epoch << ' ' << e.state.running
+                   << ' ' << e.stateFlags << '\n';
             break;
         case SessionKind::Release:
             events << "R " << e.hostTimeNs << '\n';
@@ -117,7 +118,7 @@ struct SessionRecorder::Impl {
         if (!raw || !events) Fail(EIO);
     }
     void Run() {
-        events << (origin == SessionOrigin::Fresh ? "HXSE 3 recovery\n" : "HXSE 2 live-no-checkpoint\n");
+        events << (origin == SessionOrigin::Fresh ? "HXSE 4 power\n" : "HXSE 4 live-no-checkpoint\n");
         for (;;) {
             SessionEvent event;
             while (queue.TryPop(event)) Write(event);
@@ -207,8 +208,11 @@ SessionReader::SessionReader(const char* path)
     if (m_error.empty()) {
         if (!m_events.getline(line.data(), line.size()))
             m_error = "Unsupported or missing HXSE sidecar";
-        else if (std::string_view(line.data()) == "HXSE 2 live-no-checkpoint")
+        else if (std::string_view(line.data()) == "HXSE 2 live-no-checkpoint" ||
+                 std::string_view(line.data()) == "HXSE 4 live-no-checkpoint")
             m_error = "Live capture has no solver checkpoint; use raw --hxst replay, not --session";
+        else if (std::string_view(line.data()) == "HXSE 4 power")
+            m_powerVersion = m_recoveryVersion = true;
         else if (std::string_view(line.data()) == "HXSE 3 recovery")
             m_recoveryVersion = true;
         else if (std::string_view(line.data()) != "HXSE 1")
@@ -250,7 +254,10 @@ bool SessionReader::Next(SessionEvent& e) {
         e.kind = SessionKind::State;
         e.state.version = HX_RAW_ABI_VERSION;
         in >> e.hostTimeNs >> e.state.epoch >> e.state.running;
-        valid = e.state.running <= 1;
+        if (m_powerVersion) in >> e.stateFlags;
+        valid = e.state.running <= 1 && !(e.stateFlags & ~HX_RAW_STOP_FLAGS) &&
+                (!e.stateFlags || (e.stateFlags & HX_RAW_STOP_KNOWN)) &&
+                !(e.state.running && (e.stateFlags & HX_RAW_STOP_REASONS));
     } else if (kind == "R") {
         e.kind = SessionKind::Release;
         in >> e.hostTimeNs;
